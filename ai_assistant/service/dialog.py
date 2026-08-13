@@ -6,6 +6,7 @@
 """
 import hashlib
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -77,16 +78,28 @@ class DialogEngine:
         self._sales_exten = sales_exten
         self._max_sessions = max_sessions
         self._sessions: Dict[str, _SessionState] = {}
+        # /dialog — обычная функция FastAPI, конкурентные звонки реально
+        # выполняют handle() в разных потоках одновременно. Без этой
+        # блокировки связка "проверить длину -> взять первый ключ итератором
+        # -> удалить -> вставить" не атомарна: два потока, упирающихся в
+        # потолок сессий одновременно, могут словить RuntimeError
+        # ("dictionary changed size during iteration") или KeyError на
+        # повторном удалении одного и того же "самого старого" ключа —
+        # оба валят конкретный звонок необработанным исключением (см.
+        # повторное ревью Task 9). Блокировка — только вокруг операций со
+        # словарём, без обращений к базе знаний или вычисления эмбеддингов.
+        self._sessions_lock = threading.Lock()
 
     def _session(self, linked_id: str) -> _SessionState:
-        if linked_id not in self._sessions:
-            if len(self._sessions) >= self._max_sessions:
-                # Словарь в Python 3.7+ хранит порядок вставки — первый ключ
-                # и есть самая старая живая сессия.
-                oldest_linked_id = next(iter(self._sessions))
-                del self._sessions[oldest_linked_id]
-            self._sessions[linked_id] = _SessionState()
-        return self._sessions[linked_id]
+        with self._sessions_lock:
+            if linked_id not in self._sessions:
+                if len(self._sessions) >= self._max_sessions:
+                    # Словарь в Python 3.7+ хранит порядок вставки — первый
+                    # ключ и есть самая старая живая сессия.
+                    oldest_linked_id = next(iter(self._sessions))
+                    del self._sessions[oldest_linked_id]
+                self._sessions[linked_id] = _SessionState()
+            return self._sessions[linked_id]
 
     def handle(self, prms: Dict[str, str]) -> List[Dict[str, str]]:
         linked_id = prms.get("linkedId", "")
@@ -112,9 +125,12 @@ class DialogEngine:
 
         # Разговор дошёл до конца (перевод на специалиста или на продажи) —
         # его состояние больше не понадобится, держать его в памяти дальше
-        # незачем.
+        # незачем. Та же блокировка, что и в _session(): удаление должно
+        # быть взаимно исключено с проверкой-вытеснением-вставкой оттуда,
+        # иначе смысла в блокировке там нет.
         if self._reaches(result, POINT_FINISHED):
-            self._sessions.pop(linked_id, None)
+            with self._sessions_lock:
+                self._sessions.pop(linked_id, None)
         return result
 
     @staticmethod

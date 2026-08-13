@@ -1,3 +1,6 @@
+import sys
+import threading
+
 import pytest
 
 from ai_assistant.service.dialog import (
@@ -304,3 +307,68 @@ def test_oldest_session_is_evicted_when_the_limit_is_reached():
 
     engine_obj.handle({"linkedId": "c", "conversationPoint": POINT_ASK_QUESTION, "silenceDetected": "True"})
     assert set(engine_obj._sessions) == {"b", "c"}  # "a" — самая старая, вытеснена
+
+
+def test_concurrent_session_creation_at_the_limit_does_not_crash_or_overflow():
+    """Повторное ревью Task 9: вытеснение самой старой сессии в _session() —
+    это последовательность "проверить длину -> взять первый ключ итератором
+    -> удалить -> вставить" без какой-либо защиты от одновременного доступа.
+    `/dialog` — обычная функция FastAPI, конкурентные звонки реально
+    выполняют handle() в разных потоках. Когда несколько потоков одновременно
+    упираются в потолок сессий, возможны RuntimeError ("dictionary changed
+    size during iteration") и KeyError на повторном удалении одного и того
+    же "самого старого" ключа — оба валят конкретный звонок необработанным
+    исключением.
+
+    Окно гонки очень узкое (весь конфликт — внутри пары строк кода), поэтому
+    здесь два усилителя: `threading.Barrier`, чтобы все потоки вошли в
+    handle() как можно синхроннее, и предельно частое переключение контекста
+    интерпретатора (`sys.setswitchinterval`). Без обоих усилителей сразу
+    гонка на этой машине не ловится за разумное время (проверено: с одним
+    только уменьшенным интервалом переключения — 0 падений за 10 прогонов;
+    с обоими усилителями и снятой блокировкой в коде — падения были в каждом
+    из 10 прогонов, 8-16 из 64 вызовов). Предыдущее значение интервала
+    переключения обязательно возвращается в finally, иначе весь остальной
+    набор тестов после этого теста станет заметно медленнее."""
+    max_sessions = 20
+    engine_obj = DialogEngine(
+        FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500", max_sessions=max_sessions
+    )
+    for i in range(max_sessions):
+        engine_obj.handle(
+            {"linkedId": "seed-{0}".format(i), "conversationPoint": POINT_ASK_QUESTION, "silenceDetected": "True"}
+        )
+    assert len(engine_obj._sessions) == max_sessions
+
+    worker_count = 64
+    errors = []
+    errors_lock = threading.Lock()
+    barrier = threading.Barrier(worker_count)
+
+    def worker(i):
+        barrier.wait()  # выровнять старт всех потоков как можно точнее
+        try:
+            engine_obj.handle(
+                {
+                    "linkedId": "new-{0}".format(i),
+                    "conversationPoint": POINT_ASK_QUESTION,
+                    "silenceDetected": "True",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 — тест должен увидеть любое падение
+            with errors_lock:
+                errors.append(exc)
+
+    previous_switch_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(worker_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(previous_switch_interval)
+
+    assert errors == []
+    assert len(engine_obj._sessions) <= max_sessions

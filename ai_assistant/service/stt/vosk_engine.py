@@ -8,7 +8,13 @@ from ai_assistant.service.stt.base import SttEngine
 
 
 class VoskEngine(SttEngine):
-    target_sample_rate = 8000
+    # Модель vosk-model-small-ru-0.22 обучена на 16 кГц (conf/mfcc.conf:
+    # --sample-frequency=16000). Библиотека vosk при несовпадении заявленной
+    # и модельной частоты не пересчитывает звук сама, а падает с
+    # "Sampling frequency mismatch" — своего ресемплинга у неё нет.
+    # Телефонные 8 кГц поднимает до 16 кГц prepare_audio() перед вызовом
+    # transcribe(), см. base.py.
+    target_sample_rate = 16000
 
     def __init__(self, model_path: str):
         from vosk import KaldiRecognizer, Model, SetLogLevel

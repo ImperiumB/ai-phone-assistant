@@ -10,6 +10,9 @@ RLock вокруг agi.*, неблокирующая озвучка через b
 Playback для синхронной озвучки против background для асинхронной, аварийный
 перевод звонка на сопровождение при отказе речевого сервиса.
 
+Реальные переводы (Goto) заперты за REAL_REDIRECT (по умолчанию False) —
+прототип не должен дёргать живых операторов, см. РАЗВЁРТЫВАНИЕ.md.
+
 ВНИМАНИЕ: исполняется под Python 3.9.2. Синтаксис 3.10+ не использовать.
 """
 import os
@@ -25,6 +28,15 @@ import requests
 ACTION_RECOGNIZE = "Recognize"
 ACTION_REDIRECT = "Redirect"
 ACTION_HANGUP = "Hangup"
+
+# Спецификация ("Сценарий звонка") прямо требует: реального перевода в
+# очередь в прототипе нет — только запись в лог, иначе пока человек
+# отлаживает бота, отделы продаж и сопровождения получают поток тестовых
+# звонков. Выключатель — единственное место в скрипте, которое решает, идёт
+# ли команда перехода Goto реально или только пишется в лог станции.
+# Включать только после успешных замеров задержки/качества/нагрузки и
+# предупреждения смен (описано в РАЗВЁРТЫВАНИЕ.md).
+REAL_REDIRECT = False
 
 CHUNK_SIZE = 8000  # 4000 отсчётов = 0,5 секунды при 8000 Гц
 CALL_TIMEOUT_S = 120
@@ -189,11 +201,24 @@ def _main():  # pragma: no cover - требует живого канала Aste
         if step == "listen":
             return True
         if step == "redirect":
-            log_it("REDIRECT -> {0}".format(answer.redirect_exten))
-            with _agi_lock:
-                agi.appexec("Goto", "pstn-out,{0},1".format(answer.redirect_exten))
-                agi.set_variable("ScriptFinished", True)
-            _redirect_done = True
+            if REAL_REDIRECT:
+                log_it("REDIRECT -> {0}".format(answer.redirect_exten))
+                with _agi_lock:
+                    agi.appexec("Goto", "pstn-out,{0},1".format(answer.redirect_exten))
+                    agi.set_variable("ScriptFinished", True)
+                _redirect_done = True
+            else:
+                # REAL_REDIRECT выключен: прототип не должен дёргать живых
+                # операторов. Пишем в лог станции, куда бы перевели звонок и
+                # почему, и корректно завершаем разговор сами вместо Goto.
+                log_it(
+                    "REDIRECT (dry-run, REAL_REDIRECT=False) -> would go to "
+                    "exten {0}, reason: dialog decided Redirect".format(answer.redirect_exten)
+                )
+                with _agi_lock:
+                    agi.set_variable("ScriptFinished", True)
+                    agi.hangup()
+                _redirect_done = True
             return False
         with _agi_lock:
             agi.set_variable("ScriptFinished", True)
@@ -213,13 +238,30 @@ def _main():  # pragma: no cover - требует живого канала Aste
                     agi.appexec("Playback", SERVICE_UNAVAILABLE_SOUND)
         except Exception as playback_error:
             log_it("FAILOVER PLAYBACK ERROR: {0}".format(playback_error))
-        try:
-            with _agi_lock:
-                agi.appexec("Goto", "pstn-out,{0},1".format(SUPPORT_FALLBACK_EXTEN))
-                agi.set_variable("ScriptFinished", True)
-            _redirect_done = True
-        except Exception as redirect_error:
-            log_it("FAILOVER REDIRECT ERROR: {0}".format(redirect_error))
+        if REAL_REDIRECT:
+            try:
+                with _agi_lock:
+                    agi.appexec("Goto", "pstn-out,{0},1".format(SUPPORT_FALLBACK_EXTEN))
+                    agi.set_variable("ScriptFinished", True)
+                _redirect_done = True
+            except Exception as redirect_error:
+                log_it("FAILOVER REDIRECT ERROR: {0}".format(redirect_error))
+        else:
+            # То же правило "не дёргать живых операторов" действует и на
+            # аварийный путь: клиент уже услышал фразу про перевод, реального
+            # Goto на сопровождение не делаем — только запись в лог и
+            # корректное завершение разговора.
+            log_it(
+                "FAILOVER (dry-run, REAL_REDIRECT=False) -> would go to "
+                "exten {0}".format(SUPPORT_FALLBACK_EXTEN)
+            )
+            try:
+                with _agi_lock:
+                    agi.set_variable("ScriptFinished", True)
+                    agi.hangup()
+                _redirect_done = True
+            except Exception as hangup_error:
+                log_it("FAILOVER HANGUP ERROR: {0}".format(hangup_error))
 
     def audio_stream(audio_source):
         yield speech_pb2.StreamRequest(session_id=linked_id)

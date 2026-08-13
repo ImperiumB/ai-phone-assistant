@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package speech;
+
+// Двунаправленный поток: клиент шлёт куски аудио, сервис отвечает событиями.
+// Типы событий намеренно повторяют яндексовые, чтобы ветвление в AGI-скрипте не менялось.
+service Speech {
+  rpc Recognize(stream StreamRequest) returns (stream StreamResponse);
+}
+
+message StreamRequest {
+  // Первым сообщением клиент шлёт session_id (linked_id звонка), дальше — только аудио.
+  string session_id = 1;
+  // PCM signed 16 бит, 8000 Гц, моно.
+  bytes audio_chunk = 2;
+}
+
+message StreamResponse {
+  enum EventType {
+    UNSPECIFIED = 0;
+    PARTIAL = 1;
+    FINAL = 2;
+    SILENCE = 3;
+  }
+  EventType type = 1;
+  string text = 2;
+  int32 silence_ms = 3;
+}

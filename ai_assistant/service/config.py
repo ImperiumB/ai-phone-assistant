@@ -1,0 +1,48 @@
+"""Настройки сервиса. Читаются из переменных окружения с префиксом AIA_."""
+import os
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Config:
+    grpc_port: int
+    http_port: int
+    stt_engine: str
+    tts_model: str
+    tts_voice: str
+    embedder_model: str
+    similarity_threshold: float
+    silence_timeout_ms: int
+    utterance_pause_ms: int
+    stt_timeout_s: int
+    knowledge_path: str
+    tts_cache_dir: str
+
+
+def _env_str(name: str, default: str) -> str:
+    return os.environ.get("AIA_" + name, default)
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get("AIA_" + name, default))
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.environ.get("AIA_" + name, default))
+
+
+def load_config() -> Config:
+    return Config(
+        grpc_port=_env_int("GRPC_PORT", 50051),
+        http_port=_env_int("HTTP_PORT", 8080),
+        stt_engine=_env_str("STT_ENGINE", "vosk"),
+        tts_model=_env_str("TTS_MODEL", "v4_ru"),
+        tts_voice=_env_str("TTS_VOICE", "baya"),
+        embedder_model=_env_str("EMBEDDER_MODEL", "ai-forever/ru-en-RoSBERTa"),
+        similarity_threshold=_env_float("SIMILARITY_THRESHOLD", 0.75),
+        silence_timeout_ms=_env_int("SILENCE_TIMEOUT_MS", 15000),
+        utterance_pause_ms=_env_int("UTTERANCE_PAUSE_MS", 3000),
+        stt_timeout_s=_env_int("STT_TIMEOUT_S", 10),
+        knowledge_path=_env_str("KNOWLEDGE_PATH", "ai_assistant/knowledge_base.json"),
+        tts_cache_dir=_env_str("TTS_CACHE_DIR", "/tmp/aia_tts_cache"),
+    )

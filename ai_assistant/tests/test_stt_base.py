@@ -63,6 +63,7 @@ def test_vosk_recognises_speech_from_a_wav_file():
     import os
     import wave
 
+    from ai_assistant.service.stt.base import prepare_audio
     from ai_assistant.service.stt.vosk_engine import VoskEngine
 
     model_path = os.environ.get("AIA_VOSK_MODEL_PATH")
@@ -74,9 +75,10 @@ def test_vosk_recognises_speech_from_a_wav_file():
 
     with wave.open(sample, "rb") as handle:
         assert handle.getframerate() == 8000
-        pcm = handle.readframes(handle.getnframes())
+        pcm8k = handle.readframes(handle.getnframes())
 
     engine = VoskEngine(model_path)
-    text = engine.transcribe(pcm)
+    assert engine.target_sample_rate == 16000
+    text = engine.transcribe(prepare_audio(pcm8k, engine.target_sample_rate))
     assert isinstance(text, str)
     assert text.strip()

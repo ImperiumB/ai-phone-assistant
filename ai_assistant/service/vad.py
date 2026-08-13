@@ -1,10 +1,28 @@
 """Нарезка потока на реплики. Заменяет EOU-классификатор Яндекса."""
 import math
 from dataclasses import dataclass
-from typing import List
+from typing import List, Protocol
 
 FRAME_SAMPLES = 256  # Silero VAD на 8000 Гц работает окном 256 отсчётов
 FRAME_BYTES = FRAME_SAMPLES * 2
+
+
+class VoiceDetector(Protocol):
+    """Протокол детектора речи.
+
+    Кадр — 256 отсчётов (512 байт) при 8000 Гц, что равно 32 миллисекундам.
+    """
+
+    def is_speech(self, frame: bytes) -> bool:
+        """Определить, содержит ли кадр речь.
+
+        Args:
+            frame: 512 байт (256 int16 отсчётов) при 8000 Гц.
+
+        Returns:
+            True если обнаружена речь, False если молчание.
+        """
+        ...
 
 
 @dataclass
@@ -38,7 +56,7 @@ class SileroVoiceDetector:
 
 
 class UtteranceSegmenter:
-    def __init__(self, detector, pause_ms: int, silence_timeout_ms: int, sample_rate: int = 8000):
+    def __init__(self, detector: VoiceDetector, pause_ms: int, silence_timeout_ms: int, sample_rate: int = 8000):
         self._detector = detector
         self._frame_ms = int(FRAME_SAMPLES * 1000 / sample_rate)
         # Округление вверх: иначе накопленная тишина оказывается КОРОЧЕ заданного порога

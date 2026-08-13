@@ -1,7 +1,5 @@
 import struct
 
-import pytest
-
 from ai_assistant.service.vad import SegmentEvent, UtteranceSegmenter
 
 FRAME_SAMPLES = 256
@@ -106,3 +104,20 @@ def test_reset_drops_accumulated_audio():
     seg.reset()
     events = seg.feed(silent_frame() * 4)
     assert [e for e in events if e.kind == "utterance"] == []
+
+
+def test_utterance_not_emitted_one_frame_before_pause():
+    # Пауза 100 мс = 4 кадра. 3 кадра должны быть недостаточными.
+    seg = segmenter(pause_ms=100)
+    seg.feed(speech_frame() * 3)
+    events = seg.feed(silent_frame() * 3)
+    utterances = [e for e in events if e.kind == "utterance"]
+    assert utterances == []
+
+
+def test_silence_event_not_emitted_one_frame_before_timeout():
+    # Таймаут 500 мс = 16 кадров. 15 кадров должны быть недостаточными.
+    seg = segmenter(silence_timeout_ms=500)
+    events = seg.feed(silent_frame() * 15)
+    silences = [e for e in events if e.kind == "silence"]
+    assert silences == []

@@ -106,3 +106,47 @@ def test_gigaam_recognises_speech_from_a_wav_file():
     text = engine.transcribe(prepare_audio(pcm8k, engine.target_sample_rate))
     assert isinstance(text, str)
     assert text.strip()
+
+
+def _gigaam_engine_without_model():
+    """GigaamEngine с пропущенным __init__: без тяжёлого импорта gigaam и без
+    загрузки весов. Годится только для проверки защитной ветки transcribe()
+    на вырожденном входе — до модели там дело не доходит.
+    """
+    from ai_assistant.service.stt.gigaam_engine import GigaamEngine
+
+    return object.__new__(GigaamEngine)
+
+
+def test_gigaam_empty_input_returns_empty_string_without_touching_the_model():
+    engine = _gigaam_engine_without_model()
+    assert engine.transcribe(b"") == ""
+
+
+def test_gigaam_audio_shorter_than_threshold_returns_empty_string():
+    from ai_assistant.service.stt.gigaam_engine import MIN_TRANSCRIBABLE_SECONDS
+
+    engine = _gigaam_engine_without_model()
+    short_samples = int(engine.target_sample_rate * MIN_TRANSCRIBABLE_SECONDS) - 1
+    assert short_samples > 0
+    pcm = struct.pack("<{0}h".format(short_samples), *([0] * short_samples))
+    assert engine.transcribe(pcm) == ""
+
+
+def test_gigaam_odd_length_input_returns_empty_string():
+    engine = _gigaam_engine_without_model()
+    # 2401 байт не делится на 2 (16 бит на отсчёт) — заведомо битый обрывок.
+    assert engine.transcribe(b"\x00" * 2401) == ""
+
+
+def test_gigaam_matches_vosks_empty_input_behaviour():
+    """Суть замечания ревью: два движка, вызываемые через общий интерфейс
+    SttEngine, обязаны одинаково молчать на пустом входе, а не только один
+    из них. VoskEngine.transcribe() читает self._model/self._recognizer_class,
+    которые расставляет только __init__ (там же живёт загрузка модели), так
+    что через object.__new__ его без реальной модели не проверить — здесь
+    фиксируем поведение GigaamEngine, а идентичное поведение VoskEngine на
+    этом же входе проверено вручную на реальной модели (см. task-8-report.md).
+    """
+    engine = _gigaam_engine_without_model()
+    assert engine.transcribe(b"") == ""

@@ -1,6 +1,7 @@
 import os
 import struct
 import sys
+import threading
 import time
 from concurrent import futures
 
@@ -287,3 +288,84 @@ def test_grpc_server_stop_bounds_shutdown_even_with_an_active_call():
 
 def test_main_defines_a_positive_bounded_grpc_shutdown_grace_period():
     assert 0 < GRPC_SHUTDOWN_GRACE_SECONDS <= 30
+
+
+def test_dialog_stage_is_marked_on_the_shared_timeline_for_matching_call(tmp_path):
+    """Item 3 финального ревью: STAGE_DIALOG_DONE нигде не помечался, хотя
+    объявлен в metrics.py. Проверяем, что /dialog находит таймлайн,
+    оставленный Recognize() для того же звонка (session_id == linkedId), и
+    дописывает в него завершение решения диалога — на том же объекте,
+    который уже лежит в /metrics."""
+    from ai_assistant.service.metrics import STAGE_DIALOG_DONE
+
+    sink = []
+    active_timelines = {}
+    timelines_lock = threading.Lock()
+
+    script = [[SegmentEvent(kind="utterance", pcm=pcm(800))]]
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter(script),
+        FakeEngine(),
+        timeline_sink=sink,
+        active_timelines=active_timelines,
+        timelines_lock=timelines_lock,
+    )
+    list(servicer.Recognize(FakeRequestIterator("call-7", [pcm(400)]), context=None))
+
+    assert "call-7" in active_timelines
+    assert STAGE_DIALOG_DONE not in sink[0]["stages"]
+
+    phrases = Phrases(
+        greeting="Здравствуйте", misrecognition="?", transfer="Перевожу", silence="?"
+    )
+    dialog_engine = DialogEngine(FakeKnowledge(), phrases, support_exten="489", sales_exten="500")
+    app = build_http_app(
+        dialog_engine,
+        FakeTtsCache(tmp_path),
+        voice="baya",
+        active_timelines=active_timelines,
+        timelines_lock=timelines_lock,
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/dialog",
+        json={
+            "prms": [
+                {"Key": "linkedId", "Value": "call-7"},
+                {"Key": "conversationPoint", "Value": "AskQuestion"},
+                {"Key": "recognizedText", "Value": "стиральная машина не отжимает"},
+            ]
+        },
+    )
+    assert response.status_code == 200
+
+    # Запись потребляется /dialog — второй раз для того же хвоста разговора
+    # найти нечего, случайная реплика тишины не должна помечать чужой замер.
+    assert "call-7" not in active_timelines
+    assert STAGE_DIALOG_DONE in sink[0]["stages"]
+    assert "stt_done->dialog_done" in sink[0]["durations"]
+
+
+def test_dialog_endpoint_without_shared_timelines_still_works(client):
+    """build_http_app без active_timelines (как в старом fixture `client`
+    этого файла и в проде до этой правки) не должен падать — новые параметры
+    опциональны."""
+    response = client.post(
+        "/dialog",
+        json={"prms": [
+            {"Key": "linkedId", "Value": "call-8"},
+            {"Key": "conversationPoint", "Value": "Start"},
+        ]},
+    )
+    assert response.status_code == 200
+
+
+def test_tts_endpoint_logs_synthesis_duration(client, caplog):
+    """Item 3 финального ревью: ручка синтеза обязана мерить длительность и
+    писать её в лог — /tts не получает linkedId (контракт не меняем), так
+    что сопоставить с конкретным звонком это можно только по времени
+    вручную, но сам факт замера должен появиться."""
+    with caplog.at_level("INFO", logger="aia"):
+        response = client.get("/tts", params={"text": "здравствуйте"})
+    assert response.status_code == 200
+    assert any("TTS" in record.message for record in caplog.records)

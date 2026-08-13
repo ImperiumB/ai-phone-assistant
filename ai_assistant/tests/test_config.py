@@ -12,9 +12,10 @@ def test_defaults_are_applied(monkeypatch):
     assert cfg.http_port == 8080
     assert cfg.stt_engine == "vosk"
     assert cfg.similarity_threshold == pytest.approx(0.75)
-    assert cfg.utterance_pause_ms == 3000
+    assert cfg.utterance_pause_ms == 1500
     assert cfg.silence_timeout_ms == 15000
     assert cfg.stt_timeout_s == 10
+    assert cfg.tts_voice == "eugene"
 
 
 def test_environment_overrides_defaults(monkeypatch):

@@ -37,11 +37,14 @@ def load_config() -> Config:
         http_port=_env_int("HTTP_PORT", 8080),
         stt_engine=_env_str("STT_ENGINE", "vosk"),
         tts_model=_env_str("TTS_MODEL", "v4_ru"),
-        tts_voice=_env_str("TTS_VOICE", "baya"),
+        tts_voice=_env_str("TTS_VOICE", "eugene"),
         embedder_model=_env_str("EMBEDDER_MODEL", "ai-forever/ru-en-RoSBERTa"),
         similarity_threshold=_env_float("SIMILARITY_THRESHOLD", 0.75),
         silence_timeout_ms=_env_int("SILENCE_TIMEOUT_MS", 15000),
-        utterance_pause_ms=_env_int("UTTERANCE_PAUSE_MS", 3000),
+        # 1500, а не 3000: с трёхсекундной паузой ответ бота приходит через ~4 секунды
+        # после конца фразы, и разговор ощущается сломанным. Плата — бот перебьёт того,
+        # кто задумался дольше полутора секунд.
+        utterance_pause_ms=_env_int("UTTERANCE_PAUSE_MS", 1500),
         stt_timeout_s=_env_int("STT_TIMEOUT_S", 10),
         knowledge_path=_env_str("KNOWLEDGE_PATH", "ai_assistant/knowledge_base.json"),
         tts_cache_dir=_env_str("TTS_CACHE_DIR", "/tmp/aia_tts_cache"),

@@ -20,6 +20,15 @@ from fastapi.responses import FileResponse, JSONResponse
 #    звонок — даём разумный срок и после него завершаемся принудительно.
 MAX_TIMELINE_RECORDS = 500
 GRPC_SHUTDOWN_GRACE_SECONDS = 5
+# Тот же класс проблемы, что и MAX_TIMELINE_RECORDS/DEFAULT_MAX_SESSIONS
+# (dialog.py), но для реестра активных таймлайнов (Minor из повторного
+# ревью): он наполняется в Recognize() и вычищается только при обращении к
+# /dialog. Если звонок оборвался между этими моментами (сброс трубки,
+# срабатывание общего таймаута звонка, падение AGI-скрипта на станции) —
+# запись остаётся в реестре навсегда, а демон живёт постоянно. Предел ниже —
+# подстраховка на этот случай: самая старая запись вытесняется, как и в
+# dialog.py._session().
+MAX_ACTIVE_TIMELINES = 1000
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "proto"))
 import speech_pb2  # noqa: E402
@@ -56,6 +65,7 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
         timeline_sink: List[dict],
         active_timelines: Optional[Dict[str, Tuple[CallTimeline, dict]]] = None,
         timelines_lock: Optional[threading.Lock] = None,
+        max_active_timelines: int = MAX_ACTIVE_TIMELINES,
     ):
         self._segmenter_factory = segmenter_factory
         self._engine = engine
@@ -68,6 +78,7 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
         # продолжают работать как раньше, просто без сквозной разбивки.
         self._active_timelines = active_timelines
         self._timelines_lock = timelines_lock or threading.Lock()
+        self._max_active_timelines = max_active_timelines
 
     def Recognize(self, request_iterator, context):
         segmenter = self._segmenter_factory()
@@ -116,6 +127,18 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                     # обновление станет видно и в /metrics (там лежит именно
                     # этот объект, а не его копия).
                     with self._timelines_lock:
+                        if (
+                            session_id not in self._active_timelines
+                            and len(self._active_timelines) >= self._max_active_timelines
+                        ):
+                            # Тот же приём, что в dialog.py._session(): словарь
+                            # хранит порядок вставки, первый ключ — самая
+                            # старая запись. Проверяем "not in" отдельно,
+                            # чтобы повторная запись для ТОГО ЖЕ звонка
+                            # (следующая реплика в разговоре) не считалась
+                            # новой и не запускала вытеснение на ровном месте.
+                            oldest_session_id = next(iter(self._active_timelines))
+                            del self._active_timelines[oldest_session_id]
                         self._active_timelines[session_id] = (timeline, snapshot)
                 log.info("STT [%s]: %s | %s", session_id, text, timeline.durations())
 

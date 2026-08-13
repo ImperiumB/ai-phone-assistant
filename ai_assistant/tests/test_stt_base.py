@@ -82,3 +82,27 @@ def test_vosk_recognises_speech_from_a_wav_file():
     text = engine.transcribe(prepare_audio(pcm8k, engine.target_sample_rate))
     assert isinstance(text, str)
     assert text.strip()
+
+
+@pytest.mark.integration
+def test_gigaam_recognises_speech_from_a_wav_file():
+    """Требует установленного пакета gigaam и скачанных весов."""
+    import os
+    import wave
+
+    from ai_assistant.service.stt.base import prepare_audio
+    from ai_assistant.service.stt.gigaam_engine import GigaamEngine
+
+    sample = os.environ.get("AIA_TEST_WAV")
+    if not sample:
+        pytest.skip("AIA_TEST_WAV не задан")
+
+    with wave.open(sample, "rb") as handle:
+        assert handle.getframerate() == 8000
+        pcm8k = handle.readframes(handle.getnframes())
+
+    engine = GigaamEngine()
+    assert engine.target_sample_rate == 16000
+    text = engine.transcribe(prepare_audio(pcm8k, engine.target_sample_rate))
+    assert isinstance(text, str)
+    assert text.strip()

@@ -6,8 +6,13 @@ uvicorn==0.34.0
 # torch: на машине нет видеокарты, ставится с индекса для CPU:
 # pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch==2.13.0+cpu
-numpy==2.1.3
-scipy==1.14.1
+# torchaudio нужен GigaAM (preprocess.py делает FeatureExtractor на его
+# MelSpectrogram); pip install gigaam его не подтягивает — extra "torch" в
+# gigaam не включён по умолчанию. Ставится так же, с CPU-индекса:
+# pip install torchaudio --index-url https://download.pytorch.org/whl/cpu
+torchaudio==2.11.0+cpu
+numpy==2.5.0
+scipy==1.18.0
 sentence-transformers==3.3.1
 vosk==0.3.45
 pytest==8.3.4
@@ -15,3 +20,12 @@ httpx==0.28.1
 # нужны SileroSynthesizer (ai_assistant/service/tts.py):
 certifi==2025.4.26
 omegaconf==2.3.1
+# GigaAM (Сбер, MIT) — второй движок распознавания, задача UL-17568/Task 8.
+# Тянет onnx, onnxruntime, hydra-core, sentencepiece, tqdm — версии этих
+# пакетов зафиксированы внутри gigaam==0.2.0 (Requires-Dist), отдельно не пинуем.
+gigaam @ git+https://github.com/salute-developers/GigaAM.git
+soundfile==0.14.0
+# gigaam.load_audio() декодирует и ресемплит вход системным ffmpeg (subprocess).
+# На машине без установленного ffmpeg это даёт бинарник как запасной вариант —
+# см. _ensure_ffmpeg_on_path() в service/stt/gigaam_engine.py.
+imageio-ffmpeg==0.6.0

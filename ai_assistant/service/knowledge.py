@@ -43,12 +43,29 @@ class KnowledgeBase:
         self._records = list(records)
         self._embedder = embedder
         self._threshold = threshold
-        self._vectors = self._encode_questions()
+        # Записи без заполненного уточняющего вопроса — это ещё не
+        # размеченные человеком неопознанные реплики (см. add() ниже и
+        # финальное ревью): раньше они сразу переиндексировались и начинали
+        # участвовать в поиске для следующих реплик и следующих звонков.
+        # Ветка обработки отвечает на пустую clarifying_question мгновенным
+        # переводом, поэтому дословное совпадение с такой записью на втором
+        # движке (та же ошибка распознавания на тех же словах) давало
+        # "нашли" без уточняющего вопроса вместо честного промаха — а два
+        # движка сравниваются именно на одинаковом материале, и база под
+        # ними внезапно становилась разной. self._searchable_records —
+        # подмножество self._records, которое реально участвует в поиске;
+        # self._records целиком используется только для save() (человек
+        # потом вручную заполнит уточняющие вопросы и перезапустит сервис).
+        self._searchable_records = self._searchable()
+        self._vectors = self._encode_questions(self._searchable_records)
 
-    def _encode_questions(self) -> Optional[np.ndarray]:
-        if not self._records:
+    def _searchable(self) -> List[KnowledgeRecord]:
+        return [r for r in self._records if r.clarifying_question]
+
+    def _encode_questions(self, records: List[KnowledgeRecord]) -> Optional[np.ndarray]:
+        if not records:
             return None
-        texts = [DOCUMENT_PREFIX + r.question for r in self._records]
+        texts = [DOCUMENT_PREFIX + r.question for r in records]
         return self._embedder.encode(texts)
 
     @property
@@ -75,7 +92,7 @@ class KnowledgeBase:
         # Векторы нормированы, поэтому скалярное произведение и есть косинусная близость.
         scores = self._vectors @ query
         best_index = int(np.argmax(scores))
-        return self._records[best_index], float(scores[best_index])
+        return self._searchable_records[best_index], float(scores[best_index])
 
     def search(self, text: str) -> Optional[Tuple[KnowledgeRecord, float]]:
         match = self.best_match(text)
@@ -84,10 +101,15 @@ class KnowledgeBase:
         return match
 
     def add(self, question: str) -> KnowledgeRecord:
+        # Уточняющий вопрос намеренно пуст: это неопознанная реплика,
+        # записанная для последующей ручной разметки (спецификация просит
+        # именно дописывать в файл, а не подмешивать в живой поиск). Раз
+        # clarifying_question пуст, запись не попадает в
+        # self._searchable_records — self._vectors пересчитывать не нужно,
+        # она и так не участвует в поиске.
         next_id = max((r.id for r in self._records), default=0) + 1
         record = KnowledgeRecord(id=next_id, question=question)
         self._records.append(record)
-        self._vectors = self._encode_questions()
         return record
 
     def save(self, path: str) -> None:

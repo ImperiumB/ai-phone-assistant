@@ -71,6 +71,10 @@ def test_utterance_is_emitted_after_the_pause():
     utterances = [e for e in events if e.kind == "utterance"]
     assert len(utterances) == 1
     assert len(utterances[0].pcm) == 3 * FRAME_BYTES
+    # Minor из повторного ревью: реплика, выданная по естественной паузе,
+    # обязана нести forced=False — иначе main.py не сможет отличить её от
+    # принудительной выдачи по потолку длины и решить, вычитать ли паузу.
+    assert utterances[0].forced is False
 
 
 def test_two_phrases_are_emitted_separately():
@@ -180,6 +184,10 @@ def test_utterance_is_forced_after_max_duration_without_a_pause():
     utterances = [e for e in events if e.kind == "utterance"]
     assert len(utterances) == 1
     assert len(utterances[0].pcm) == frames_needed * FRAME_BYTES
+    # Minor из повторного ревью: принудительная выдача обязана нести
+    # forced=True — в этот момент паузы не было вообще, main.py не должен
+    # вычитать pause_seconds из метки конца речи для такого события.
+    assert utterances[0].forced is True
 
 
 def test_utterance_not_forced_one_frame_before_the_max_duration():
@@ -211,6 +219,9 @@ def test_speech_after_a_forced_utterance_accumulates_from_scratch():
     utterances = [e for e in third if e.kind == "utterance"]
     assert len(utterances) == 1
     assert len(utterances[0].pcm) == 2 * FRAME_BYTES
+    # Следующая после принудительной реплика выдана обычной паузой —
+    # forced обязан вернуться к False, а не залипнуть в True.
+    assert utterances[0].forced is False
 
 
 def test_reset_resets_the_detector_too():

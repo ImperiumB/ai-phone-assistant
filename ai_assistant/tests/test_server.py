@@ -334,6 +334,44 @@ def test_speech_end_mark_is_shifted_back_by_the_segmenter_pause():
     assert duration >= pause_ms * 0.9
 
 
+def test_forced_utterance_does_not_shift_speech_end_by_the_pause():
+    """Minor из повторного ревью: при принудительной выдаче по потолку длины
+    (MAX_UTTERANCE_SECONDS в vad.py) паузы не было вообще — вычитать
+    pause_seconds из метки конца речи нельзя, иначе для длинного монолога
+    замер оказался бы завышен на несуществующие секунды. pause_ms здесь
+    заведомо огромный, чтобы естественная пауза не успела сработать раньше
+    потолка: если бы поправка на паузу всё равно применилась (баг),
+    длительность оказалась бы порядка pause_seconds — часы, а не доли
+    секунды."""
+    from ai_assistant.service.vad import MAX_UTTERANCE_SECONDS, UtteranceSegmenter
+
+    class InstantAmplitudeDetector:
+        def is_speech(self, frame):
+            first = struct.unpack("<h", frame[:2])[0]
+            return first != 0
+
+        def reset(self):
+            pass
+
+    real_segmenter = UtteranceSegmenter(
+        InstantAmplitudeDetector(), pause_ms=10 ** 9, silence_timeout_ms=10 ** 9
+    )
+
+    sink = []
+    servicer = SpeechServicer(lambda: real_segmenter, FakeEngine(), timeline_sink=sink)
+
+    frame_ms = 32
+    frames_needed = -(-int(MAX_UTTERANCE_SECONDS * 1000) // frame_ms)  # ceil
+    speech = pcm(256) * frames_needed
+    requests = FakeRequestIterator("call-forced", [speech])
+
+    list(servicer.Recognize(requests, context=None))
+
+    assert len(sink) == 1
+    duration = sink[0]["durations"]["speech_end->stt_done"]
+    assert duration < 1000.0
+
+
 def test_active_timelines_registry_evicts_the_oldest_entry_when_full():
     """Minor из повторного ревью: реестр активных таймлайнов наполняется в
     Recognize() и вычищается только при обращении к /dialog. Если звонок

@@ -51,3 +51,29 @@ def test_as_dict_carries_session_and_stages():
     assert payload["session_id"] == "call-4"
     assert payload["total_ms"] == pytest.approx(1000.0)
     assert payload["durations"]["speech_end->stt_done"] == pytest.approx(1000.0)
+
+
+def test_mark_with_offset_places_the_stage_earlier_than_the_current_clock_value():
+    """Item 4 финального ревью: реплика рождается только после pause_ms
+    тишины, а метка конца речи раньше ставилась в этот же момент — замер
+    честно показывал работу движка, но не реальное ожидание абонента.
+    mark_with_offset("сейчас минус пауза") должен сдвинуть метку назад."""
+    timeline = CallTimeline("call-5", clock=FakeClock([10.0, 10.2]))
+    timeline.mark_with_offset(STAGE_SPEECH_END, seconds_ago=3.0)
+    timeline.mark(STAGE_STT_DONE)
+    durations = timeline.durations()
+    # (10.2) - (10.0 - 3.0) = 3.2 с = 3200 мс — включает и "виртуальный"
+    # сдвиг назад на паузу, и реальное время между вызовами mark().
+    assert durations["speech_end->stt_done"] == pytest.approx(3200.0)
+
+
+def test_mark_with_offset_of_zero_behaves_like_a_plain_mark():
+    timeline_offset = CallTimeline("call-6", clock=FakeClock([5.0, 5.5]))
+    timeline_offset.mark_with_offset(STAGE_SPEECH_END, seconds_ago=0.0)
+    timeline_offset.mark(STAGE_STT_DONE)
+
+    timeline_plain = CallTimeline("call-6", clock=FakeClock([5.0, 5.5]))
+    timeline_plain.mark(STAGE_SPEECH_END)
+    timeline_plain.mark(STAGE_STT_DONE)
+
+    assert timeline_offset.durations() == timeline_plain.durations()

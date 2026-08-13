@@ -290,6 +290,43 @@ def test_main_defines_a_positive_bounded_grpc_shutdown_grace_period():
     assert 0 < GRPC_SHUTDOWN_GRACE_SECONDS <= 30
 
 
+def test_speech_end_mark_is_shifted_back_by_the_segmenter_pause():
+    """Item 4 финального ревью: раньше метка конца речи ставилась в момент,
+    когда сегментатор заметил паузу ("сейчас"), а не в момент, когда клиент
+    реально замолчал ("сейчас минус пауза"). С реальным UtteranceSegmenter
+    (без FakeSegmenter) и почти мгновенным FakeEngine speech_end->stt_done
+    должно быть не меньше самой паузы VAD — иначе поправка не применяется."""
+    from ai_assistant.service.vad import UtteranceSegmenter
+
+    class InstantAmplitudeDetector:
+        def is_speech(self, frame):
+            first = struct.unpack("<h", frame[:2])[0]
+            return first != 0
+
+        def reset(self):
+            pass
+
+    pause_ms = 100
+    real_segmenter = UtteranceSegmenter(
+        InstantAmplitudeDetector(), pause_ms=pause_ms, silence_timeout_ms=5000
+    )
+
+    sink = []
+    servicer = SpeechServicer(lambda: real_segmenter, FakeEngine(), timeline_sink=sink)
+
+    speech = pcm(256) * 3
+    silence = struct.pack("<{0}h".format(256), *([0] * 256)) * 4
+    requests = FakeRequestIterator("call-pause", [speech, silence])
+
+    list(servicer.Recognize(requests, context=None))
+
+    assert len(sink) == 1
+    duration = sink[0]["durations"]["speech_end->stt_done"]
+    # pause_ms=100 округляется вверх до 128 мс (4 кадра по 32 мс) —
+    # см. test_vad.py::test_pause_seconds_matches_the_rounded_up_pause_in_frames.
+    assert duration >= pause_ms * 0.9
+
+
 def test_dialog_stage_is_marked_on_the_shared_timeline_for_matching_call(tmp_path):
     """Item 3 финального ревью: STAGE_DIALOG_DONE нигде не помечался, хотя
     объявлен в metrics.py. Проверяем, что /dialog находит таймлайн,

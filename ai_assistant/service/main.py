@@ -85,7 +85,14 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                     continue
 
                 timeline = CallTimeline(session_id)
-                timeline.mark(STAGE_SPEECH_END)
+                # Точка отсчёта — не "сейчас", а "сейчас минус длительность
+                # паузы из настроек" (Important из финального ревью): реплика
+                # рождается только после pause_seconds тишины, и метка "конец
+                # речи" честно показывала бы только работу движка, занижая
+                # реальное ожидание абонента на всю длительность паузы.
+                # getattr — на случай сегментатора-заглушки без атрибута
+                # (тесты подставляют собственные, не обязанные его иметь).
+                timeline.mark_with_offset(STAGE_SPEECH_END, getattr(segmenter, "pause_seconds", 0.0))
                 try:
                     audio = prepare_audio(event.pcm, self._engine.target_sample_rate)
                     text = self._engine.transcribe(audio)

@@ -115,6 +115,13 @@ class UtteranceSegmenter:
         # (500 мс при кадре 32 мс дали бы 15 кадров = 480 мс).
         self._pause_frames = max(1, math.ceil(pause_ms / self._frame_ms))
         self._silence_timeout_frames = max(1, math.ceil(silence_timeout_ms / self._frame_ms))
+        # Фактическая (округлённая вверх до целого кадра) длительность паузы
+        # в секундах — используется вызывающей стороной (main.py), чтобы
+        # честно сдвинуть метку конца речи назад на длительность этой паузы
+        # (см. CallTimeline.mark_with_offset): реплика физически заканчивается
+        # в момент начала паузы, а не в момент, когда сегментатор наконец
+        # набрал её целиком и отдал событие.
+        self.pause_seconds = self._pause_frames * self._frame_ms / 1000.0
         self.reset()
 
     def reset(self) -> None:

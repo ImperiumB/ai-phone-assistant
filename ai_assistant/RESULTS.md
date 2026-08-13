@@ -38,14 +38,46 @@ bash-скрипте (фоновая цепочка `mkdir && ... && py ... &` б
 и первым занял порты 8080/50051. Второй, уже «правильно» отслеживаемый
 запуск, стартовал позже и **упал** при попытке занять порт 50051
 (`WSA Error 10048: Only one usage of each socket address... is normally
-permitted`) — что подтверждено трассировкой в его собственном логе.
+permitted`). Это подтверждено напрямую — файл лога того запуска сохранился в
+рабочем каталоге сессии (в репозиторий не входит, это временный файл), вот
+его последние строки как есть:
+
+```
+2026-08-13 17:18:22,290 INFO Загружаем движок распознавания vosk
+2026-08-13 17:18:23,980 INFO Загружаем VAD и синтез
+Using cache found in C:\Users\user/.cache\torch\hub\snakers4_silero-vad_master
+Using cache found in C:\Users\user/.cache\torch\hub\snakers4_silero-models_master
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1786630707.617140   32044 chttp2_server.cc:1177] UNKNOWN:No address added out of total 1 resolved for '0.0.0.0:50051' {created_time:"2026-08-13T14:18:27.6171308+00:00", children:[UNKNOWN:Failed to prepare server socket {created_time:"2026-08-13T14:18:27.6170522+00:00", fd:3148, children:[UNAVAILABLE:bind: WSA Error (Only one usage of each socket address (protocol/network address/port) is normally permitted.
+ -- 10048) {grpc_status:14, created_time:"2026-08-13T14:18:27.6170045+00:00"}]}]}
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "...\ai_assistant\service\main.py", line 200, in <module>
+    main()
+  File "...\ai_assistant\service\main.py", line 164, in main
+    server.add_insecure_port("0.0.0.0:{0}".format(cfg.grpc_port))
+  File ".../grpc/_server.py", line 1473, in add_insecure_port
+    return _common.validate_port_binding_result(
+  File ".../grpc/_common.py", line 181, in validate_port_binding_result
+    raise RuntimeError(_ERROR_MESSAGE_PORT_BINDING_FAILED % address)
+RuntimeError: Failed to bind to address 0.0.0.0:50051; set GRPC_VERBOSITY=debug environment variable to see detailed error message.
+```
+
+(Пути в трассировке сокращены до `...` для читаемости — оригинал указывает на
+`ai_assistant/service/main.py` в этом репозитории и на пакет `grpc` в
+site-packages, ничего постороннего.)
+
 Curl-проверки `/health`/`/dialog`/`/tts`, которые тогда посчитали успешным
 замером второго (отслеживаемого) запуска, на самом деле отвечал осиротевший
-первый процесс — он был запущен раньше и к моменту проверки уже прогрелся.
-Таким образом, «17,9 с» — это не время холодного старта, а время, за которое
-второй (лишний) запуск скрипта успел заметить, что *другой*, ранее
-стартовавший процесс уже готов. Число недостоверно и в документах заменено
-на честные замеры выше.
+первый процесс — он был запущен раньше и к моменту проверки уже прогрелся
+(это уже логическая реконструкция по времени событий, а не отдельное прямое
+доказательство: лог осиротевшего процесса писался в другой файл, который я
+на тот момент не проверил и переписал последующими запусками, поэтому его
+самого предъявить не могу). Таким образом, «17,9 с» — это не время холодного
+старта, а время, за которое второй (лишний, в итоге упавший) запуск скрипта
+успел заметить, что *какой-то* процесс уже готов отвечать на этом порту.
+Число недостоверно и в документах заменено на честные замеры выше.
 
 Для этого перезамера использован более строгий метод: каждый движок
 запускался через `Start-Process` с известным `Id` сразу при старте (без

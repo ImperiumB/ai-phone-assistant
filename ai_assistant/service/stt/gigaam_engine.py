@@ -18,6 +18,18 @@ import wave
 
 from ai_assistant.service.stt.base import SttEngine
 
+# Реплики короче этого порога — тишина, шум или обрезок на границе VAD, а не
+# осмысленная речь; модель на них не рассчитана и падает необработанным
+# исключением из своего стека: ValueError на пустом буфере ("both buffer
+# length (0) and count (-1) must not be 0") и RuntimeError из torchaudio на
+# паддинге спектрограммы ("Padding size should be less than the
+# corresponding input dimension") на паре десятков байт тишины. Vosk на
+# таком же входе спокойно отдаёт пустую строку, и transcribe() обязан вести
+# себя так же: короче этого в реальном звонке осмысленной речи не бывает.
+MIN_TRANSCRIBABLE_SECONDS = 0.1
+
+_BYTES_PER_SAMPLE = 2  # PCM 16 бит моно
+
 
 def _ensure_ffmpeg_on_path() -> None:
     if shutil.which("ffmpeg"):
@@ -49,6 +61,17 @@ class GigaamEngine(SttEngine):
         self._model = gigaam.load_model(model_name)
 
     def transcribe(self, pcm: bytes) -> str:
+        # Отсекаем вырожденный вход до обращения к модели: пустой буфер, обрывок
+        # не по границе 16-битного отсчёта и любой отрезок короче
+        # MIN_TRANSCRIBABLE_SECONDS. Длительность считаем по факту, а не по
+        # числу байт — так порог не завязан на конкретный размер буфера.
+        sample_count = len(pcm) // _BYTES_PER_SAMPLE
+        if (
+            len(pcm) % _BYTES_PER_SAMPLE
+            or sample_count / self.target_sample_rate < MIN_TRANSCRIBABLE_SECONDS
+        ):
+            return ""
+
         # gigaam.transcribe() принимает путь к аудиофайлу, поэтому пишем
         # временный WAV на target_sample_rate.
         handle, path = tempfile.mkstemp(suffix=".wav")

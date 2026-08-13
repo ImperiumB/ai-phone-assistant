@@ -1,3 +1,4 @@
+import logging
 import sys
 import threading
 
@@ -20,17 +21,32 @@ from ai_assistant.service.knowledge import KnowledgeRecord
 
 
 class FakeKnowledge:
-    """Отдаёт заранее заданную запись, независимо от текста."""
+    """Отдаёт заранее заданную запись, независимо от текста.
 
-    def __init__(self, record=None, score=0.9):
+    best_match()/search()/threshold воспроизводят ту же связь, что и
+    настоящая KnowledgeBase (см. knowledge.py): best_match всегда отдаёт
+    record/score (или None, если record is None — имитирует пустую базу),
+    search() дополнительно проверяет score >= threshold. Это позволяет тестам
+    независимо воспроизвести и промах по порогу (record задан, score ниже
+    threshold), и пустую базу (record is None).
+    """
+
+    def __init__(self, record=None, score=0.9, threshold=0.75):
         self._record = record
         self._score = score
+        self.threshold = threshold
         self.added = []
 
-    def search(self, text):
+    def best_match(self, text):
         if self._record is None:
             return None
         return self._record, self._score
+
+    def search(self, text):
+        match = self.best_match(text)
+        if match is None or match[1] < self.threshold:
+            return None
+        return match
 
     def add(self, question):
         record = KnowledgeRecord(id=99, question=question)
@@ -267,6 +283,66 @@ def test_multiword_variant_matches_only_when_words_are_contiguous():
     scattered_result = answer(scattered_engine, conversationPoint=POINT_CONFIRM, recognizedText="все да верно")
     assert scattered_result["Action"] == ACTION_RECOGNIZE
     assert scattered_result["ConversationPoint"] == POINT_ASK_QUESTION
+
+
+def test_similarity_is_logged_on_a_hit(caplog):
+    """Item 6 финального ревью: порог близости — главный настроечный
+    параметр прототипа, подбирается на живых звонках. Лучшая мера близости,
+    текст-победитель и вердикт обязаны попадать в лог при попадании."""
+    with caplog.at_level(logging.INFO, logger="aia.dialog"):
+        answer(
+            engine(FakeKnowledge(RECORD, score=0.91, threshold=0.75)),
+            conversationPoint=POINT_ASK_QUESTION,
+            recognizedText="стиралка не крутит",
+        )
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "SIMILARITY" in messages
+    assert "0.9100" in messages
+    assert "above threshold" in messages
+    assert RECORD.question in messages
+
+
+def test_similarity_is_logged_on_a_miss_too(caplog):
+    """Тот же лог обязателен и на промахе — иначе после звонка видно только
+    "перевели на сопровождение" без понимания, было это чуть ниже порога
+    или модель вообще не поняла вопрос (см. финальное ревью)."""
+    with caplog.at_level(logging.INFO, logger="aia.dialog"):
+        answer(
+            engine(FakeKnowledge(RECORD, score=0.5, threshold=0.75)),
+            conversationPoint=POINT_ASK_QUESTION,
+            recognizedText="что-то непонятное",
+        )
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "SIMILARITY" in messages
+    assert "0.5000" in messages
+    assert "below threshold" in messages
+    assert RECORD.question in messages
+
+
+def test_similarity_is_logged_even_when_the_knowledge_base_is_empty(caplog):
+    with caplog.at_level(logging.INFO, logger="aia.dialog"):
+        answer(
+            engine(FakeKnowledge(None)),
+            conversationPoint=POINT_ASK_QUESTION,
+            recognizedText="во сколько вы открываетесь",
+        )
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "SIMILARITY" in messages
+
+
+def test_below_threshold_match_is_still_stored_and_transferred_to_support():
+    """Промах по порогу (best_match нашёл что-то, но ниже threshold) должен
+    вести себя так же, как и полное отсутствие совпадений — вопрос
+    записывается для последующей ручной разметки, звонок переводится."""
+    knowledge = FakeKnowledge(RECORD, score=0.5, threshold=0.75)
+    result = answer(
+        engine(knowledge),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="что-то непонятное",
+    )
+    assert knowledge.added == ["что-то непонятное"]
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["RedirectExten"] == "489"
 
 
 def test_finished_call_via_redirect_drops_its_session_state():

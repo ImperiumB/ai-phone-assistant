@@ -55,17 +55,33 @@ class KnowledgeBase:
     def records(self) -> List[KnowledgeRecord]:
         return list(self._records)
 
-    def search(self, text: str) -> Optional[Tuple[KnowledgeRecord, float]]:
+    @property
+    def threshold(self) -> float:
+        return self._threshold
+
+    def best_match(self, text: str) -> Optional[Tuple[KnowledgeRecord, float]]:
+        """Лучшее совпадение независимо от порога.
+
+        Нужен отдельно от search(): вызывающая сторона (DialogEngine) обязана
+        логировать меру близости и на промахе тоже (см. финальное ревью —
+        порог близости назван главным настроечным параметром прототипа, без
+        видимости промахов его невозможно подобрать на живых звонках).
+        search() при промахе просто отдаёт None, ничего не сообщая о том,
+        насколько близко было ближайшее совпадение.
+        """
         if self._vectors is None or not text.strip():
             return None
         query = self._embedder.encode([QUERY_PREFIX + text])[0]
         # Векторы нормированы, поэтому скалярное произведение и есть косинусная близость.
         scores = self._vectors @ query
         best_index = int(np.argmax(scores))
-        best_score = float(scores[best_index])
-        if best_score < self._threshold:
+        return self._records[best_index], float(scores[best_index])
+
+    def search(self, text: str) -> Optional[Tuple[KnowledgeRecord, float]]:
+        match = self.best_match(text)
+        if match is None or match[1] < self._threshold:
             return None
-        return self._records[best_index], best_score
+        return match
 
     def add(self, question: str) -> KnowledgeRecord:
         next_id = max((r.id for r in self._records), default=0) + 1

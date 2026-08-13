@@ -6,6 +6,17 @@ from typing import List, Protocol
 FRAME_SAMPLES = 256  # Silero VAD на 8000 Гц работает окном 256 отсчётов
 FRAME_BYTES = FRAME_SAMPLES * 2
 
+# Сегментатор раньше резал речь только по паузе, без потолка длины. GigaAM
+# жёстко отказывается распознавать реплику длиннее 25 секунд (бросает
+# исключение — см. main.py: SpeechServicer.Recognize перехватывает его и
+# молча пропускает реплику целиком). Живой человек, рассказывающий о поломке
+# без трёхсекундных пауз, — обычное дело: без потолка абонент не получил бы
+# ответа вообще и сидел бы в тишине до silence_timeout_ms. Значение меньше
+# фактического лимита GigaAM (25 с) — запас на округление кадров и на то,
+# что решение "хватит" принимается ПОСЛЕ очередного кадра, а не строго в
+# момент достижения предела.
+MAX_UTTERANCE_SECONDS = 20
+
 
 class VoiceDetector(Protocol):
     """Протокол детектора речи.
@@ -115,6 +126,7 @@ class UtteranceSegmenter:
         # (500 мс при кадре 32 мс дали бы 15 кадров = 480 мс).
         self._pause_frames = max(1, math.ceil(pause_ms / self._frame_ms))
         self._silence_timeout_frames = max(1, math.ceil(silence_timeout_ms / self._frame_ms))
+        self._max_speech_frames = max(1, math.ceil((MAX_UTTERANCE_SECONDS * 1000) / self._frame_ms))
         # Фактическая (округлённая вверх до целого кадра) длительность паузы
         # в секундах — используется вызывающей стороной (main.py), чтобы
         # честно сдвинуть метку конца речи назад на длительность этой паузы
@@ -149,6 +161,18 @@ class UtteranceSegmenter:
             self._speech += frame
             self._silence_frames = 0
             self._silence_reported = False
+            if len(self._speech) // FRAME_BYTES >= self._max_speech_frames:
+                # Потолок длины реплики: не дожидаемся паузы, отдаём то, что
+                # накопили, принудительно. Без этого длинная речь без пауз
+                # (обычное дело у живого человека) либо молча теряет ответ на
+                # движках с жёстким лимитом (GigaAM: 25 с), либо на движках
+                # без лимита даёт десятки секунд счёта — то есть движки
+                # оказываются в неравных условиях именно на реалистичном
+                # входе, который и должен их сравнивать.
+                utterance = SegmentEvent(kind="utterance", pcm=self._speech)
+                self._speech = b""
+                self._silence_frames = 0
+                return [utterance]
             return []
 
         self._silence_frames += 1

@@ -163,6 +163,56 @@ def test_pause_seconds_for_an_exact_multiple_of_the_frame_length():
     assert seg.pause_seconds == pytest.approx(0.096)
 
 
+def test_utterance_is_forced_after_max_duration_without_a_pause():
+    """Item 5 финального ревью: сегментатор раньше резал речь только по
+    паузе, без потолка длины. GigaAM жёстко отказывается распознавать
+    реплику длиннее 25 секунд — без потолка длинная речь без пауз молча
+    теряла бы ответ целиком. Пауза и таймаут тишины заведомо недостижимы,
+    чтобы проверить именно потолок, а не их."""
+    from ai_assistant.service.vad import FRAME_BYTES, MAX_UTTERANCE_SECONDS
+
+    frame_ms = 32
+    frames_needed = -(-int(MAX_UTTERANCE_SECONDS * 1000) // frame_ms)  # ceil
+
+    seg = segmenter(pause_ms=10 ** 9, silence_timeout_ms=10 ** 9)
+    events = seg.feed(speech_frame() * frames_needed)
+
+    utterances = [e for e in events if e.kind == "utterance"]
+    assert len(utterances) == 1
+    assert len(utterances[0].pcm) == frames_needed * FRAME_BYTES
+
+
+def test_utterance_not_forced_one_frame_before_the_max_duration():
+    from ai_assistant.service.vad import MAX_UTTERANCE_SECONDS
+
+    frame_ms = 32
+    frames_needed = -(-int(MAX_UTTERANCE_SECONDS * 1000) // frame_ms)
+
+    seg = segmenter(pause_ms=10 ** 9, silence_timeout_ms=10 ** 9)
+    events = seg.feed(speech_frame() * (frames_needed - 1))
+    assert [e for e in events if e.kind == "utterance"] == []
+
+
+def test_speech_after_a_forced_utterance_accumulates_from_scratch():
+    """После принудительной отдачи по потолку длины буфер должен обнулиться
+    — следующая речь не должна мгновенно снова упереться в тот же потолок."""
+    from ai_assistant.service.vad import FRAME_BYTES, MAX_UTTERANCE_SECONDS
+
+    frame_ms = 32
+    frames_needed = -(-int(MAX_UTTERANCE_SECONDS * 1000) // frame_ms)
+
+    seg = segmenter(pause_ms=100, silence_timeout_ms=10 ** 9)
+    first = seg.feed(speech_frame() * frames_needed)
+    assert len([e for e in first if e.kind == "utterance"]) == 1
+
+    second = seg.feed(speech_frame() * 2)
+    assert [e for e in second if e.kind == "utterance"] == []
+    third = seg.feed(silent_frame() * 4)
+    utterances = [e for e in third if e.kind == "utterance"]
+    assert len(utterances) == 1
+    assert len(utterances[0].pcm) == 2 * FRAME_BYTES
+
+
 def test_reset_resets_the_detector_too():
     """UtteranceSegmenter.reset() обязан сбрасывать не только свой буфер, но
     и состояние детектора речи (Critical 1 из ревью Task 9): у рекуррентной

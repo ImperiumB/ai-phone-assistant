@@ -203,3 +203,63 @@ def test_prms_conversion_round_trip():
     items = [{"Key": "a", "Value": "1"}, {"Key": "b", "Value": "2"}]
     assert prms_to_dict(items) == {"a": "1", "b": "2"}
     assert dict_to_prms({"a": "1"}) == [{"Key": "a", "Value": "1"}]
+
+
+def test_confirmation_with_trailing_punctuation_matches():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да.")
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["RedirectExten"] == "500"
+
+
+def test_confirmation_with_comma_and_extra_words_matches():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да, верно")
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["RedirectExten"] == "500"
+
+
+def test_word_containing_positive_answer_as_prefix_is_not_a_confirmation():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="даже не знаю")
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+    assert result["TextToSpeak"] == PHRASES.misrecognition
+
+
+def test_word_containing_positive_answer_as_substring_is_not_a_confirmation():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="неправда")
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["TextToSpeak"] == PHRASES.misrecognition
+
+
+def test_multiword_variant_matches_only_when_words_are_contiguous():
+    multi_record = KnowledgeRecord(
+        id=3,
+        question="можно доставить сегодня",
+        clarifying_question="Вам подходит доставка сегодня?",
+        positive_answers=["да все верно"],
+        negative_answers=["нет"],
+        positive_reply="Записываю доставку",
+        scenario="redirect_sales",
+        equipment_type="Доставка",
+    )
+
+    contiguous_engine = engine(FakeKnowledge(multi_record))
+    answer(contiguous_engine, conversationPoint=POINT_ASK_QUESTION, recognizedText="можно доставить сегодня")
+    contiguous_result = answer(
+        contiguous_engine, conversationPoint=POINT_CONFIRM, recognizedText="да, все верно, привозите"
+    )
+    assert contiguous_result["Action"] == ACTION_REDIRECT
+    assert contiguous_result["RedirectExten"] == "500"
+
+    scattered_engine = engine(FakeKnowledge(multi_record))
+    answer(scattered_engine, conversationPoint=POINT_ASK_QUESTION, recognizedText="можно доставить сегодня")
+    scattered_result = answer(scattered_engine, conversationPoint=POINT_CONFIRM, recognizedText="все да верно")
+    assert scattered_result["Action"] == ACTION_RECOGNIZE
+    assert scattered_result["ConversationPoint"] == POINT_ASK_QUESTION

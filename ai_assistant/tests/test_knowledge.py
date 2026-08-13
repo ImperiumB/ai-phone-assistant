@@ -79,6 +79,19 @@ def test_returns_none_when_nothing_is_close_enough(base):
     assert base.search("во сколько вы открываетесь") is None
 
 
+def test_best_match_returns_the_closest_record_even_below_threshold(base):
+    """Item 6 финального ревью: best_match() нужен для логирования меры
+    близости даже на промахе — в отличие от search(), он не режет по порогу."""
+    match = base.best_match("во сколько вы открываетесь")
+    assert match is not None
+    record, score = match
+    assert score < base.threshold
+
+
+def test_threshold_property_exposes_the_configured_value(base):
+    assert base.threshold == pytest.approx(0.75)
+
+
 def test_exact_question_matches_itself(base):
     found = base.search("не работает холодильник")
     assert found is not None

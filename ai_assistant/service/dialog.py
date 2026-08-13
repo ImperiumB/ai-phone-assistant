@@ -5,10 +5,13 @@
 поменяется только адрес.
 """
 import hashlib
+import logging
 import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+log = logging.getLogger("aia.dialog")
 
 _WORD_RE = re.compile(r"\w+")
 
@@ -138,6 +141,9 @@ class DialogEngine:
         return any(item.get("Key") == "ConversationPoint" and item.get("Value") == point for item in result)
 
     def _handle_question(self, state: _SessionState, text: str) -> List[Dict[str, str]]:
+        if text:
+            self._log_similarity(text)
+
         found = self._knowledge.search(text) if text else None
         if found is None:
             if text:
@@ -150,6 +156,26 @@ class DialogEngine:
 
         state.record = record
         return self._speak(record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
+
+    def _log_similarity(self, text: str) -> None:
+        # Порог близости — главный настроечный параметр прототипа, который
+        # подбирается на живых звонках (см. финальное ревью). Раньше мера
+        # близости при промахе просто терялась, а при попадании не
+        # логировалась — после звонка было видно только "перевели на
+        # сопровождение", без понимания, был ли это промах чуть ниже порога
+        # или модель вообще не поняла вопрос. Логируем обязательно в обеих
+        # ветках, независимо от порога — best_match(), а не search().
+        match = self._knowledge.best_match(text)
+        if match is None:
+            log.info("SIMILARITY: база знаний пуста, сравнивать не с чем | question=%r", text)
+            return
+        record, score = match
+        threshold = self._knowledge.threshold
+        verdict = "above threshold" if score >= threshold else "below threshold"
+        log.info(
+            "SIMILARITY %.4f (threshold=%.4f, %s) | question=%r | matched=%r",
+            score, threshold, verdict, text, record.question,
+        )
 
     def _handle_confirmation(self, state: _SessionState, text: str) -> List[Dict[str, str]]:
         record = state.record

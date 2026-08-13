@@ -44,8 +44,10 @@ class FakeEngine:
 
 
 class FakeKnowledge:
-    def search(self, text):
-        record = KnowledgeRecord(
+    threshold = 0.75
+
+    def _record(self):
+        return KnowledgeRecord(
             id=1,
             question="стиральная машина не отжимает",
             clarifying_question="Речь о стиральной машине?",
@@ -55,7 +57,12 @@ class FakeKnowledge:
             scenario="redirect_sales",
             equipment_type="Стиральные машины",
         )
-        return record, 0.9
+
+    def search(self, text):
+        return self._record(), 0.9
+
+    def best_match(self, text):
+        return self._record(), 0.9
 
     def add(self, question):
         return KnowledgeRecord(id=2, question=question)

@@ -23,10 +23,11 @@ py -3.12 -m pip install -r ai_assistant/requirements.txt
 Модель уже скачана и лежит в `C:\Users\user\models\vosk-model-small-ru-0.22`.
 Если разворачиваете заново:
 
-```bash
-mkdir -p ~/models && cd ~/models
-curl -LO https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
-unzip -q vosk-model-small-ru-0.22.zip
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\models" | Out-Null
+cd "$env:USERPROFILE\models"
+curl.exe -LO https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
+Expand-Archive vosk-model-small-ru-0.22.zip -DestinationPath .
 ```
 
 ### Запуск
@@ -36,12 +37,30 @@ unzip -q vosk-model-small-ru-0.22.zip
 переменная `AIA_VOSK_MODEL_PATH`, читается напрямую в `main.py`, в общий
 `Config` не входит.
 
-```bash
-export AIA_VOSK_MODEL_PATH="C:\Users\user\models\vosk-model-small-ru-0.22"
-export AIA_STT_ENGINE=vosk
+Машина сервиса — **Windows**. Команда `export` здесь не работает, это
+синтаксис Linux-оболочки: переменная молча не выставится, и Vosk упадёт с
+`Failed to create a model`, пытаясь загрузить модель по пустому пути.
+
+Проще всего запускать на GigaAM — ему путь к модели не нужен, он сам качает
+и кэширует веса, и он вдвое быстрее Vosk на распознавании:
+
+```powershell
+$env:AIA_STT_ENGINE = "gigaam"
 cd "C:\Users\user\Desktop\Новый бот-помощник"
 py -3.12 -m ai_assistant.service.main
 ```
+
+С Vosk путь к модели обязателен:
+
+```powershell
+$env:AIA_STT_ENGINE = "vosk"
+$env:AIA_VOSK_MODEL_PATH = "C:\Users\user\models\vosk-model-small-ru-0.22"
+cd "C:\Users\user\Desktop\Новый бот-помощник"
+py -3.12 -m ai_assistant.service.main
+```
+
+В `cmd` то же самое, но `set ПЕРЕМЕННАЯ=значение` без `$env:` и без кавычек,
+а переход в каталог — `cd /d "путь"`. Переменные живут только в текущем окне.
 
 Полный старт демона (загрузка эмбеддера базы знаний, движка распознавания,
 VAD и синтеза) занимает **около 32-35 секунд для обоих движков** — выбор

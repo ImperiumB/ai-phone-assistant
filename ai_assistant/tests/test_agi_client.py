@@ -1,11 +1,14 @@
 import ast
 import pathlib
 
+import grpc
 import pytest
+import requests
 
 from ai_assistant.agi.ai_assistant import (
     DialogAnswer,
     build_dialog_request,
+    decide_failure_step,
     decide_next_step,
     parse_dialog_response,
 )
@@ -64,6 +67,22 @@ def test_unknown_action_is_rejected_loudly():
                           conversation_point="", redirect_exten="")
     with pytest.raises(ValueError):
         decide_next_step(answer)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.exceptions.ConnectionError("service is down"),
+        requests.exceptions.Timeout("dialog timed out"),
+        grpc.RpcError(),
+    ],
+)
+def test_network_failure_leads_to_failover(error):
+    assert decide_failure_step(error) == "failover"
+
+
+def test_programming_error_leads_to_general_catch():
+    assert decide_failure_step(ValueError("bug in our own code")) == "reraise"
 
 
 def test_source_is_parseable_by_python_39_grammar():

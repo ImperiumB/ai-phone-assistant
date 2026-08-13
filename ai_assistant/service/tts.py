@@ -116,6 +116,8 @@ class SileroSynthesizer:
             )
         model.to(torch.device("cpu"))
         self._model = model
+        #: Читается кэшем: при смене модели старые файлы обязаны стать недействительными.
+        self.model_id = model_id
 
     def synthesize(self, text: str, voice: str) -> bytes:
         import numpy as np
@@ -140,7 +142,12 @@ class TtsCache:
         os.makedirs(cache_dir, exist_ok=True)
 
     def _path_for(self, text: str, voice: str) -> str:
-        key = "{0}|{1}".format(voice, text).encode("utf-8")
+        # В ключ входит и модель синтеза, а не только голос с текстом: иначе после
+        # смены модели (v4_ru -> v5_ru) кэш продолжает отдавать старый звук, и
+        # проверить новую модель на слух попросту невозможно — ровно на это
+        # напоролись 13.08.2026 при первом живом звонке.
+        model_id = getattr(self._synthesizer, "model_id", "")
+        key = "{0}|{1}|{2}".format(model_id, voice, text).encode("utf-8")
         digest = hashlib.sha1(key).hexdigest()[:16]
         return os.path.join(self._cache_dir, "aia_{0}.wav".format(digest))
 

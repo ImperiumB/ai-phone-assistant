@@ -210,6 +210,47 @@ def test_synthesize_asks_model_for_48k_and_downsamples_exactly_sixfold():
     assert len(pcm) == expected_samples * 2  # 16 бит = 2 байта на отсчёт
 
 
+class VersionedSynthesizer(FakeSynthesizer):
+    """Подставной синтезатор, у которого есть модель — как у боевого."""
+
+    def __init__(self, model_id):
+        super().__init__()
+        self.model_id = model_id
+
+
+def test_cache_distinguishes_models_for_the_same_text_and_voice(tmp_path):
+    """Смена модели обязана обесценивать кэш.
+
+    Иначе после переключения v4_ru -> v5_ru сервис отдаёт старый звук, и
+    проверить новую модель на слух невозможно — на этом сгорел первый живой
+    звонок 13.08.2026.
+    """
+    old = TtsCache(VersionedSynthesizer("v4_ru"), str(tmp_path))
+    new = TtsCache(VersionedSynthesizer("v5_ru"), str(tmp_path))
+
+    old_path = old.get("здравствуйте", "eugene")
+    new_path = new.get("здравствуйте", "eugene")
+
+    assert old_path != new_path
+    assert os.path.exists(old_path)
+    assert os.path.exists(new_path)
+
+
+def test_cache_still_reuses_files_within_one_model(tmp_path):
+    synth = VersionedSynthesizer("v5_ru")
+    cache = TtsCache(synth, str(tmp_path))
+    first = cache.get("здравствуйте", "eugene")
+    second = cache.get("здравствуйте", "eugene")
+    assert first == second
+    assert len(synth.calls) == 1
+
+
+def test_synthesizer_without_model_attribute_still_works(tmp_path):
+    """Подставные синтезаторы в тестах модели не объявляют — падать нельзя."""
+    cache = TtsCache(FakeSynthesizer(), str(tmp_path))
+    assert os.path.exists(cache.get("привет", "eugene"))
+
+
 @pytest.mark.integration
 def test_silero_produces_audible_speech(tmp_path):
     """Требует загрузки модели Silero. Запускать отдельно: pytest -m integration"""

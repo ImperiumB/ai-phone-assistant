@@ -13,7 +13,7 @@ torch==2.13.0+cpu
 torchaudio==2.11.0+cpu
 numpy==2.5.0
 scipy==1.18.0
-sentence-transformers==3.3.1
+sentence-transformers==5.7.0
 vosk==0.3.45
 pytest==8.3.4
 httpx==0.28.1

@@ -5,8 +5,11 @@
 поменяется только адрес.
 """
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+_WORD_RE = re.compile(r"\w+")
 
 POINT_START = "Start"
 POINT_ASK_QUESTION = "AskQuestion"
@@ -118,14 +121,23 @@ class DialogEngine:
     def _matches(text: str, variants: List[str]) -> bool:
         if not text:
             return False
-        words = text.split()
+        words = _WORD_RE.findall(text.lower())
+        if not words:
+            return False
         for variant in variants:
-            variant = variant.strip().lower()
-            if not variant:
+            variant_words = _WORD_RE.findall(variant.lower())
+            if not variant_words:
                 continue
-            # Точное совпадение слова или вхождение многословного варианта.
-            if variant in words or (" " in variant and variant in text):
-                return True
+            if len(variant_words) == 1:
+                # Однословный вариант — точное совпадение слова, без учёта пунктуации.
+                if variant_words[0] in words:
+                    return True
+                continue
+            # Многословный вариант — его слова должны идти в ответе подряд, в том же порядке.
+            span = len(variant_words)
+            for start in range(len(words) - span + 1):
+                if words[start:start + span] == variant_words:
+                    return True
         return False
 
     def _transfer(self, exten: str) -> List[Dict[str, str]]:

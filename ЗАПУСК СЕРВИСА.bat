@@ -1,46 +1,47 @@
 @echo off
-chcp 65001 >nul
-rem ---------------------------------------------------------------------------
-rem  Запуск речевого сервиса прототипа UL-17568.
-rem  Просто дважды кликнуть по файлу. Окно не закрывать — пока оно открыто,
-rem  сервис работает.
+rem ===========================================================================
+rem  ZAPUSK SERVISA - prototip UL-17568 (tiket: virtualnyy AI pomoshchnik)
 rem
-rem  Настройки ниже можно менять прямо здесь: поправил строку, сохранил,
-rem  закрыл окно сервиса, запустил заново.
-rem ---------------------------------------------------------------------------
+rem  Dvazhdy kliknut po faylu. Okno ne zakryvat: poka ono otkryto - servis
+rem  rabotaet. Nastroyki nizhe mozhno pravit pryamo zdes, potom perezapustit.
+rem
+rem  Kommentarii latinicey namerenno: komandnye fayly Windows lomayutsya
+rem  na kirillice iz-za kodirovok. Podrobnoe opisanie nastroek - v README.md.
+rem ===========================================================================
 
-rem Движок распознавания: gigaam (быстрее, путь к модели не нужен) или vosk
+rem Dvizhok raspoznavaniya: gigaam (bystree, put k modeli ne nuzhen) ili vosk
 set AIA_STT_ENGINE=gigaam
 
-rem Для vosk обязателен путь к распакованной модели, для gigaam строка не нужна
+rem Tolko dlya vosk: put k raspakovannoy modeli
 set AIA_VOSK_MODEL_PATH=C:\Users\user\models\vosk-model-small-ru-0.22
 
-rem Синтез речи: модель и голос
-rem   модели: v5_ru (новее), v4_ru
-rem   голоса: eugene, aidar, baya, xenia, kseniya
+rem Sintez rechi. Modeli: v5_ru (novee), v4_ru
+rem Golosa: eugene, aidar, baya, xenia, kseniya
 set AIA_TTS_MODEL=v5_ru
 set AIA_TTS_VOICE=eugene
 
-rem Пауза тишины, по которой бот понимает, что собеседник договорил.
-rem   Меньше — отвечает живее, но перебивает задумавшегося.
-rem   Больше — разговор ощущается сломанным.
+rem Pauza tishiny (ms), po kotoroy bot ponimaet chto sobesednik dogovoril.
+rem Menshe - otvechaet zhivee, no perebivaet zadumavshegosya.
+rem Bolshe - razgovor oshchushchaetsya slomannym.
 set AIA_UTTERANCE_PAUSE_MS=1000
 
-rem Порог близости вопроса к базе знаний. Ниже — бот чаще "узнаёт" вопрос,
-rem но чаще ошибается. Выше — чаще честно переводит на специалиста.
+rem Porog blizosti voprosa k baze znaniy (0..1).
+rem Nizhe - bot chashche "uznaet" vopros, no chashche oshibaetsya.
+rem Vyshe - chashche chestno perevodit na spetsialista.
 set AIA_SIMILARITY_THRESHOLD=0.75
 
 cd /d "%~dp0"
 echo.
-echo   Движок распознавания : %AIA_STT_ENGINE%
-echo   Синтез               : %AIA_TTS_MODEL% / %AIA_TTS_VOICE%
-echo   Пауза тишины         : %AIA_UTTERANCE_PAUSE_MS% мс
+echo   STT    : %AIA_STT_ENGINE%
+echo   TTS    : %AIA_TTS_MODEL% / %AIA_TTS_VOICE%
+echo   PAUSE  : %AIA_UTTERANCE_PAUSE_MS% ms
+echo   THRESH : %AIA_SIMILARITY_THRESHOLD%
 echo.
-echo   Ждите строку "Uvicorn running on http://0.0.0.0:8080" — это готовность.
-echo   Первый запуск на новой модели дольше: качаются веса.
+echo   Gotovnost = stroka "Uvicorn running on http://0.0.0.0:8080"
+echo   Pervyy zapusk na novoy modeli dolshe: kachayutsya vesa.
 echo.
 py -3.12 -m ai_assistant.service.main
 
 echo.
-echo   Сервис остановлен. Окно можно закрыть.
+echo   Servis ostanovlen. Okno mozhno zakryt.
 pause

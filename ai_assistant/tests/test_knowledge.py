@@ -98,6 +98,59 @@ def test_exact_question_matches_itself(base):
     assert found[0].id == 2
 
 
+def test_added_record_without_clarifying_question_is_excluded_from_search(base):
+    """Item 7 финального ревью: неопознанные реплики не должны отравлять
+    поиск. Раньше добавленная запись сразу переиндексировалась и участвовала
+    в поиске для следующих реплик — дословный повтор той же фразы (например,
+    та же ошибка распознавания на втором движке) "находил" бы её вместо
+    честного промаха, хотя ветка обработки на пустой уточняющий вопрос
+    отвечает мгновенным переводом без уточнения."""
+    base.add("во сколько вы открываетесь")
+    assert base.search("во сколько вы открываетесь") is None
+
+
+def test_best_match_also_excludes_records_without_a_clarifying_question(base):
+    base.add("во сколько вы открываетесь")
+    match = base.best_match("во сколько вы открываетесь")
+    assert match is None or match[0].question != "во сколько вы открываетесь"
+
+
+def test_added_record_is_still_persisted_for_manual_curation(base, tmp_path):
+    """Спецификация просит дописывать неопознанный вопрос в файл — для
+    последующей ручной разметки, а не подмешивать в живой поиск. save()
+    обязан сохранить запись, даже раз она не участвует в поиске."""
+    base.add("во сколько вы открываетесь")
+    target = tmp_path / "kb.json"
+    base.save(str(target))
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert any(item["question"] == "во сколько вы открываетесь" for item in payload)
+
+
+def test_loading_a_base_with_a_pre_existing_blank_record_excludes_it_too(tmp_path):
+    """Не только записи, добавленные через add() в этом же процессе — запись
+    с уже пустым уточняющим вопросом в самом JSON (например, из прошлого
+    прогона до этой правки) тоже не должна попадать в поиск после
+    перезагрузки базы."""
+    source = [
+        {
+            "id": 1,
+            "question": "стиральная машина не отжимает",
+            "clarifying_question": "",
+            "positive_answers": [],
+            "negative_answers": [],
+            "positive_reply": "",
+            "scenario": "",
+            "equipment_type": "",
+        }
+    ]
+    path = tmp_path / "kb.json"
+    path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+
+    embedder = FakeEmbedder({"стиральная машина не отжимает": [1.0, 0.0, 0.0]})
+    base = load_knowledge_base(str(path), embedder, threshold=0.75)
+    assert base.search("стиральная машина не отжимает") is None
+
+
 def test_added_question_gets_next_id_and_empty_clarifying(base):
     record = base.add("во сколько вы открываетесь")
     assert record.id == 3

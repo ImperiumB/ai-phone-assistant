@@ -146,6 +146,23 @@ def test_silence_event_not_emitted_one_frame_before_timeout():
     assert silences == []
 
 
+def test_pause_seconds_matches_the_rounded_up_pause_in_frames():
+    """Item 4 финального ревью: main.py использует pause_seconds, чтобы
+    сдвинуть метку конца речи назад. Значение должно быть фактической
+    (округлённой вверх до целого кадра 32 мс), а не заявленной паузой —
+    иначе арифметика в CallTimeline.mark_with_offset разъедется с тем,
+    сколько сегментатор реально ждал перед тем, как отдать событие."""
+    # 100 мс / 32 мс = 3.125 -> округление вверх до 4 кадров = 128 мс.
+    seg = segmenter(pause_ms=100)
+    assert seg.pause_seconds == pytest.approx(0.128)
+
+
+def test_pause_seconds_for_an_exact_multiple_of_the_frame_length():
+    # 96 мс делится на 32 мс кадра без остатка -> ровно 3 кадра, без округления вверх.
+    seg = segmenter(pause_ms=96)
+    assert seg.pause_seconds == pytest.approx(0.096)
+
+
 def test_reset_resets_the_detector_too():
     """UtteranceSegmenter.reset() обязан сбрасывать не только свой буфер, но
     и состояние детектора речи (Critical 1 из ревью Task 9): у рекуррентной

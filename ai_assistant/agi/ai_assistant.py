@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import traceback
+import uuid
 from dataclasses import dataclass
 from threading import RLock
 from typing import Any, Dict, List
@@ -117,6 +118,42 @@ def decide_failure_step(error):
     return "reraise"
 
 
+def _atomic_write(path, content):
+    # type: (str, bytes) -> None
+    """Атомарная запись с уникальным именем временного файла.
+
+    Та же гонка, что уже была найдена и починена на сервере
+    (ai_assistant/service/tts.py, write_wav_8k): временный файл раньше
+    назывался одинаково для всех звонков ("<путь>.tmp"). Два одновременных
+    звонка, обоим нужна ещё не закэшированная фраза — первый переименовывает
+    файл, второй получает ошибку на открытии/записи чужого ".tmp", которая
+    молча проглатывалась в speak() — один из абонентов ничего не слышал.
+    Параллельные звонки — обязательный сценарий: без них не снять метрику
+    нагрузки (третья цифра прототипа).
+
+    Уникальное имя убирает коллизию на самом временном файле, но не решает
+    всё целиком: если два потока одновременно делают os.replace(...,
+    <тот же итоговый путь>), один из них иногда всё равно получает
+    PermissionError на Windows — такую ошибку на os.replace не считаем
+    падением: если итоговый файл на месте, значит другой поток уже успел
+    его туда положить, это нормальный исход гонки, а не ошибка.
+    """
+    tmp_path = "{0}.{1}.tmp".format(path, uuid.uuid4().hex)
+    try:
+        with open(tmp_path, "wb") as handle:
+            handle.write(content)
+        try:
+            os.replace(tmp_path, path)
+        except OSError:
+            if not os.path.exists(path):
+                raise  # не гонка с другим писателем, а настоящая ошибка
+    finally:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass  # обычный случай: файл уже переименован
+
+
 # --- Дальше идёт часть, работающая только внутри Asterisk ---------------------
 
 
@@ -172,10 +209,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
         log_it("TIMING download_start {0:.3f}".format(download_start))
         response = requests.get(http_base + "/tts", params={"text": text}, timeout=30)
         response.raise_for_status()
-        tmp_target = target + ".tmp"
-        with open(tmp_target, "wb") as handle:
-            handle.write(response.content)
-        os.replace(tmp_target, target)
+        _atomic_write(target, response.content)
         download_done = time.time()
         log_it(
             "TIMING download_done {0:.3f} ({1:.1f} ms)".format(

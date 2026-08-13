@@ -1,5 +1,7 @@
 import struct
 
+import pytest
+
 from ai_assistant.service.vad import SegmentEvent, UtteranceSegmenter
 
 FRAME_SAMPLES = 256
@@ -20,6 +22,27 @@ class AmplitudeDetector:
     def is_speech(self, frame):
         first = struct.unpack("<h", frame[:2])[0]
         return first != 0
+
+    def reset(self):
+        pass
+
+
+class CountingDetector:
+    """Стоит на месте настоящей рекуррентной модели: считает свои вызовы и
+    сбросы, чтобы можно было доказать, что два сегментатора с разными
+    экземплярами детектора не делят между собой никакое состояние."""
+
+    def __init__(self):
+        self.speech_calls = 0
+        self.reset_calls = 0
+
+    def is_speech(self, frame):
+        self.speech_calls += 1
+        first = struct.unpack("<h", frame[:2])[0]
+        return first != 0
+
+    def reset(self):
+        self.reset_calls += 1
 
 
 def segmenter(pause_ms=100, silence_timeout_ms=500):
@@ -121,3 +144,107 @@ def test_silence_event_not_emitted_one_frame_before_timeout():
     events = seg.feed(silent_frame() * 15)
     silences = [e for e in events if e.kind == "silence"]
     assert silences == []
+
+
+def test_reset_resets_the_detector_too():
+    """UtteranceSegmenter.reset() обязан сбрасывать не только свой буфер, но
+    и состояние детектора речи (Critical 1 из ревью Task 9): у рекуррентной
+    модели вроде Silero VAD своя внутренняя память между вызовами."""
+    detector = CountingDetector()
+    seg = UtteranceSegmenter(detector, pause_ms=100, silence_timeout_ms=500)
+    # Конструктор сам вызывает reset() один раз.
+    assert detector.reset_calls == 1
+    seg.reset()
+    assert detector.reset_calls == 2
+
+
+def test_two_segmenters_with_independent_detectors_do_not_affect_each_other():
+    """Ровно то, что просил ревьюер: два одновременных звонка, каждый со
+    своим детектором, не должны видеть активность друг друга."""
+    detector_a = CountingDetector()
+    detector_b = CountingDetector()
+    seg_a = UtteranceSegmenter(detector_a, pause_ms=100, silence_timeout_ms=500)
+    seg_b = UtteranceSegmenter(detector_b, pause_ms=100, silence_timeout_ms=500)
+
+    seg_a.feed(speech_frame() * 3)
+    seg_a.feed(silent_frame() * 4)
+
+    # Детектор второго звонка не должен был увидеть ни одного кадра первого.
+    assert detector_b.speech_calls == 0
+    assert detector_a.speech_calls > 0
+
+    seg_b.reset()
+    assert detector_b.reset_calls == 2  # свой конструктор + явный reset()
+    assert detector_a.reset_calls == 1  # только свой конструктор, чужой reset() его не задел
+
+
+def test_clone_produces_an_independent_detector_without_reloading_the_model():
+    """Клон не должен трогать __init__ (а значит и torch.hub.load): проверяем
+    заглушкой рекуррентной модели, что после клонирования состояния
+    оригинала и копии расходятся независимо, а не делят один объект."""
+    from ai_assistant.service.vad import SileroVoiceDetector
+
+    class _FakeRecurrentModel:
+        """Стоит на месте настоящего Silero VAD: тоже копит внутреннее
+        состояние между вызовами и умеет его сбрасывать."""
+
+        def __init__(self):
+            self.state = 0
+
+        def __call__(self, tensor, sr):
+            import torch
+
+            self.state += 1
+            return torch.tensor(self.state / 10.0)
+
+        def reset_states(self):
+            self.state = 0
+
+    import torch
+
+    base = SileroVoiceDetector.__new__(SileroVoiceDetector)  # без сети и torch.hub.load
+    base._torch = torch
+    base._model = _FakeRecurrentModel()
+    base._threshold = 0.5
+
+    call_a = base.clone()
+    call_b = base.clone()
+
+    frame = speech_frame()
+    call_a.is_speech(frame)
+    call_a.is_speech(frame)
+    call_a.is_speech(frame)
+
+    # call_b — независимая копия: три вызова call_a не должны были её задеть.
+    assert call_b._model.state == 0
+    call_b.is_speech(frame)
+    assert call_b._model.state == 1
+    assert call_a._model.state == 3
+
+    # И это не тот же объект модели, что у оригинала.
+    assert base._model is not call_a._model
+    assert call_a._model is not call_b._model
+
+
+@pytest.mark.integration
+def test_real_silero_clone_diverges_from_the_original_after_use():
+    """Требует загрузки настоящей модели Silero VAD. Запускать отдельно:
+    pytest -m integration.
+
+    Подтверждает то же самое, но на настоящей JIT-скомпилированной модели:
+    ревьюер прямо предупреждал, что deepcopy может не сработать для
+    скомпилированных моделей — здесь это проверено не на заглушке."""
+    import torch
+
+    from ai_assistant.service.vad import SileroVoiceDetector
+
+    base = SileroVoiceDetector()
+    clone = base.clone()
+
+    speech = speech_frame()
+    for _ in range(5):
+        base.is_speech(speech)
+
+    base_state = base._model._state.clone()
+    clone_state = clone._model._state.clone()
+    assert not torch.equal(base_state, clone_state)

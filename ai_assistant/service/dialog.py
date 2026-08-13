@@ -23,6 +23,16 @@ ACTION_HANGUP = "Hangup"
 SCENARIO_SUPPORT = "redirect_support"
 SCENARIO_SALES = "redirect_sales"
 
+# Демон живёт постоянно, а состояние разговора копится по ключу звонка
+# (linkedId) и раньше не удалялось вообще — это неограниченный рост памяти
+# (Important 4 из ревью Task 9). Оба предела ниже — константы с одной целью:
+# сессия штатно удаляется, когда разговор доходит до POINT_FINISHED (звонок
+# завершён явно), а лимит ниже — подстраховка на случай звонков, которые
+# никогда явно не завершаются (клиент бросил трубку без финального
+# коллбэка, обрыв AGI-скрипта и т. п.): самая старая по времени создания
+# сессия вытесняется, чтобы не расти бесконечно даже в этом случае.
+DEFAULT_MAX_SESSIONS = 1000
+
 
 @dataclass
 class Phrases:
@@ -53,15 +63,28 @@ class _SessionState:
 
 
 class DialogEngine:
-    def __init__(self, knowledge, phrases: Phrases, support_exten: str, sales_exten: str):
+    def __init__(
+        self,
+        knowledge,
+        phrases: Phrases,
+        support_exten: str,
+        sales_exten: str,
+        max_sessions: int = DEFAULT_MAX_SESSIONS,
+    ):
         self._knowledge = knowledge
         self._phrases = phrases
         self._support_exten = support_exten
         self._sales_exten = sales_exten
+        self._max_sessions = max_sessions
         self._sessions: Dict[str, _SessionState] = {}
 
     def _session(self, linked_id: str) -> _SessionState:
         if linked_id not in self._sessions:
+            if len(self._sessions) >= self._max_sessions:
+                # Словарь в Python 3.7+ хранит порядок вставки — первый ключ
+                # и есть самая старая живая сессия.
+                oldest_linked_id = next(iter(self._sessions))
+                del self._sessions[oldest_linked_id]
             self._sessions[linked_id] = _SessionState()
         return self._sessions[linked_id]
 
@@ -73,19 +96,30 @@ class DialogEngine:
         state = self._session(linked_id)
 
         if point == POINT_START:
-            return self._speak(self._phrases.greeting, ACTION_RECOGNIZE, POINT_ASK_QUESTION)
-
-        if silence:
+            result = self._speak(self._phrases.greeting, ACTION_RECOGNIZE, POINT_ASK_QUESTION)
+        elif silence:
             state.silence_count += 1
             if state.silence_count >= 2:
-                return self._transfer(self._support_exten)
-            return self._speak(self._phrases.silence, ACTION_RECOGNIZE, point)
+                result = self._transfer(self._support_exten)
+            else:
+                result = self._speak(self._phrases.silence, ACTION_RECOGNIZE, point)
+        else:
+            state.silence_count = 0
+            if point == POINT_CONFIRM:
+                result = self._handle_confirmation(state, text)
+            else:
+                result = self._handle_question(state, text)
 
-        state.silence_count = 0
+        # Разговор дошёл до конца (перевод на специалиста или на продажи) —
+        # его состояние больше не понадобится, держать его в памяти дальше
+        # незачем.
+        if self._reaches(result, POINT_FINISHED):
+            self._sessions.pop(linked_id, None)
+        return result
 
-        if point == POINT_CONFIRM:
-            return self._handle_confirmation(state, text)
-        return self._handle_question(state, text)
+    @staticmethod
+    def _reaches(result: List[Dict[str, str]], point: str) -> bool:
+        return any(item.get("Key") == "ConversationPoint" and item.get("Value") == point for item in result)
 
     def _handle_question(self, state: _SessionState, text: str) -> List[Dict[str, str]]:
         found = self._knowledge.search(text) if text else None

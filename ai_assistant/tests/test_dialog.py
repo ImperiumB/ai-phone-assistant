@@ -6,6 +6,7 @@ from ai_assistant.service.dialog import (
     ACTION_REDIRECT,
     POINT_ASK_QUESTION,
     POINT_CONFIRM,
+    POINT_FINISHED,
     POINT_START,
     DialogEngine,
     Phrases,
@@ -263,3 +264,43 @@ def test_multiword_variant_matches_only_when_words_are_contiguous():
     scattered_result = answer(scattered_engine, conversationPoint=POINT_CONFIRM, recognizedText="все да верно")
     assert scattered_result["Action"] == ACTION_RECOGNIZE
     assert scattered_result["ConversationPoint"] == POINT_ASK_QUESTION
+
+
+def test_finished_call_via_redirect_drops_its_session_state():
+    """Important 4 из ревью Task 9: демон живёт постоянно, состояние
+    разговора не должно копиться бесконечно — оно обязано удаляться, когда
+    разговор доходит до POINT_FINISHED."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+    assert result["ConversationPoint"] == POINT_FINISHED
+    assert "call-1" not in engine_obj._sessions
+
+
+def test_finished_call_via_second_silence_drops_its_session_state():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+    assert result["ConversationPoint"] == POINT_FINISHED
+    assert "call-1" not in engine_obj._sessions
+
+
+def test_unfinished_call_keeps_its_session_state():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    assert "call-1" in engine_obj._sessions
+
+
+def test_oldest_session_is_evicted_when_the_limit_is_reached():
+    """Подстраховка на звонки, которые никогда явно не завершаются
+    (POINT_FINISHED не наступает) — самая старая сессия должна вытесняться,
+    чтобы не расти бесконечно даже в этом случае."""
+    engine_obj = DialogEngine(
+        FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500", max_sessions=2
+    )
+    engine_obj.handle({"linkedId": "a", "conversationPoint": POINT_ASK_QUESTION, "silenceDetected": "True"})
+    engine_obj.handle({"linkedId": "b", "conversationPoint": POINT_ASK_QUESTION, "silenceDetected": "True"})
+    assert set(engine_obj._sessions) == {"a", "b"}
+
+    engine_obj.handle({"linkedId": "c", "conversationPoint": POINT_ASK_QUESTION, "silenceDetected": "True"})
+    assert set(engine_obj._sessions) == {"b", "c"}  # "a" — самая старая, вытеснена

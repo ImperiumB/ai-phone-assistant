@@ -1,5 +1,6 @@
 import os
 import struct
+import threading
 import wave
 
 import pytest
@@ -38,7 +39,9 @@ def test_written_wav_keeps_all_samples(tmp_path):
 def test_no_temporary_file_is_left_behind(tmp_path):
     target = tmp_path / "phrase.wav"
     write_wav_8k(str(target), struct.pack("<10h", *([0] * 10)))
-    assert not (tmp_path / "phrase.wav.tmp").exists()
+    # Имя временного файла теперь включает случайный суффикс (Critical 2 из
+    # ревью Task 9), поэтому ищем по маске, а не по одному фиксированному имени.
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_cache_synthesizes_once_for_the_same_text(tmp_path):
@@ -72,6 +75,41 @@ def test_cache_directory_is_created_when_missing(tmp_path):
     cache = TtsCache(FakeSynthesizer(), str(target_dir))
     path = cache.get("привет", "baya")
     assert os.path.exists(path)
+
+
+def test_concurrent_requests_for_the_same_uncached_text_all_succeed(tmp_path):
+    """Воспроизводит боевой сценарий из ревью Task 9 (Critical 2): демон
+    перезапустили, кэш пуст, несколько звонков одновременно просят одну и ту
+    же ещё не закэшированную фразу (например, приветствие). Раньше все
+    писали во временный файл с одинаковым именем и падали с ошибкой доступа
+    к файлу — ревьюер воспроизвёл восемь потоков, упали все восемь."""
+    synth = FakeSynthesizer()
+    cache = TtsCache(synth, str(tmp_path))
+
+    results = []
+    errors = []
+    lock = threading.Lock()
+
+    def worker():
+        try:
+            path = cache.get("здравствуйте", "baya")
+            with lock:
+                results.append(path)
+        except Exception as exc:  # noqa: BLE001 — тест должен увидеть любое падение
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(results) == 8
+    assert all(os.path.exists(path) for path in results)
+    assert len(set(results)) == 1  # все получили путь к одному и тому же итоговому файлу
+    assert read_wav_format(results[0]) == (1, 16, 8000)
 
 
 class _FakeSileroModel:

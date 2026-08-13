@@ -24,6 +24,15 @@ class VoiceDetector(Protocol):
         """
         ...
 
+    def reset(self) -> None:
+        """Сбросить внутреннее состояние детектора перед новым потоком аудио.
+
+        Обязателен для рекуррентных моделей (Silero VAD хранит скрытое
+        состояние между вызовами): без сброса кадры чужого звонка,
+        обработанные тем же детектором раньше, продолжают влиять на решение.
+        """
+        ...
+
 
 @dataclass
 class SegmentEvent:
@@ -33,14 +42,39 @@ class SegmentEvent:
 
 
 class SileroVoiceDetector:
-    """Боевая реализация. Модель качается через torch.hub при первом обращении."""
+    """Боевая реализация. Модель качается через torch.hub при первом обращении.
+
+    Рекуррентная: хранит скрытое состояние между вызовами `is_speech`. Это
+    смертельно опасно при нескольких одновременных звонках через общий
+    экземпляр — кадры разных абонентов перемешиваются в одном состоянии, и
+    сегментация речи ломается у всех сразу (см. ревью Task 9, Critical 1).
+
+    Правильный способ пользоваться этим классом в многозвонковом сервисе:
+    один раз создать "эталонный" экземпляр при старте процесса, а на каждый
+    звонок брать `clone()` — глубокую копию уже загруженной модели. Это
+    единственный вариант, который реально проверен на этой модели:
+      - создать новый экземпляр через `torch.hub.load` заново на каждый
+        звонок — на этой машине ~650-700 мс (сеть/диск/валидация репозитория
+        даже из локального кэша), неприемлемо на старте каждого звонка;
+      - `copy.deepcopy(model)` — измерено ~7-12 мс, и подтверждено, что для
+        этой JIT-скомпилированной модели копия действительно независима
+        (после копии состояния `model._state` у оригинала и копии расходятся
+        при дальнейших вызовах — проверено вручную);
+      - сброс состояния + блокировка на время обращения — тоже рабочий
+        вариант (одиночный inference ~0.77 мс), но сериализует распознавание
+        речи между всеми одновременными звонками без необходимости, когда
+        `clone()` даёт полную изоляцию почти бесплатно.
+    """
 
     def __init__(self, threshold: float = 0.5):
         import torch
 
         self._torch = torch
         model, _ = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad", model="silero_vad", onnx=False
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            onnx=False,
+            trust_repo=True,
         )
         self._model = model
         self._threshold = threshold
@@ -53,6 +87,24 @@ class SileroVoiceDetector:
         with self._torch.no_grad():
             probability = self._model(tensor, 8000).item()
         return probability >= self._threshold
+
+    def reset(self) -> None:
+        self._model.reset_states()
+
+    def clone(self) -> "SileroVoiceDetector":
+        """Дать независимую копию для нового звонка без повторной загрузки модели.
+
+        Обходит `__init__` (а значит и сетевой/дисковый `torch.hub.load`) —
+        глубоко копируется только уже загруженная модель. См. обоснование
+        выбора в docstring класса.
+        """
+        import copy
+
+        clone = SileroVoiceDetector.__new__(SileroVoiceDetector)
+        clone._torch = self._torch
+        clone._model = copy.deepcopy(self._model)
+        clone._threshold = self._threshold
+        return clone
 
 
 class UtteranceSegmenter:
@@ -70,6 +122,7 @@ class UtteranceSegmenter:
         self._speech = b""
         self._silence_frames = 0
         self._silence_reported = False
+        self._detector.reset()
 
     def feed(self, pcm: bytes) -> List[SegmentEvent]:
         events: List[SegmentEvent] = []

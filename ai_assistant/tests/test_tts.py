@@ -74,6 +74,56 @@ def test_cache_directory_is_created_when_missing(tmp_path):
     assert os.path.exists(path)
 
 
+class _FakeSileroModel:
+    """Достаточно .to(), чтобы SileroSynthesizer.__init__ отработал без сети."""
+
+    def to(self, device):
+        return self
+
+
+def _patch_torch_hub_load(monkeypatch, recorder):
+    import torch
+
+    def fake_load(*args, **kwargs):
+        recorder["value_during_load"] = os.environ.get("SSL_CERT_FILE")
+        return _FakeSileroModel(), None
+
+    monkeypatch.setattr(torch.hub, "load", fake_load)
+
+
+def test_ssl_cert_file_is_removed_after_init_when_it_was_absent(monkeypatch):
+    """SSL_CERT_FILE нужен только на время torch.hub.load, не на весь процесс.
+
+    Если его выставить и забыть снять, любой другой TLS-клиент в этом же
+    процессе (gRPC-сервер, HTTP-сервис из задачи 9) начнёт ходить с чужим
+    набором корневых сертификатов вместо системного.
+    """
+    from ai_assistant.service.tts import SileroSynthesizer
+
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    recorder = {}
+    _patch_torch_hub_load(monkeypatch, recorder)
+
+    SileroSynthesizer("v4_ru")
+
+    assert recorder["value_during_load"] is not None  # был выставлен во время загрузки
+    assert "SSL_CERT_FILE" not in os.environ  # и снят после
+
+
+def test_ssl_cert_file_is_restored_when_it_was_already_set(monkeypatch):
+    """Если переменная уже стояла (например, задана оператором), её нельзя затирать."""
+    from ai_assistant.service.tts import SileroSynthesizer
+
+    monkeypatch.setenv("SSL_CERT_FILE", "C:\\custom\\ca-bundle.pem")
+    recorder = {}
+    _patch_torch_hub_load(monkeypatch, recorder)
+
+    SileroSynthesizer("v4_ru")
+
+    assert recorder["value_during_load"] is not None
+    assert os.environ["SSL_CERT_FILE"] == "C:\\custom\\ca-bundle.pem"
+
+
 @pytest.mark.integration
 def test_silero_produces_audible_speech(tmp_path):
     """Требует загрузки модели Silero. Запускать отдельно: pytest -m integration"""

@@ -3,10 +3,32 @@
 Asterisk (format_wav) играет только PCM 16 бит / моно / 8000 Гц. Любой другой
 формат он молча отвергает, и клиент слышит тишину — так уже ловили UL-18592.
 """
+import contextlib
 import hashlib
 import os
 import wave
-from typing import Tuple
+from typing import Iterator, Tuple
+
+
+@contextlib.contextmanager
+def _temporary_ssl_cert_file(path: str) -> Iterator[None]:
+    """Выставляет SSL_CERT_FILE только на время блока и возвращает как было.
+
+    Нужно исключительно на время torch.hub.load: gRPC-сервер и HTTP-сервис
+    живут в этом же процессе и могут ходить по TLS к своим адресам (например,
+    к внутреннему CA компании), поэтому подменять доверенные корни для всего
+    процесса навсегда нельзя — такие соединения начнут молча падать.
+    """
+    had_value = "SSL_CERT_FILE" in os.environ
+    previous_value = os.environ.get("SSL_CERT_FILE")
+    os.environ["SSL_CERT_FILE"] = path
+    try:
+        yield
+    finally:
+        if had_value:
+            os.environ["SSL_CERT_FILE"] = previous_value
+        else:
+            del os.environ["SSL_CERT_FILE"]
 
 
 def write_wav_8k(path: str, pcm: bytes) -> None:
@@ -42,21 +64,21 @@ class SileroSynthesizer:
         import certifi
         import torch
 
+        self._torch = torch
         # На части Windows-машин системное хранилище сертификатов не доверяет
         # цепочке models.silero.ai (сертификат в порядке, но сертификат
         # издателя туда не попал), из-за чего загрузка падает с
         # CERTIFICATE_VERIFY_FAILED. Актуальный набор корневых сертификатов
-        # certifi решает это без отключения проверки.
-        os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-
-        self._torch = torch
-        model, _ = torch.hub.load(
-            repo_or_dir="snakers4/silero-models",
-            model="silero_tts",
-            language="ru",
-            speaker=model_id,
-            trust_repo=True,
-        )
+        # certifi решает это без отключения проверки. Действует только на
+        # время загрузки модели, см. _temporary_ssl_cert_file.
+        with _temporary_ssl_cert_file(certifi.where()):
+            model, _ = torch.hub.load(
+                repo_or_dir="snakers4/silero-models",
+                model="silero_tts",
+                language="ru",
+                speaker=model_id,
+                trust_repo=True,
+            )
         model.to(torch.device("cpu"))
         self._model = model
 

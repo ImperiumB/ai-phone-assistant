@@ -64,11 +64,11 @@ Vosk/GigaAM почти не влияет на время старта, пото�
 | `AIA_STT_ENGINE` | `vosk` | Движок распознавания: `vosk` или `gigaam` |
 | `AIA_VOSK_MODEL_PATH` | — (пусто) | Путь к модели Vosk. Читается отдельно в `main.py`, обязателен при `AIA_STT_ENGINE=vosk` |
 | `AIA_TTS_MODEL` | `v4_ru` | Модель синтеза Silero |
-| `AIA_TTS_VOICE` | `baya` | Голос синтеза по умолчанию |
+| `AIA_TTS_VOICE` | `eugene` | Голос синтеза по умолчанию |
 | `AIA_EMBEDDER_MODEL` | `ai-forever/ru-en-RoSBERTa` | Модель эмбеддингов для базы знаний |
 | `AIA_SIMILARITY_THRESHOLD` | `0.75` | Порог сходства при поиске по базе знаний |
 | `AIA_SILENCE_TIMEOUT_MS` | `15000` | Таймаут тишины в VAD |
-| `AIA_UTTERANCE_PAUSE_MS` | `3000` | Пауза, которой сегментируется конец реплики |
+| `AIA_UTTERANCE_PAUSE_MS` | `1500` | Пауза, которой сегментируется конец реплики. Меньше — бот отвечает живее, но перебьёт задумавшегося; больше — разговор ощущается сломанным |
 | `AIA_STT_TIMEOUT_S` | `10` | Таймаут распознавания одной реплики |
 | `AIA_KNOWLEDGE_PATH` | `ai_assistant/knowledge_base.json` | Путь к базе знаний |
 | `AIA_TTS_CACHE_DIR` | `/tmp/aia_tts_cache` | Каталог кэша готовых WAV |

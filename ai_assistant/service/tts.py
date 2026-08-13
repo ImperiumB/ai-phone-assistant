@@ -6,6 +6,7 @@ Asterisk (format_wav) играет только PCM 16 бит / моно / 8000 
 import contextlib
 import hashlib
 import os
+import uuid
 import wave
 from typing import Iterator, Tuple
 
@@ -50,15 +51,35 @@ def write_wav_8k(path: str, pcm: bytes) -> None:
 
     Без этого оборванный синтез оставляет в кэше битый файл, который потом
     воспроизводится тишиной при каждом звонке.
+
+    Имя временного файла уникально для каждого вызова (случайный суффикс), а
+    не просто `путь + ".tmp"`. FastAPI-ручка `/tts` выполняет обработчики в
+    разных потоках, и если демон перезапустили и несколько звонков разом
+    просят одну и ту же ещё не закэшированную фразу, несколько потоков
+    одновременно попадали бы этим же самым именем — на Windows это кладёт
+    запись ошибкой доступа к файлу (см. ревью Task 9, Critical 2: так падали
+    все восемь потоков в воспроизведённом сценарии). Уникальное имя убирает
+    коллизию на самом временном файле, но не решает всё целиком: если два
+    потока одновременно делают `os.replace(..., <тот же итоговый путь>)`,
+    Windows у одного из них временами всё равно отвечает
+    `PermissionError`/`WinError 5` — это подтверждено эмпирически, а не
+    домысел из документации. Поэтому такую ошибку на `os.replace` не считаем
+    падением: если итоговый файл на месте, значит другой поток уже успел его
+    туда положить — это нормальный исход гонки, а не ошибка, и наша попытка
+    просто не нужна.
     """
-    tmp_path = path + ".tmp"
+    tmp_path = "{0}.{1}.tmp".format(path, uuid.uuid4().hex)
     try:
         with wave.open(tmp_path, "wb") as handle:
             handle.setnchannels(1)
             handle.setsampwidth(2)
             handle.setframerate(8000)
             handle.writeframes(pcm)
-        os.replace(tmp_path, path)
+        try:
+            os.replace(tmp_path, path)
+        except OSError:
+            if not os.path.exists(path):
+                raise  # это не гонка с другим писателем, а настоящая ошибка
     finally:
         try:
             os.remove(tmp_path)

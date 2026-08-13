@@ -3,12 +3,22 @@ import logging
 import os
 import sys
 import threading
+from collections import deque
 from concurrent import futures
 from typing import Callable, List
 
 import grpc
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
+
+# Демон работает постоянно, поэтому ограничения ниже — не опция, а
+# обязательное условие (Important 4/5 из ревью Task 9):
+#  - таймлайнов на реплики без предела накопилось бы неограниченно много за
+#    время жизни процесса — храним только последние N;
+#  - остановка gRPC не должна ждать бесконечно, если в моменте есть активный
+#    звонок — даём разумный срок и после него завершаемся принудительно.
+MAX_TIMELINE_RECORDS = 500
+GRPC_SHUTDOWN_GRACE_SECONDS = 5
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "proto"))
 import speech_pb2  # noqa: E402
@@ -59,8 +69,19 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
 
                 timeline = CallTimeline(session_id)
                 timeline.mark(STAGE_SPEECH_END)
-                audio = prepare_audio(event.pcm, self._engine.target_sample_rate)
-                text = self._engine.transcribe(audio)
+                try:
+                    audio = prepare_audio(event.pcm, self._engine.target_sample_rate)
+                    text = self._engine.transcribe(audio)
+                except Exception:
+                    # Один споткнувшийся движок не должен ронять весь поток:
+                    # gRPC закрыл бы его целиком, и разговор оборвался бы до
+                    # конца звонка вместо потери одной реплики (Important 3
+                    # из ревью Task 9).
+                    log.exception(
+                        "Движок распознавания упал на реплике звонка [%s], реплика пропущена",
+                        session_id,
+                    )
+                    continue
                 timeline.mark(STAGE_STT_DONE)
                 self._timeline_sink.append(timeline.as_dict())
                 log.info("STT [%s]: %s | %s", session_id, text, timeline.durations())
@@ -117,11 +138,21 @@ def main() -> None:
     )
     dialog_engine = DialogEngine(knowledge, phrases, support_exten="489", sales_exten="500")
 
-    timeline_sink: List[dict] = []
+    # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
+    # без этого /metrics копил бы данные, пока не кончится память.
+    timeline_sink: "deque[dict]" = deque(maxlen=MAX_TIMELINE_RECORDS)
 
     def segmenter_factory():
+        # detector — общая на процесс "эталонная" модель, но она рекуррентная
+        # и хранит внутреннее состояние между вызовами. При нескольких
+        # одновременных звонках через один и тот же экземпляр кадры разных
+        # абонентов перемешивались бы в одном состоянии, и сегментация речи
+        # ломалась бы у всех сразу (Critical 1 из ревью Task 9). clone() даёт
+        # каждому звонку независимую копию модели за ~7-12 мс вместо ~650-700 мс
+        # на повторную загрузку через torch.hub — подробности и замеры в
+        # SileroVoiceDetector.clone().
         return UtteranceSegmenter(
-            detector,
+            detector.clone(),
             pause_ms=cfg.utterance_pause_ms,
             silence_timeout_ms=cfg.silence_timeout_ms,
         )
@@ -138,7 +169,7 @@ def main() -> None:
 
     @app.get("/metrics")
     def metrics():
-        return timeline_sink
+        return list(timeline_sink)
 
     @app.post("/knowledge/save")
     def save_knowledge():
@@ -148,7 +179,21 @@ def main() -> None:
     import uvicorn
 
     threading.Thread(target=server.wait_for_termination, daemon=True).start()
-    uvicorn.run(app, host="0.0.0.0", port=cfg.http_port, log_level="info")
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=cfg.http_port, log_level="info")
+    finally:
+        # server.stop() нигде не вызывался — рабочие потоки пула не
+        # демоны, и без явной остановки процесс при выходе ждал бы
+        # завершения активных звонков неограниченно долго (Important 5 из
+        # ревью Task 9). Даём разумный срок на завершение уже идущих
+        # разговоров и останавливаемся принудительно после него.
+        log.info(
+            "Останавливаем gRPC-сервер (до %s с на завершение активных звонков)...",
+            GRPC_SHUTDOWN_GRACE_SECONDS,
+        )
+        stopped = server.stop(GRPC_SHUTDOWN_GRACE_SECONDS)
+        stopped.wait(GRPC_SHUTDOWN_GRACE_SECONDS + 1)
+        log.info("gRPC-сервер остановлен")
 
 
 if __name__ == "__main__":

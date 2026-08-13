@@ -1,16 +1,20 @@
 import os
 import struct
 import sys
+import time
+from concurrent import futures
 
+import grpc
 import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "proto"))
 import speech_pb2  # noqa: E402
+import speech_pb2_grpc  # noqa: E402
 
 from ai_assistant.service.dialog import DialogEngine, Phrases
 from ai_assistant.service.knowledge import KnowledgeRecord
-from ai_assistant.service.main import SpeechServicer, build_http_app
+from ai_assistant.service.main import GRPC_SHUTDOWN_GRACE_SECONDS, SpeechServicer, build_http_app
 from ai_assistant.service.vad import SegmentEvent
 
 FRAME_SAMPLES = 256
@@ -127,6 +131,59 @@ def test_timeline_is_recorded_for_every_utterance():
     assert "speech_end->stt_done" in sink[0]["durations"]
 
 
+class FailingThenWorkingEngine:
+    """Падает на первой реплике, дальше работает — воспроизводит Important 3
+    из ревью Task 9: движок споткнулся, но звонок должен идти дальше."""
+
+    target_sample_rate = 8000
+
+    def __init__(self):
+        self.calls = 0
+
+    def transcribe(self, pcm):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("движок упал на этом фрагменте")
+        return "восстановились"
+
+
+def test_engine_failure_on_one_utterance_does_not_break_the_stream():
+    script = [[
+        SegmentEvent(kind="utterance", pcm=pcm(800)),
+        SegmentEvent(kind="utterance", pcm=pcm(800)),
+    ]]
+    engine = FailingThenWorkingEngine()
+    sink = []
+    servicer = SpeechServicer(lambda: FakeSegmenter(script), engine, timeline_sink=sink)
+
+    # Раньше исключение из transcribe() вышло бы из генератора и gRPC закрыл
+    # бы поток целиком — list(...) здесь как раз и обходит все события до конца.
+    responses = list(servicer.Recognize(FakeRequestIterator("call-5", [pcm(400)]), context=None))
+
+    finals = [r for r in responses if r.type == speech_pb2.StreamResponse.FINAL]
+    assert len(finals) == 1
+    assert finals[0].text == "восстановились"
+    assert engine.calls == 2  # обе реплики дошли до движка, первая просто не долетела до клиента
+    assert len(sink) == 1  # в таймлайн попала только успешная реплика
+
+
+def test_timeline_sink_bounded_by_a_deque_does_not_grow_without_limit():
+    """Important 4 из ревью Task 9: главный код передаёт в SpeechServicer не
+    голый список, а deque(maxlen=...) — здесь проверяем, что SpeechServicer
+    одинаково хорошо работает с любым объектом, у которого есть .append(), и
+    что переполнение действительно вытесняет самые старые записи."""
+    from collections import deque
+
+    sink = deque(maxlen=3)
+    script = [[SegmentEvent(kind="utterance", pcm=pcm(800))] for _ in range(5)]
+    servicer = SpeechServicer(lambda: FakeSegmenter(script), FakeEngine(), timeline_sink=sink)
+    requests = FakeRequestIterator("call-6", [pcm(400)] * 5)
+
+    list(servicer.Recognize(requests, context=None))
+
+    assert len(sink) == 3
+
+
 @pytest.fixture
 def client(tmp_path):
     phrases = Phrases(
@@ -180,3 +237,53 @@ def test_tts_endpoint_returns_playable_wav(client):
 def test_tts_endpoint_rejects_empty_text(client):
     response = client.get("/tts", params={"text": "   "})
     assert response.status_code == 400
+
+
+class _StuckSegmenter:
+    """Никогда не отдаёт события — имитирует активный звонок, который ещё
+    не завершился (абонент продолжает говорить), пока сервер выключают."""
+
+    def feed(self, pcm):
+        time.sleep(0.01)
+        return []
+
+
+def _endless_requests(session_id):
+    while True:
+        yield _Request(session_id, pcm(400))
+        time.sleep(0.01)
+
+
+def test_grpc_server_stop_bounds_shutdown_even_with_an_active_call():
+    """Important 5 из ревью Task 9: `server.stop()` нигде не вызывался, а
+    рабочие потоки пула не демоны — без явной остановки процесс при выходе
+    ждал бы завершения активных звонков неограниченно долго. Здесь проверяем
+    именно тот механизм, который main() зовёт в finally (server.stop(grace)
+    + wait), на настоящем grpc.server() с настоящим активным звонком,
+    который никогда сам не закончится."""
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    speech_pb2_grpc.add_SpeechServicer_to_server(
+        SpeechServicer(lambda: _StuckSegmenter(), FakeEngine(), timeline_sink=[]), server
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+
+    channel = grpc.insecure_channel("127.0.0.1:{0}".format(port))
+    stub = speech_pb2_grpc.SpeechStub(channel)
+    call = stub.Recognize(_endless_requests("stuck-call"))
+    time.sleep(0.1)  # дать звонку реально стартовать перед остановкой сервера
+
+    grace = 0.3
+    start = time.perf_counter()
+    stopped = server.stop(grace)
+    stopped.wait(grace + 1)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < grace + 1  # не хуже, а не "рано или поздно когда-нибудь"
+    with pytest.raises(grpc.RpcError):
+        list(call)
+    channel.close()
+
+
+def test_main_defines_a_positive_bounded_grpc_shutdown_grace_period():
+    assert 0 < GRPC_SHUTDOWN_GRACE_SECONDS <= 30

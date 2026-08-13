@@ -2,6 +2,7 @@ import logging
 import sys
 import threading
 
+import numpy as np
 import pytest
 
 from ai_assistant.service.dialog import (
@@ -328,6 +329,50 @@ def test_similarity_is_logged_even_when_the_knowledge_base_is_empty(caplog):
         )
     messages = " ".join(record.getMessage() for record in caplog.records)
     assert "SIMILARITY" in messages
+
+
+def test_handling_a_question_encodes_the_query_exactly_once():
+    """Important из повторного ревью: _handle_question раньше звал
+    best_match() дважды за одну обработку вопроса — один раз для лога и
+    вердикта, второй раз внутри search() для решения. Каждый вызов
+    best_match() кодирует запрос эмбеддером заново, поэтому именно тот
+    отрезок, ради измерения которого делается прототип
+    (speech_end->dialog_done), оказывался завышен примерно вдвое. Считаем
+    через настоящую KnowledgeBase со счётчиком кодирований запроса — их
+    должно быть ровно одно на одну обработку вопроса."""
+    from ai_assistant.service.knowledge import KnowledgeBase, KnowledgeRecord
+
+    class CountingEmbedder:
+        """Считает только кодирования запроса (search_query:) — документы
+        (search_document:) кодируются один раз при построении базы и сюда
+        не относятся."""
+
+        def __init__(self):
+            self.query_calls = 0
+
+        def encode(self, texts):
+            for text in texts:
+                if text.startswith("search_query: "):
+                    self.query_calls += 1
+            return np.vstack([[1.0, 0.0, 0.0] for _ in texts]).astype(np.float32)
+
+    embedder = CountingEmbedder()
+    record = KnowledgeRecord(
+        id=1,
+        question="стиральная машина не отжимает",
+        clarifying_question="Правильно я понял, что вас интересует ремонт?",
+        positive_answers=["да"],
+        negative_answers=["нет"],
+        positive_reply="Соединяю",
+        scenario="redirect_sales",
+        equipment_type="Стиральные машины",
+    )
+    knowledge = KnowledgeBase([record], embedder, threshold=0.5)
+    engine_obj = engine(knowledge)
+
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+
+    assert embedder.query_calls == 1
 
 
 def test_below_threshold_match_is_still_stored_and_transferred_to_support():

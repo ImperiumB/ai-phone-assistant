@@ -141,10 +141,18 @@ class DialogEngine:
         return any(item.get("Key") == "ConversationPoint" and item.get("Value") == point for item in result)
 
     def _handle_question(self, state: _SessionState, text: str) -> List[Dict[str, str]]:
-        if text:
-            self._log_similarity(text)
+        # best_match() кодирует запрос эмбеддером — дорогая операция,
+        # которую нельзя звать дважды на одну реплику (Important из
+        # повторного ревью: раньше здесь звался search() ПОСЛЕ отдельного
+        # вызова best_match() для лога — то же самое кодирование запроса
+        # считалось заново, и speech_end->dialog_done оказывался завышен
+        # примерно вдвое, хотя измеряется именно ради честной цифры этого
+        # отрезка). Получаем лучшее совпадение один раз, логируем его и на
+        # нём же принимаем решение — повторного обращения к поиску нет.
+        match = self._knowledge.best_match(text) if text else None
+        self._log_similarity(text, match)
 
-        found = self._knowledge.search(text) if text else None
+        found = match if match is not None and match[1] >= self._knowledge.threshold else None
         if found is None:
             if text:
                 self._knowledge.add(text)
@@ -157,15 +165,18 @@ class DialogEngine:
         state.record = record
         return self._speak(record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
 
-    def _log_similarity(self, text: str) -> None:
+    def _log_similarity(self, text: str, match: Optional[Any]) -> None:
         # Порог близости — главный настроечный параметр прототипа, который
         # подбирается на живых звонках (см. финальное ревью). Раньше мера
         # близости при промахе просто терялась, а при попадании не
         # логировалась — после звонка было видно только "перевели на
         # сопровождение", без понимания, был ли это промах чуть ниже порога
         # или модель вообще не поняла вопрос. Логируем обязательно в обеих
-        # ветках, независимо от порога — best_match(), а не search().
-        match = self._knowledge.best_match(text)
+        # ветках, независимо от порога. match вычисляется вызывающей
+        # стороной один раз (best_match()) и передаётся сюда готовым — эта
+        # функция сама эмбеддер не дёргает.
+        if not text:
+            return
         if match is None:
             log.info("SIMILARITY: база знаний пуста, сравнивать не с чем | question=%r", text)
             return

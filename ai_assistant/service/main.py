@@ -235,7 +235,13 @@ def main() -> None:
         transfer="Минуту, перевожу ваш звонок на специалиста",
         silence="Вы меня слышите?",
     )
-    dialog_engine = DialogEngine(knowledge, phrases, support_exten="489", sales_exten="500")
+    dialog_engine = DialogEngine(
+        knowledge,
+        phrases,
+        support_exten="489",
+        sales_exten="500",
+        audio_signature="{0}|{1}".format(cfg.tts_model, cfg.tts_voice),
+    )
 
     # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
     # без этого /metrics копил бы данные, пока не кончится память.

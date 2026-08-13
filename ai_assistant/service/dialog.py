@@ -54,9 +54,17 @@ def dict_to_prms(data: Dict[str, str]) -> List[Dict[str, str]]:
     return [{"Key": key, "Value": value} for key, value in data.items()]
 
 
-def _playback_name(text: str) -> str:
-    """Имя файла кэша: устойчивый хеш от текста. Пробелов быть не должно."""
-    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+def _playback_name(text: str, audio_signature: str = "") -> str:
+    """Имя файла кэша: устойчивый хеш от текста. Пробелов быть не должно.
+
+    В хеш входит и подпись звука (модель синтеза плюс голос). Файлы с этим
+    именем кэшируются на самой телефонной станции, и без подписи смена голоса
+    или модели там не замечается: станция продолжает играть старые файлы
+    прежним голосом. Ровно на это напоролись 13.08.2026 при первом живом
+    звонке — переключили модель, а в трубке звучала прежняя.
+    """
+    key = "{0}|{1}".format(audio_signature, text).encode("utf-8")
+    digest = hashlib.sha1(key).hexdigest()[:16]
     return "aia_" + digest
 
 
@@ -74,12 +82,16 @@ class DialogEngine:
         support_exten: str,
         sales_exten: str,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
+        audio_signature: str = "",
     ):
         self._knowledge = knowledge
         self._phrases = phrases
         self._support_exten = support_exten
         self._sales_exten = sales_exten
         self._max_sessions = max_sessions
+        # Модель синтеза и голос: попадают в имя файла, чтобы кэш на станции
+        # обновился сам при их смене.
+        self._audio_signature = audio_signature
         self._sessions: Dict[str, _SessionState] = {}
         # /dialog — обычная функция FastAPI, конкурентные звонки реально
         # выполняют handle() в разных потоках одновременно. Без этой
@@ -241,7 +253,7 @@ class DialogEngine:
         payload = {
             "Action": action,
             "TextToSpeak": text,
-            "FileToPlayback": _playback_name(text),
+            "FileToPlayback": _playback_name(text, self._audio_signature),
             "ConversationPoint": point,
             "ConversationScenario": "AiAssistantPrototype",
             "RedirectExten": exten,

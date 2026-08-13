@@ -493,3 +493,44 @@ def test_concurrent_session_creation_at_the_limit_does_not_crash_or_overflow():
 
     assert errors == []
     assert len(engine_obj._sessions) <= max_sessions
+
+
+def test_playback_name_changes_with_audio_signature():
+    """Имя файла обязано зависеть от модели и голоса.
+
+    Файлы с этим именем кэшируются на самой телефонной станции. Без подписи
+    смена голоса там не замечается: станция продолжает играть старые файлы
+    прежним голосом — на это напоролись при первом живом звонке 13.08.2026.
+    """
+    from ai_assistant.service.dialog import _playback_name
+
+    old = _playback_name("здравствуйте", "v4_ru|baya")
+    new_voice = _playback_name("здравствуйте", "v4_ru|eugene")
+    new_model = _playback_name("здравствуйте", "v5_ru|baya")
+
+    assert len({old, new_voice, new_model}) == 3
+    for name in (old, new_voice, new_model):
+        assert name.startswith("aia_")
+        assert " " not in name
+
+
+def test_playback_name_is_stable_for_the_same_signature():
+    from ai_assistant.service.dialog import _playback_name
+
+    assert _playback_name("привет", "v5_ru|eugene") == _playback_name("привет", "v5_ru|eugene")
+
+
+def test_engine_puts_audio_signature_into_playback_name():
+    engine_obj = DialogEngine(
+        FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500",
+        audio_signature="v5_ru|eugene",
+    )
+    other = DialogEngine(
+        FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500",
+        audio_signature="v4_ru|baya",
+    )
+    first = answer(engine_obj, conversationPoint=POINT_START)
+    second = answer(other, conversationPoint=POINT_START)
+
+    assert first["TextToSpeak"] == second["TextToSpeak"]
+    assert first["FileToPlayback"] != second["FileToPlayback"]

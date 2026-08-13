@@ -6,6 +6,7 @@ import pytest
 import requests
 
 from ai_assistant.agi.ai_assistant import (
+    REAL_REDIRECT,
     DialogAnswer,
     build_dialog_request,
     decide_failure_step,
@@ -90,6 +91,14 @@ def test_source_is_parseable_by_python_39_grammar():
     source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
     source = source_path.read_text(encoding="utf-8")
     ast.parse(source, feature_version=(3, 9))
+
+
+def test_real_redirect_is_off_by_default():
+    """Спецификация ("Сценарий звонка") требует: реального перевода в очередь
+    в прототипе нет — только запись в лог, иначе пока человек отлаживает
+    бота, отделы продаж и сопровождения получают поток тестовых звонков.
+    Включать переключатель можно только осознанно, после замеров."""
+    assert REAL_REDIRECT is False
 
 
 def test_source_avoids_pep604_unions_in_annotations():

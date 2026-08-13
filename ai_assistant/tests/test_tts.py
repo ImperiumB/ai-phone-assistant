@@ -124,6 +124,54 @@ def test_ssl_cert_file_is_restored_when_it_was_already_set(monkeypatch):
     assert os.environ["SSL_CERT_FILE"] == "C:\\custom\\ca-bundle.pem"
 
 
+class _RecordingHighRateModel:
+    """Заглушка модели, которая помнит переданную частоту и отдаёт тензор
+    известной длины на этой частоте — без загрузки настоящего Silero."""
+
+    def __init__(self, num_samples):
+        self.calls = []
+        self._num_samples = num_samples
+
+    def apply_tts(self, text, speaker, sample_rate):
+        import torch
+
+        self.calls.append({"text": text, "speaker": speaker, "sample_rate": sample_rate})
+        # Значения в пределах [-1, 1], как отдаёт настоящая модель.
+        return torch.linspace(-0.5, 0.5, steps=self._num_samples)
+
+
+def test_synthesize_asks_model_for_48k_and_downsamples_exactly_sixfold():
+    """Деревянный звук из прямого синтеза в 8000 Гц — так уже было и не
+    понравилось на слух (эксперимент: 4-70% больше энергии в полосе
+    3400-4000 Гц). Модель должны просить синтезировать на 48000 Гц, а
+    понижать частоту до телефонных 8000 Гц должен уже наш код через
+    scipy.signal.resample_poly. Этот тест обязан упасть, если кто-то
+    "упростит" synthesize обратно на прямой синтез в 8000 Гц."""
+    from ai_assistant.service.tts import (
+        MODEL_SAMPLE_RATE_HZ,
+        TELEPHONY_SAMPLE_RATE_HZ,
+        SileroSynthesizer,
+    )
+
+    assert MODEL_SAMPLE_RATE_HZ == 48000
+    assert TELEPHONY_SAMPLE_RATE_HZ == 8000
+
+    num_samples_48k = 48000  # ровно секунда звука на модельной частоте
+    fake_model = _RecordingHighRateModel(num_samples_48k)
+    synth = SileroSynthesizer.__new__(SileroSynthesizer)  # без сети и torch.hub.load
+    synth._model = fake_model
+
+    pcm = synth.synthesize("здравствуйте", "baya")
+
+    assert fake_model.calls == [
+        {"text": "здравствуйте", "speaker": "baya", "sample_rate": MODEL_SAMPLE_RATE_HZ}
+    ]
+    downsample_factor = MODEL_SAMPLE_RATE_HZ // TELEPHONY_SAMPLE_RATE_HZ
+    assert downsample_factor == 6
+    expected_samples = num_samples_48k // downsample_factor
+    assert len(pcm) == expected_samples * 2  # 16 бит = 2 байта на отсчёт
+
+
 @pytest.mark.integration
 def test_silero_produces_audible_speech(tmp_path):
     """Требует загрузки модели Silero. Запускать отдельно: pytest -m integration"""

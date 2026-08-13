@@ -50,6 +50,13 @@ class SegmentEvent:
     kind: str  # "utterance" | "silence"
     pcm: bytes = b""
     silence_ms: int = 0
+    # True — реплика выдана принудительно по потолку MAX_UTTERANCE_SECONDS,
+    # без единой миллисекунды паузы после неё. False (обычный случай) —
+    # реплика закончилась естественной паузой. Разница важна вызывающей
+    # стороне (main.py): смещать метку конца речи назад на pause_seconds
+    # можно только для False — при принудительной выдаче никакой паузы не
+    # было, и вычитание добавило бы к замеру несуществующие секунды.
+    forced: bool = False
 
 
 class SileroVoiceDetector:
@@ -169,7 +176,7 @@ class UtteranceSegmenter:
                 # без лимита даёт десятки секунд счёта — то есть движки
                 # оказываются в неравных условиях именно на реалистичном
                 # входе, который и должен их сравнивать.
-                utterance = SegmentEvent(kind="utterance", pcm=self._speech)
+                utterance = SegmentEvent(kind="utterance", pcm=self._speech, forced=True)
                 self._speech = b""
                 self._silence_frames = 0
                 return [utterance]

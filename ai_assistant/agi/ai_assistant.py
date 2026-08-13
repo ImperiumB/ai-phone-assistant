@@ -4,8 +4,11 @@
 
 Логики диалога не содержит: гонит аудио в speech-сервис и исполняет присланное
 действие. Все защиты перенесены из боевого recosintsite_V2.py, они выстраданы:
-RLock вокруг agi.*, daemon-потоки озвучки, os._exit в фатальном обработчике,
-Playback для синхронной озвучки против background для асинхронной.
+RLock вокруг agi.*, неблокирующая озвучка через background-команду самой
+станции (собственных потоков озвучки скрипт не заводит), os._exit в
+фатальном обработчике с попыткой взять agi-блокировку не дольше секунды,
+Playback для синхронной озвучки против background для асинхронной, аварийный
+перевод звонка на сопровождение при отказе речевого сервиса.
 
 ВНИМАНИЕ: исполняется под Python 3.9.2. Синтаксис 3.10+ не использовать.
 """
@@ -13,8 +16,11 @@ import os
 import sys
 import traceback
 from dataclasses import dataclass
-from threading import RLock, Thread
-from typing import Any, Dict, List, Optional
+from threading import RLock
+from typing import Any, Dict, List
+
+import grpc
+import requests
 
 ACTION_RECOGNIZE = "Recognize"
 ACTION_REDIRECT = "Redirect"
@@ -23,6 +29,17 @@ ACTION_HANGUP = "Hangup"
 CHUNK_SIZE = 8000  # 4000 отсчётов = 0,5 секунды при 8000 Гц
 CALL_TIMEOUT_S = 120
 AUDIO_CACHE_DIR = "/var/lib/asterisk/sounds/ai_bot/cache"
+
+# Аварийный путь на случай, если речевой сервис недоступен целиком: заранее
+# записанная фраза (не синтезируется на лету — сервис же и лежит) и перевод
+# на отдел сопровождения, чтобы клиент услышал обычный перевод, а не тишину.
+SERVICE_UNAVAILABLE_SOUND = "/var/lib/asterisk/sounds/ai_bot/service_unavailable"
+SUPPORT_FALLBACK_EXTEN = "489"
+
+# Сколько ждать agi-блокировку на вежливый отбой при завершении процесса.
+# Если не получилось за это время — канал занят зависшим потоком озвучки,
+# и вежливый hangup пропускается в пользу немедленного os._exit.
+LOCK_ACQUIRE_TIMEOUT_S = 1.0
 
 _agi_lock = RLock()  # AGI — построчный протокол над stdin/stdout, не потокобезопасен
 _redirect_done = False
@@ -72,13 +89,26 @@ def decide_next_step(answer: DialogAnswer) -> str:
     raise ValueError("Неизвестное действие: {0}".format(answer.action))
 
 
+def decide_failure_step(error):
+    # type: (BaseException) -> str
+    """Различает отказ связи с речевым сервисом от программной ошибки.
+
+    Обрыв HTTP-запроса к /dialog или /tts (requests) и обрыв gRPC-стрима
+    распознавания — это отказ сервиса, клиент не должен слышать тишину и
+    обрыв: ведём на аварийный перевод ("failover"). Любая другая ошибка —
+    баг в нашем коде, её маскировать нельзя, она должна уйти в общий
+    перехват ("reraise").
+    """
+    if isinstance(error, (requests.exceptions.RequestException, grpc.RpcError)):
+        return "failover"
+    return "reraise"
+
+
 # --- Дальше идёт часть, работающая только внутри Asterisk ---------------------
 
 
 def _main():  # pragma: no cover - требует живого канала Asterisk
     import asterisk.agi
-    import grpc
-    import requests
     from func_timeout import FunctionTimedOut, func_timeout
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -113,7 +143,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
     linked_id = agi.env.get("agi_uniqueid", "")
     http_base = "http://{0}:{1}".format(service_host, http_port)
 
-    state = {"point": "Start", "playing": False}
+    state = {"point": "Start"}
 
     def fetch_audio(text, file_name):
         target = os.path.join(AUDIO_CACHE_DIR, file_name + ".wav")
@@ -170,6 +200,27 @@ def _main():  # pragma: no cover - требует живого канала Aste
             agi.hangup()
         return False
 
+    def failover_to_support(error):
+        # Речевой сервис недоступен целиком (не отвечает /dialog, оборвался
+        # gRPC-стрим). Синтезировать нечего — сервис же и лежит, поэтому
+        # играем заранее записанную фразу и переводим на сопровождение, а не
+        # молчим и не кладём трубку сразу.
+        global _redirect_done
+        log_it("SERVICE FAILOVER ({0}) -> exten {1}".format(error, SUPPORT_FALLBACK_EXTEN))
+        try:
+            if os.path.exists(SERVICE_UNAVAILABLE_SOUND + ".wav"):
+                with _agi_lock:
+                    agi.appexec("Playback", SERVICE_UNAVAILABLE_SOUND)
+        except Exception as playback_error:
+            log_it("FAILOVER PLAYBACK ERROR: {0}".format(playback_error))
+        try:
+            with _agi_lock:
+                agi.appexec("Goto", "pstn-out,{0},1".format(SUPPORT_FALLBACK_EXTEN))
+                agi.set_variable("ScriptFinished", True)
+            _redirect_done = True
+        except Exception as redirect_error:
+            log_it("FAILOVER REDIRECT ERROR: {0}".format(redirect_error))
+
     def audio_stream(audio_source):
         yield speech_pb2.StreamRequest(session_id=linked_id)
         while True:
@@ -184,18 +235,28 @@ def _main():  # pragma: no cover - требует живого канала Aste
         audio_source = os.fdopen(3, "rb")
         channel = grpc.insecure_channel("{0}:{1}".format(service_host, grpc_port))
         try:
-            if not apply(ask_dialog("", False)):
-                return
-            stub = speech_pb2_grpc.SpeechStub(channel)
-            responses = stub.Recognize(audio_stream(audio_source), timeout=CALL_TIMEOUT_S * 3)
-            for response in responses:
-                if response.type == speech_pb2.StreamResponse.SILENCE:
-                    if not apply(ask_dialog("", True)):
-                        return
-                elif response.type == speech_pb2.StreamResponse.FINAL:
-                    log_it("FINAL: {0}".format(response.text))
-                    if not apply(ask_dialog(response.text, False)):
-                        return
+            try:
+                if not apply(ask_dialog("", False)):
+                    return
+                stub = speech_pb2_grpc.SpeechStub(channel)
+                responses = stub.Recognize(audio_stream(audio_source), timeout=CALL_TIMEOUT_S * 3)
+                for response in responses:
+                    if response.type == speech_pb2.StreamResponse.SILENCE:
+                        if not apply(ask_dialog("", True)):
+                            return
+                    elif response.type == speech_pb2.StreamResponse.FINAL:
+                        log_it("FINAL: {0}".format(response.text))
+                        if not apply(ask_dialog(response.text, False)):
+                            return
+            except Exception as error:
+                # Отказ связи с речевым сервисом (обрыв /dialog, обрыв
+                # gRPC-стрима) не должен проваливаться в общий FATAL-перехват
+                # молча: клиент услышит тишину и обрыв. Программные ошибки
+                # маскировать нельзя — они летят дальше как раньше.
+                if decide_failure_step(error) == "failover":
+                    failover_to_support(error)
+                    return
+                raise
         finally:
             channel.close()
             try:
@@ -213,14 +274,28 @@ def _main():  # pragma: no cover - требует живого канала Aste
     except Exception:
         log_it("FATAL: {0}".format(traceback.format_exc()))
     finally:
-        try:
-            if not _redirect_done:
-                with _agi_lock:
+        # Блокировку на вежливый отбой берём НЕ безусловно: если её всё ещё
+        # держит зависший поток озвучки (например, застрял в блокирующем
+        # Playback на мёртвом канале), безусловный with here заблокировал бы
+        # os._exit тоже — а он ради этого случая и существует. Поэтому ждём
+        # блокировку не дольше LOCK_ACQUIRE_TIMEOUT_S; не получилось — просто
+        # пропускаем вежливый hangup, станция закроет канал сама.
+        if not _redirect_done:
+            acquired = _agi_lock.acquire(timeout=LOCK_ACQUIRE_TIMEOUT_S)
+            if acquired:
+                try:
                     agi.hangup()
-        except Exception:
-            pass
-        # Немедленный выход: не ждём застрявшие потоки, иначе процесс не реапится
-        # и на Астериске копятся зомби до падения (уже ловили).
+                except Exception:
+                    pass
+                finally:
+                    _agi_lock.release()
+            else:
+                sys.stderr.write(
+                    "AI ASSISTANT: agi-канал занят, вежливый hangup пропущен\n"
+                )
+        # Немедленный выход при любом исходе: не ждём застрявшие потоки, иначе
+        # процесс не реапится и на Астериске копятся зомби до падения (уже
+        # ловили).
         os._exit(0)
 
 

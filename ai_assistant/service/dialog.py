@@ -131,6 +131,22 @@ class DialogEngine:
                 result = self._transfer(self._support_exten)
             else:
                 result = self._speak(self._phrases.silence, ACTION_RECOGNIZE, point)
+        elif not text:
+            # Пустой результат распознавания — это не вопрос клиента, а обрывок:
+            # щелчок в линии, шорох, кашель, хлопок двери. Отрезок оказался
+            # короче порога распознавания, и движок вернул пустую строку.
+            #
+            # Раньше такое доходило до _handle_question и трактовалось как
+            # "вопроса нет в базе знаний" — бот немедленно переводил звонок на
+            # специалиста. На живом звонке 13.08.2026 клиент не успел раскрыть
+            # рта: включённая громкая связь дала щелчок, и разговор кончился.
+            # В бою это срабатывало бы от любого постороннего звука.
+            #
+            # Правильное поведение — молча продолжать слушать, оставаясь в той
+            # же точке разговора. Если клиент действительно молчит, это отработает
+            # ветка silence по своему таймауту, а не подмена вопроса шумом.
+            log.info("Пустой результат распознавания в точке %s — продолжаем слушать", point)
+            result = self._keep_listening(point)
         else:
             state.silence_count = 0
             if point == POINT_CONFIRM:
@@ -241,6 +257,22 @@ class DialogEngine:
 
     def _transfer(self, exten: str) -> List[Dict[str, str]]:
         return self._speak(self._phrases.transfer, ACTION_REDIRECT, POINT_FINISHED, exten=exten)
+
+    def _keep_listening(self, point: str) -> List[Dict[str, str]]:
+        """Ничего не произносить и остаться в той же точке разговора.
+
+        Телефонный скрипт на пустой текст озвучки ничего не проигрывает и
+        просто продолжает слушать — клиент даже не заметит, что бот на что-то
+        среагировал.
+        """
+        return [
+            {"Key": "Action", "Value": ACTION_RECOGNIZE},
+            {"Key": "TextToSpeak", "Value": ""},
+            {"Key": "FileToPlayback", "Value": ""},
+            {"Key": "ConversationPoint", "Value": point},
+            {"Key": "ConversationScenario", "Value": "AiAssistantPrototype"},
+            {"Key": "RedirectExten", "Value": ""},
+        ]
 
     def _speak(
         self,

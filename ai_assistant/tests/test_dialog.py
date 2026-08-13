@@ -534,3 +534,49 @@ def test_engine_puts_audio_signature_into_playback_name():
 
     assert first["TextToSpeak"] == second["TextToSpeak"]
     assert first["FileToPlayback"] != second["FileToPlayback"]
+
+
+def test_empty_recognition_keeps_listening_instead_of_transferring():
+    """Шум в линии не должен обрывать разговор переводом на специалиста.
+
+    Живой звонок 13.08.2026: клиент включил громкую связь, щелчок дал отрезок
+    короче порога распознавания, движок вернул пустую строку — и бот немедленно
+    перевёл звонок, не дав человеку сказать ни слова.
+    """
+    engine_obj = engine(FakeKnowledge(RECORD))
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="")
+
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["RedirectExten"] == ""
+    assert result["TextToSpeak"] == ""
+    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+
+
+def test_empty_recognition_does_not_pollute_the_knowledge_base():
+    knowledge = FakeKnowledge(None)
+    answer(engine(knowledge), conversationPoint=POINT_ASK_QUESTION, recognizedText="")
+    assert knowledge.added == []
+
+
+def test_empty_recognition_on_confirmation_keeps_the_found_record():
+    """Шум во время уточняющего вопроса не должен сбрасывать найденную запись."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    noise = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="   ")
+    assert noise["Action"] == ACTION_RECOGNIZE
+    assert noise["ConversationPoint"] == POINT_CONFIRM
+
+    # Клиент всё-таки ответил — запись не потерялась, перевод в продажи состоялся
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["RedirectExten"] == "500"
+
+
+def test_real_question_still_reaches_the_knowledge_base():
+    """Защита от пустого текста не должна ломать обычный путь."""
+    result = answer(
+        engine(FakeKnowledge(RECORD)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="стиралка не крутит",
+    )
+    assert result["TextToSpeak"] == RECORD.clarifying_question

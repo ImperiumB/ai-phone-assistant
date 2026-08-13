@@ -23,7 +23,13 @@ omegaconf==2.3.1
 # GigaAM (Сбер, MIT) — второй движок распознавания, задача UL-17568/Task 8.
 # Тянет onnx, onnxruntime, hydra-core, sentencepiece, tqdm — версии этих
 # пакетов зафиксированы внутри gigaam==0.2.0 (Requires-Dist), отдельно не пинуем.
-gigaam @ git+https://github.com/salute-developers/GigaAM.git
+# Библиотека не публикует релизы в PyPI, ставится прямо из git — без пина на
+# конкретный коммит переустановка на другой машине притянула бы неизвестно
+# что (голова ветки могла уйти вперёд между установками). Зафиксирован
+# коммит, который реально стоит на этой машине (узнан через
+# `py -3.12 -m pip show gigaam` + direct_url.json пакета — pip show версию
+# коммита не печатает напрямую).
+gigaam @ git+https://github.com/salute-developers/GigaAM.git@559d88d6b72541412743929f633a6ae7c9950b85
 soundfile==0.14.0
 # gigaam.load_audio() декодирует и ресемплит вход системным ffmpeg (subprocess).
 # На машине без установленного ffmpeg это даёт бинарник как запасной вариант —

@@ -334,6 +334,69 @@ def test_speech_end_mark_is_shifted_back_by_the_segmenter_pause():
     assert duration >= pause_ms * 0.9
 
 
+def test_active_timelines_registry_evicts_the_oldest_entry_when_full():
+    """Minor из повторного ревью: реестр активных таймлайнов наполняется в
+    Recognize() и вычищается только при обращении к /dialog. Если звонок
+    оборвался между этими моментами (сброс трубки, общий таймаут звонка,
+    падение AGI-скрипта на станции), запись оставалась бы в реестре навсегда
+    — демон живёт постоянно. Тот же приём, что и для DEFAULT_MAX_SESSIONS в
+    dialog.py: самая старая запись вытесняется при превышении предела."""
+    active_timelines = {}
+    timelines_lock = threading.Lock()
+    sink = []
+
+    def recognize_one(call_id):
+        script = [[SegmentEvent(kind="utterance", pcm=pcm(800))]]
+        servicer = SpeechServicer(
+            lambda: FakeSegmenter(script),
+            FakeEngine(),
+            timeline_sink=sink,
+            active_timelines=active_timelines,
+            timelines_lock=timelines_lock,
+            max_active_timelines=2,
+        )
+        list(servicer.Recognize(FakeRequestIterator(call_id, [pcm(400)]), context=None))
+
+    recognize_one("a")
+    recognize_one("b")
+    assert set(active_timelines) == {"a", "b"}
+
+    recognize_one("c")
+    assert set(active_timelines) == {"b", "c"}  # "a" — самая старая, вытеснена
+
+
+def test_active_timelines_registry_does_not_evict_on_repeated_calls_for_the_same_id():
+    """Повторная запись для ТОГО ЖЕ звонка (следующая реплика в разговоре)
+    не должна считаться новой записью и запускать вытеснение на ровном
+    месте — предел не должен мешать многоходовым разговорам."""
+    active_timelines = {}
+    timelines_lock = threading.Lock()
+    sink = []
+
+    def recognize_one(call_id):
+        script = [[SegmentEvent(kind="utterance", pcm=pcm(800))]]
+        servicer = SpeechServicer(
+            lambda: FakeSegmenter(script),
+            FakeEngine(),
+            timeline_sink=sink,
+            active_timelines=active_timelines,
+            timelines_lock=timelines_lock,
+            max_active_timelines=2,
+        )
+        list(servicer.Recognize(FakeRequestIterator(call_id, [pcm(400)]), context=None))
+
+    recognize_one("a")
+    recognize_one("b")
+    recognize_one("a")  # вторая реплика того же звонка "a"
+    assert set(active_timelines) == {"a", "b"}
+
+
+def test_speech_servicer_default_active_timelines_limit_is_sane():
+    from ai_assistant.service.main import MAX_ACTIVE_TIMELINES
+
+    assert 0 < MAX_ACTIVE_TIMELINES <= 100_000
+
+
 def test_dialog_stage_is_marked_on_the_shared_timeline_for_matching_call(tmp_path):
     """Item 3 финального ревью: STAGE_DIALOG_DONE нигде не помечался, хотя
     объявлен в metrics.py. Проверяем, что /dialog находит таймлайн,

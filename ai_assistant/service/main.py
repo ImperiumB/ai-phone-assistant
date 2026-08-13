@@ -3,9 +3,10 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections import deque
 from concurrent import futures
-from typing import Callable, List
+from typing import Callable, Dict, List, Optional, Tuple
 
 import grpc
 from fastapi import FastAPI, HTTPException, Query
@@ -35,6 +36,7 @@ from ai_assistant.service.knowledge import (  # noqa: E402
     load_knowledge_base,
 )
 from ai_assistant.service.metrics import (  # noqa: E402
+    STAGE_DIALOG_DONE,
     STAGE_SPEECH_END,
     STAGE_STT_DONE,
     CallTimeline,
@@ -47,10 +49,25 @@ log = logging.getLogger("aia")
 
 
 class SpeechServicer(speech_pb2_grpc.SpeechServicer):
-    def __init__(self, segmenter_factory: Callable[[], object], engine, timeline_sink: List[dict]):
+    def __init__(
+        self,
+        segmenter_factory: Callable[[], object],
+        engine,
+        timeline_sink: List[dict],
+        active_timelines: Optional[Dict[str, Tuple[CallTimeline, dict]]] = None,
+        timelines_lock: Optional[threading.Lock] = None,
+    ):
         self._segmenter_factory = segmenter_factory
         self._engine = engine
         self._timeline_sink = timeline_sink
+        # Последний таймлайн по каждому звонку (ключ — session_id, он же
+        # linkedId AGI-скрипта): ручка /dialog (build_http_app) достаёт его
+        # отсюда, чтобы пометить конец решения диалога на ТОМ ЖЕ таймлайне,
+        # а не завести новый несвязанный замер. Опционально — старые вызовы
+        # SpeechServicer(...) без этих двух параметров (тесты, прежний код)
+        # продолжают работать как раньше, просто без сквозной разбивки.
+        self._active_timelines = active_timelines
+        self._timelines_lock = timelines_lock or threading.Lock()
 
     def Recognize(self, request_iterator, context):
         segmenter = self._segmenter_factory()
@@ -83,7 +100,16 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                     )
                     continue
                 timeline.mark(STAGE_STT_DONE)
-                self._timeline_sink.append(timeline.as_dict())
+                snapshot = timeline.as_dict()
+                self._timeline_sink.append(snapshot)
+                if self._active_timelines is not None and session_id:
+                    # Тот же объект timeline и тот же словарь snapshot кладём
+                    # в общий реестр — /dialog найдёт их по session_id и
+                    # мутирует snapshot на месте через .update(), поэтому
+                    # обновление станет видно и в /metrics (там лежит именно
+                    # этот объект, а не его копия).
+                    with self._timelines_lock:
+                        self._active_timelines[session_id] = (timeline, snapshot)
                 log.info("STT [%s]: %s | %s", session_id, text, timeline.durations())
 
                 yield speech_pb2.StreamResponse(
@@ -91,19 +117,53 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                 )
 
 
-def build_http_app(dialog_engine: DialogEngine, tts_cache, voice: str) -> FastAPI:
+def build_http_app(
+    dialog_engine: DialogEngine,
+    tts_cache,
+    voice: str,
+    active_timelines: Optional[Dict[str, Tuple[CallTimeline, dict]]] = None,
+    timelines_lock: Optional[threading.Lock] = None,
+) -> FastAPI:
     app = FastAPI(title="AI Assistant speech service")
+    lock = timelines_lock or threading.Lock()
 
     @app.post("/dialog")
     def dialog(payload: dict):
         prms = prms_to_dict(payload.get("prms", []))
-        return JSONResponse(dialog_engine.handle(prms))
+        result = dialog_engine.handle(prms)
+
+        # Сквозная разбивка задержки (Important из финального ревью): у
+        # звонка тот же linkedId, что и session_id в gRPC-потоке — находим
+        # по нему таймлайн, оставленный Recognize() после STT, и помечаем
+        # завершение решения диалога на нём же, а не заводим отдельный
+        # замер. Формат ответа /dialog (список пар Key/Value) не меняется —
+        # это чисто внутренняя бухгалтерия сервиса.
+        linked_id = prms.get("linkedId", "")
+        if active_timelines is not None and linked_id:
+            with lock:
+                entry = active_timelines.pop(linked_id, None)
+            if entry is not None:
+                timeline, snapshot = entry
+                timeline.mark(STAGE_DIALOG_DONE)
+                snapshot.update(timeline.as_dict())
+                log.info("DIALOG [%s]: %s", linked_id, timeline.durations())
+
+        return JSONResponse(result)
 
     @app.get("/tts")
     def tts(text: str = Query(...), voice_name: str = Query(default="")):
         if not text.strip():
             raise HTTPException(status_code=400, detail="Пустой текст для синтеза")
+        # /tts не получает linkedId (контракт с AGI-скриптом не меняем —
+        # см. фразу задачи "не меняй формат обмена и сигнатуры"), поэтому
+        # длительность синтеза не с чем сопоставить на конкретный звонок в
+        # /metrics. Логируем её отдельно — соединить с конкретным звонком
+        # человек сможет по временным меткам скачивания в логе станции
+        # (ai_assistant/agi/ai_assistant.py, TIMING download_*).
+        start = time.perf_counter()
         path = tts_cache.get(text, voice_name or voice)
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        log.info("TTS %.1f ms | voice=%s | text=%.80r", duration_ms, voice_name or voice, text)
         return FileResponse(path, media_type="audio/wav")
 
     @app.get("/health")
@@ -141,6 +201,11 @@ def main() -> None:
     # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
     # без этого /metrics копил бы данные, пока не кончится память.
     timeline_sink: "deque[dict]" = deque(maxlen=MAX_TIMELINE_RECORDS)
+    # Последний таймлайн по каждому звонку (см. SpeechServicer и
+    # build_http_app выше) — общий между gRPC-обработчиком и HTTP-ручкой
+    # /dialog, оба выполняются каждый в своём потоке.
+    active_timelines: Dict[str, Tuple[CallTimeline, dict]] = {}
+    timelines_lock = threading.Lock()
 
     def segmenter_factory():
         # detector — общая на процесс "эталонная" модель, но она рекуррентная
@@ -159,13 +224,14 @@ def main() -> None:
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
     speech_pb2_grpc.add_SpeechServicer_to_server(
-        SpeechServicer(segmenter_factory, engine, timeline_sink), server
+        SpeechServicer(segmenter_factory, engine, timeline_sink, active_timelines, timelines_lock),
+        server,
     )
     server.add_insecure_port("0.0.0.0:{0}".format(cfg.grpc_port))
     server.start()
     log.info("gRPC слушает порт %s", cfg.grpc_port)
 
-    app = build_http_app(dialog_engine, tts_cache, cfg.tts_voice)
+    app = build_http_app(dialog_engine, tts_cache, cfg.tts_voice, active_timelines, timelines_lock)
 
     @app.get("/metrics")
     def metrics():

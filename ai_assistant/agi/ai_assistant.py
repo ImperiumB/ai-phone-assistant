@@ -17,6 +17,7 @@ Playback для синхронной озвучки против background дл
 """
 import os
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from threading import RLock
@@ -163,12 +164,24 @@ def _main():  # pragma: no cover - требует живого канала Aste
             return target
         if not os.path.isdir(AUDIO_CACHE_DIR):
             os.makedirs(AUDIO_CACHE_DIR)
+        # Сквозная разбивка задержки (речевой сервис не знает linkedId в
+        # /tts — контракт не меняем, см. РАЗВЁРТЫВАНИЕ.md), поэтому метки
+        # вокруг скачивания звука пишем здесь, в логе станции: человек
+        # сложит итог из этих меток и лога сервиса вручную.
+        download_start = time.time()
+        log_it("TIMING download_start {0:.3f}".format(download_start))
         response = requests.get(http_base + "/tts", params={"text": text}, timeout=30)
         response.raise_for_status()
         tmp_target = target + ".tmp"
         with open(tmp_target, "wb") as handle:
             handle.write(response.content)
         os.replace(tmp_target, target)
+        download_done = time.time()
+        log_it(
+            "TIMING download_done {0:.3f} ({1:.1f} ms)".format(
+                download_done, (download_done - download_start) * 1000.0
+            )
+        )
         return target
 
     def speak(answer, blocking):
@@ -182,6 +195,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # Playback блокирует до конца фразы — обязателен перед Goto и Hangup.
         application = "Playback" if blocking else "background"
         path = os.path.join(AUDIO_CACHE_DIR, answer.file_to_playback)
+        log_it("TIMING playback_start {0:.3f}".format(time.time()))
         with _agi_lock:
             agi.appexec(application, path)
 

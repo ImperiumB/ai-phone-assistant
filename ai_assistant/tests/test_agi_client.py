@@ -1,5 +1,6 @@
 import ast
 import pathlib
+import threading
 
 import grpc
 import pytest
@@ -8,6 +9,7 @@ import requests
 from ai_assistant.agi.ai_assistant import (
     REAL_REDIRECT,
     DialogAnswer,
+    _atomic_write,
     build_dialog_request,
     decide_failure_step,
     decide_next_step,
@@ -84,6 +86,67 @@ def test_network_failure_leads_to_failover(error):
 
 def test_programming_error_leads_to_general_catch():
     assert decide_failure_step(ValueError("bug in our own code")) == "reraise"
+
+
+def test_atomic_write_creates_the_target_file_with_the_given_content(tmp_path):
+    target = tmp_path / "phrase.wav"
+    _atomic_write(str(target), b"hello")
+    assert target.read_bytes() == b"hello"
+
+
+def test_atomic_write_leaves_no_temporary_file_behind(tmp_path):
+    target = tmp_path / "phrase.wav"
+    _atomic_write(str(target), b"hello")
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_uses_a_unique_temp_name_per_call(tmp_path, monkeypatch):
+    """Item 8 финального ревью: раньше временный файл назывался одинаково
+    для всех звонков — два одновременных, обоим нужна одна и та же ещё не
+    закэшированная фраза, писали в один и тот же ".tmp" и затирали друг
+    друга (ошибка молча проглатывалась в speak(), абонент не слышал ответа).
+    """
+    target = tmp_path / "phrase.wav"
+    seen_tmp_names = []
+    real_open = open
+
+    def spying_open(path, *args, **kwargs):
+        if str(path).endswith(".tmp"):
+            seen_tmp_names.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", spying_open)
+    _atomic_write(str(target), b"one")
+    _atomic_write(str(target), b"two")
+
+    assert len(seen_tmp_names) == 2
+    assert seen_tmp_names[0] != seen_tmp_names[1]
+
+
+def test_atomic_write_survives_concurrent_writers_to_the_same_target(tmp_path):
+    """Прямое воспроизведение сценария из ревью: несколько потоков
+    одновременно пишут по одному и тому же итоговому пути — раньше падало
+    ошибкой доступа к файлу на Windows (тот же паттерн, что и в
+    ai_assistant/service/tts.py, test_concurrent_requests_for_the_same_uncached_text_all_succeed)."""
+    target = tmp_path / "phrase.wav"
+    errors = []
+    lock = threading.Lock()
+
+    def worker():
+        try:
+            _atomic_write(str(target), b"same phrase")
+        except Exception as exc:  # noqa: BLE001 — тест должен увидеть любое падение
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert target.read_bytes() == b"same phrase"
 
 
 def test_source_is_parseable_by_python_39_grammar():

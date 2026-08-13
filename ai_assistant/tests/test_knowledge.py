@@ -12,6 +12,7 @@ from ai_assistant.service.knowledge import (
 class FakeEmbedder:
     """Отдаёт заранее заданный вектор для каждой известной строки.
 
+    Требует префиксы search_query: или search_document: для защиты от регрессии.
     Неизвестные строки получают вектор, ортогональный всем остальным,
     поэтому близость с ними равна нулю.
     """
@@ -22,9 +23,16 @@ class FakeEmbedder:
     def encode(self, texts):
         vectors = []
         for text in texts:
-            # KnowledgeBase добавляет префиксы search_query:/search_document: — снимаем их,
-            # чтобы искать по исходной фразе.
-            clean = text.split(": ", 1)[-1] if text.startswith("search_") else text
+            # KnowledgeBase обязан добавлять префиксы search_query:/search_document:
+            if text.startswith("search_query: "):
+                clean = text[len("search_query: "):]
+            elif text.startswith("search_document: "):
+                clean = text[len("search_document: "):]
+            else:
+                raise AssertionError(
+                    f"KnowledgeBase должен добавлять префикс 'search_query: ' или 'search_document: ', "
+                    f"получен текст без префикса: {text!r}"
+                )
             vector = self._mapping.get(clean, [0.0, 0.0, 1.0])
             array = np.array(vector, dtype=np.float32)
             vectors.append(array / np.linalg.norm(array))
@@ -115,3 +123,52 @@ def test_load_reads_all_records_from_file(tmp_path):
     assert found is not None
     assert found[0].id == 7
     assert found[0].equipment_type == "Посудомоечные машины"
+
+
+class RecordingEmbedder:
+    """Эмбеддер, запоминающий все полученные строки для проверки префиксов."""
+
+    def __init__(self, mapping):
+        self._mapping = mapping
+        self.received_texts = []
+
+    def encode(self, texts):
+        vectors = []
+        for text in texts:
+            self.received_texts.append(text)
+            # Требуем префикс
+            if text.startswith("search_query: "):
+                clean = text[len("search_query: "):]
+            elif text.startswith("search_document: "):
+                clean = text[len("search_document: "):]
+            else:
+                raise AssertionError(f"Missing prefix: {text!r}")
+            vector = self._mapping.get(clean, [0.0, 0.0, 1.0])
+            array = np.array(vector, dtype=np.float32)
+            vectors.append(array / np.linalg.norm(array))
+        return np.vstack(vectors)
+
+
+def test_knowledge_base_adds_search_prefixes():
+    """Проверяет, что KnowledgeBase добавляет префиксы search_query: и search_document:."""
+    embedder = RecordingEmbedder({
+        "стиральная машина не отжимает": [1.0, 0.0, 0.0],
+        "не работает холодильник": [0.0, 1.0, 0.0],
+    })
+    records = [
+        make_record(1, "стиральная машина не отжимает"),
+        make_record(2, "не работает холодильник"),
+    ]
+    base = KnowledgeBase(records, embedder, threshold=0.75)
+
+    # Проверяем, что при построении базы все документы получили префикс search_document:
+    for text in embedder.received_texts:
+        assert text.startswith("search_document: "), f"Документ должен иметь префикс: {text!r}"
+
+    # Очищаем список для проверки search
+    embedder.received_texts = []
+
+    # Проверяем, что при поиске запрос получает префикс search_query:
+    base.search("стиральная машина не отжимает")
+    assert any(t.startswith("search_query: ") for t in embedder.received_texts), \
+        f"Запрос должен иметь префикс search_query:, получено: {embedder.received_texts}"

@@ -161,11 +161,18 @@ def test_support_scenario_redirects_to_support_exten():
     assert result["RedirectExten"] == "489"
 
 
-def test_negative_confirmation_asks_to_rephrase_and_returns_to_question():
+def test_negative_confirmation_returns_to_question():
+    """На «нет» разговор возвращается к вопросу клиента.
+
+    Формулировка при этом своя: бот не угадал тему, а не «не расслышал» —
+    см. test_explicit_no_asks_what_the_client_needs. Замечание с показа
+    руководству 14.08.2026: «надо его на второй круг возвращать, какой-то
+    фразой вроде „Что вас интересует?“».
+    """
     engine_obj = engine(FakeKnowledge(RECORD))
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
-    assert result["TextToSpeak"] == PHRASES.misrecognition
+    assert result["TextToSpeak"] == PHRASES.wrong_guess
     assert result["Action"] == ACTION_RECOGNIZE
     assert result["ConversationPoint"] == POINT_ASK_QUESTION
 
@@ -632,3 +639,64 @@ def test_direction_extension_wins_over_scenario():
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="течёт посудомойка")
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
     assert result["RedirectExten"] == "7112"
+
+
+def test_explicit_no_asks_what_the_client_needs():
+    """На «нет» бот не угадал тему — надо спросить, что нужно, а не просить переформулировать."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
+
+    assert result["TextToSpeak"] == PHRASES.wrong_guess
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+
+
+def test_unrecognized_answer_still_asks_to_rephrase():
+    """Нераспознанный ответ — другой случай: бот не понял, а не ошибся темой."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="ну как сказать")
+
+    assert result["TextToSpeak"] == PHRASES.misrecognition
+    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+
+
+def test_second_round_after_no_leads_to_a_new_direction():
+    """Второй круг рабочий: после «нет» клиент называет другую тему и попадает куда надо."""
+    holodilnik = KnowledgeRecord(
+        id=3,
+        question="не морозит холодильник",
+        clarifying_question="Речь о холодильнике?",
+        positive_answers=["да"],
+        negative_answers=["нет"],
+        positive_reply="Соединяю со специалистом по холодильникам",
+        scenario="redirect_direction",
+        redirect_exten="7104",
+    )
+
+    class SwitchingKnowledge(FakeKnowledge):
+        """Первый раз отдаёт стиралку, после «нет» — холодильник."""
+
+        def __init__(self):
+            super().__init__(RECORD)
+            self._calls = 0
+
+        def search(self, text):
+            self._calls += 1
+            return (RECORD, 0.9) if self._calls == 1 else (holodilnik, 0.9)
+
+        def best_match(self, text):
+            return self.search(text)
+
+    engine_obj = DialogEngine(
+        SwitchingKnowledge(), PHRASES, support_exten="489", sales_exten="500"
+    )
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="что-то сломалось")
+    after_no = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
+    assert after_no["TextToSpeak"] == PHRASES.wrong_guess
+
+    second = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник")
+    assert second["TextToSpeak"] == holodilnik.clarifying_question
+    confirmed = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+    assert confirmed["RedirectExten"] == "7104"

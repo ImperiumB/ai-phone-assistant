@@ -50,6 +50,11 @@ class Phrases:
     misrecognition: str
     transfer: str
     silence: str
+    #: Клиент явно ответил «нет» на уточняющий вопрос — бот не угадал тему.
+    #: Это не то же самое, что misrecognition: там бот не понял ответ, здесь
+    #: понял прекрасно и ошибся сам. Просить «переформулировать» в этом случае
+    #: невежливо и сбивает с толку — надо просто спросить, что нужно клиенту.
+    wrong_guess: str = "Тогда подскажите, пожалуйста, что вас интересует?"
 
 
 def prms_to_dict(items: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -255,8 +260,13 @@ class DialogEngine:
                 record.positive_reply, ACTION_REDIRECT, POINT_FINISHED, exten=exten, extra=extra
             )
 
-        # И отрицательный, и нераспознанный ответ ведут в одну ветку: просим переформулировать.
+        # Явное «нет» и нераспознанный ответ — разные случаи, и звучать должны
+        # по-разному. При «нет» бот всё расслышал, но не угадал тему: логично
+        # спросить, что нужно клиенту, а не просить его переформулировать.
+        # Оба пути возвращают разговор на второй круг, к вопросу клиента.
         state.record = None
+        if self._matches(text, record.negative_answers):
+            return self._speak(self._phrases.wrong_guess, ACTION_RECOGNIZE, POINT_ASK_QUESTION)
         return self._speak(self._phrases.misrecognition, ACTION_RECOGNIZE, POINT_ASK_QUESTION)
 
     @staticmethod

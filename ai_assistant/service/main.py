@@ -279,6 +279,7 @@ def main() -> None:
         misrecognition="Попробуйте переформулировать свой вопрос, пожалуйста",
         transfer="Минуту, перевожу ваш звонок на специалиста",
         silence="Вы меня слышите?",
+        wrong_guess="Тогда подскажите, пожалуйста, что вас интересует?",
     )
     dialog_engine = DialogEngine(
         knowledge,

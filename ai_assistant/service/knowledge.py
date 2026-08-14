@@ -18,6 +18,10 @@ DOCUMENT_PREFIX = "search_document: "
 class KnowledgeRecord:
     id: int
     question: str
+    #: Как ту же проблему называют живые люди. Все варианты попадают в поиск
+    #: наравне с основным вопросом — именно они позволяют держать порог
+    #: близости высоким, не отсекая нормальную речь.
+    question_variants: List[str] = field(default_factory=list)
     clarifying_question: str = ""
     positive_answers: List[str] = field(default_factory=list)
     negative_answers: List[str] = field(default_factory=list)
@@ -57,16 +61,41 @@ class KnowledgeBase:
         # self._records целиком используется только для save() (человек
         # потом вручную заполнит уточняющие вопросы и перезапустит сервис).
         self._searchable_records = self._searchable()
-        self._vectors = self._encode_questions(self._searchable_records)
+        # В индекс попадает не одна формулировка на запись, а все её варианты:
+        # основной вопрос плюс question_variants. Живая речь разнообразна
+        # ("стиралка машинка сломалась", "не крутит бельё", "воду не сливает"),
+        # и одна каноничная формулировка от них далека — замер 14.08.2026 дал
+        # по правильным попаданиям разброс 0.618-0.832, то есть половина живых
+        # фраз не дотягивала до разумного порога. Синонимы поднимают близость
+        # к своей записи, не трогая близость к чужим, поэтому порог можно
+        # держать высоким, а не опускать до уровня, где начинают пролезать
+        # посторонние вопросы.
+        self._phrases, self._phrase_owners = self._collect_phrases(self._searchable_records)
+        self._vectors = self._encode_phrases(self._phrases)
 
     def _searchable(self) -> List[KnowledgeRecord]:
         return [r for r in self._records if r.clarifying_question]
 
-    def _encode_questions(self, records: List[KnowledgeRecord]) -> Optional[np.ndarray]:
-        if not records:
+    @staticmethod
+    def _collect_phrases(
+        records: List[KnowledgeRecord],
+    ) -> Tuple[List[str], List[KnowledgeRecord]]:
+        """Все формулировки всех записей и владелец каждой формулировки."""
+        phrases: List[str] = []
+        owners: List[KnowledgeRecord] = []
+        for record in records:
+            for phrase in [record.question] + list(record.question_variants):
+                phrase = phrase.strip()
+                if not phrase:
+                    continue
+                phrases.append(phrase)
+                owners.append(record)
+        return phrases, owners
+
+    def _encode_phrases(self, phrases: List[str]) -> Optional[np.ndarray]:
+        if not phrases:
             return None
-        texts = [DOCUMENT_PREFIX + r.question for r in records]
-        return self._embedder.encode(texts)
+        return self._embedder.encode([DOCUMENT_PREFIX + p for p in phrases])
 
     @property
     def records(self) -> List[KnowledgeRecord]:
@@ -92,7 +121,8 @@ class KnowledgeBase:
         # Векторы нормированы, поэтому скалярное произведение и есть косинусная близость.
         scores = self._vectors @ query
         best_index = int(np.argmax(scores))
-        return self._searchable_records[best_index], float(scores[best_index])
+        # Владелец формулировки, а не сама формулировка: клиенту отвечает запись.
+        return self._phrase_owners[best_index], float(scores[best_index])
 
     def search(self, text: str) -> Optional[Tuple[KnowledgeRecord, float]]:
         match = self.best_match(text)

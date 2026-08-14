@@ -16,6 +16,7 @@ from ai_assistant.agi.ai_assistant_last_will import (
     build_hangup_request,
     erp_url,
     send_last_will,
+    should_report_hangup,
 )
 
 
@@ -61,6 +62,33 @@ def test_values_are_strings():
     request = build_hangup_request(1204567, "1755.42", "вопрос", False)
     for item in request["prms"]:
         assert isinstance(item["Value"], str)
+
+
+def test_hangup_is_reported_when_the_script_did_not_finish():
+    """Клиент бросил трубку посреди разговора — ради этого скрипт и нужен."""
+    assert should_report_hangup("False", "1204567", "1755.42") is True
+
+
+@pytest.mark.parametrize("finished", ["True", "true", "1", "yes"])
+def test_finished_conversation_is_not_reported_as_a_hangup(finished):
+    """Разговор доведён до конца самим ботом — обращение в ПЦК уводить нельзя.
+
+    Обработчик ERP на событие обрыва переводит обращение в «Перезвонить
+    целевому клиенту», и признака завершённости он не смотрит. Значит
+    отличать нормальный конец разговора от брошенной трубки обязан скрипт:
+    иначе каждый переведённый на оператора звонок попадёт ещё и в ПЦК.
+    """
+    assert should_report_hangup(finished, "1204567", "1755.42") is False
+
+
+def test_nothing_is_reported_when_there_is_nothing_to_report():
+    """Ни обращения, ни канала — звонок в ERP уходить не должен вовсе."""
+    assert should_report_hangup("False", "", "") is False
+
+
+def test_hangup_is_reported_by_channel_alone():
+    """Обрыв на первой секунде: обращение ERP найдёт по каналу сама."""
+    assert should_report_hangup("", "", "1755.42") is True
 
 
 def test_url_is_built_from_the_channel_variable():

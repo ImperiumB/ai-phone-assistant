@@ -65,6 +65,29 @@ def build_hangup_request(document_id, linked_id, recognized_text, script_finishe
     return {"prms": prms}
 
 
+def should_report_hangup(script_finished, document_id, linked_id):
+    # type: (str, str, str) -> bool
+    """Был ли это именно обрыв, а не нормальный конец разговора.
+
+    Расширение `h` Астериск исполняет на любом завершении канала, в том числе
+    когда бот сам довёл разговор до перевода и положил трубку. Обработчик ERP
+    на событие обрыва уводит обращение в ПЦК и признака завершённости не
+    смотрит — значит отличать одно от другого обязаны мы, иначе каждый
+    успешно переведённый звонок попадёт ещё и в «Перезвонить целевому
+    клиенту», и оператор будет перезванивать тому, с кем уже поговорили.
+
+    `ScriptFinished` основной скрипт выставляет в True ровно там, где сам
+    решил закончить: перевод, отбой по решению диалога, аварийный перевод при
+    отказе речевого сервиса. Если он оборвался или умер от SIGHUP, значение
+    так и останется False — это и есть брошенная трубка.
+    """
+    if str(script_finished).strip().lower() in ("true", "1", "yes"):
+        return False
+    if document_id.strip() in ("", "0") and not linked_id.strip():
+        return False  # сообщать не о чем: ни обращения, ни канала
+    return True
+
+
 def parse_erp_response(items):
     # type: (Any) -> List[str]
     """Ответ ERP строками для лога станции. Разбор не имеет права падать."""
@@ -132,17 +155,20 @@ def _main():  # pragma: no cover - требует живого канала Aste
     log_it("=== AI ASSISTANT LAST WILL {0} (обращение {1}, ScriptFinished={2}) ===".format(
         linked_id, document_id or "не создано", script_finished))
 
-    try:
-        send_last_will(
-            aster2_address,
-            build_hangup_request(document_id, linked_id, recognized_text, script_finished),
-            log=log_it,
-        )
-    except Exception:
-        # send_last_will и так ничего не бросает, но этот скрипт запускается
-        # на уже разорванном канале: падение здесь ушло бы в лог станции
-        # трассировкой питона, а не понятной строкой.
-        log_it("LAST WILL FATAL: {0}".format(traceback.format_exc()))
+    if not should_report_hangup(script_finished, document_id, linked_id):
+        log_it("LAST WILL: разговор завершён самим ботом, обрыва не было")
+    else:
+        try:
+            send_last_will(
+                aster2_address,
+                build_hangup_request(document_id, linked_id, recognized_text, script_finished),
+                log=log_it,
+            )
+        except Exception:
+            # send_last_will и так ничего не бросает, но этот скрипт
+            # запускается на уже разорванном канале: падение здесь ушло бы в
+            # лог станции трассировкой питона, а не понятной строкой.
+            log_it("LAST WILL FATAL: {0}".format(traceback.format_exc()))
 
     log_it("=== AI ASSISTANT LAST WILL FINISH ===")
 

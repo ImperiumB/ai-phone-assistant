@@ -476,6 +476,11 @@ def _main():  # pragma: no cover - требует живого канала Aste
 
     def open_erp_case():
         """Завести обращение в ERP. Звонок при любом отказе идёт дальше."""
+        if not ERP_INTEGRATION:
+            # Иначе дальше в лог уйдёт «обращение не создано», и человек,
+            # отлаживающий разговор, будет искать поломку там, где её нет.
+            log_it("ERP: интеграция выключена (ERP_INTEGRATION=False)")
+            return
         erp_answer = send_to_erp(
             aster2_address,
             build_call_start_request(linked_id, dialed_number, caller_phone),

@@ -40,6 +40,30 @@ ACTION_HANGUP = "Hangup"
 # предупреждения смен (описано в РАЗВЁРТЫВАНИЕ.md).
 REAL_REDIRECT = False
 
+# Заводить ли обращение в ERP на время звонка (UL-18797). Выключатель нужен для
+# отладки самого разговора: с ним звонок идёт полностью мимо ERP, и в базе не
+# копятся обращения от проб. Выключать только осознанно — при выключенном
+# флаге ни обращения, ни истории, ни ухода в ПЦК при обрыве не будет.
+ERP_INTEGRATION = True
+
+# Адрес службы Aster2Service по умолчанию — ровно тот же, что в боевом
+# recosintsite_V2.py. Диалплан может задать свой через переменную канала.
+DEFAULT_ASTER2_SERVICE_ADDRESS = "10.20.0.15:65/Aster2ServiceWebHttp"
+ERP_ENDPOINT = "ReturnConversationIntermediateResult3"
+
+# Пять секунд — это не «сколько не жалко», а предел, после которого молчание в
+# трубке становится заметным. Обращение важно, но клиент важнее: не ответила
+# ERP за это время — едем дальше без неё.
+ERP_TIMEOUT_S = 5
+
+# Точка разговора, в которой клиент отвечает на уточняющий вопрос бота
+# («да», «нет»). Имя приходит от сервиса в ConversationPoint.
+POINT_CONFIRM = "Confirm"
+
+EVENT_CALL_START = "AiAssistantCallStart"
+EVENT_EQUIPMENT = "AiAssistantEquipment"
+EVENT_TRANSFER = "AiAssistantTransfer"
+
 CHUNK_SIZE = 8000  # 4000 отсчётов = 0,5 секунды при 8000 Гц
 CALL_TIMEOUT_S = 120
 AUDIO_CACHE_DIR = "/var/lib/asterisk/sounds/ai_bot/cache"
@@ -66,6 +90,15 @@ class DialogAnswer:
     file_to_playback: str
     conversation_point: str
     redirect_exten: str
+    # Ниже — то, что нужно только обращению в ERP. Поля со значениями по
+    # умолчанию: ответ сервиса старой сборки (без этих ключей) обязан
+    # разбираться без ошибок, разговор от них не зависит.
+    equipment_type: str = ""
+    scenario: str = ""
+    telephone_direction_id: str = ""
+    knowledge_record_id: str = ""
+    matched_question: str = ""
+    similarity: str = ""
 
 
 def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
@@ -78,6 +111,12 @@ def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
         file_to_playback=pairs.get("FileToPlayback", ""),
         conversation_point=pairs.get("ConversationPoint", ""),
         redirect_exten=pairs.get("RedirectExten", ""),
+        equipment_type=pairs.get("EquipmentType", ""),
+        scenario=pairs.get("Scenario", ""),
+        telephone_direction_id=pairs.get("TelephoneDirectionId", ""),
+        knowledge_record_id=pairs.get("KnowledgeRecordId", ""),
+        matched_question=pairs.get("MatchedQuestion", ""),
+        similarity=pairs.get("Similarity", ""),
     )
 
 
@@ -116,6 +155,175 @@ def decide_failure_step(error):
     if isinstance(error, (requests.exceptions.RequestException, grpc.RpcError)):
         return "failover"
     return "reraise"
+
+
+# --- Обращение в ERP (UL-18797) ----------------------------------------------
+#
+# Своей двери из телефонии в ERP у сервиса нет: запрос уходит в Aster2Service,
+# та без разбора перекладывает пары Key/Value в Hashtable и отдаёт обработчику
+# 13161, а он по префиксу eventType переправляет всё в 15422. Поэтому формат
+# тела ровно такой же, как у /dialog, и поэтому же ключи можно слать любые
+# свои — служба ничего не фильтрует.
+
+
+@dataclass
+class ErpAnswer:
+    result: str
+    document_id: str
+    message: str
+
+    @property
+    def ok(self):
+        # type: () -> bool
+        return self.result.upper() == "OK"
+
+
+def erp_url(service_address):
+    # type: (str) -> str
+    return "http://{0}/{1}".format(service_address.rstrip("/"), ERP_ENDPOINT)
+
+
+def build_erp_request(event_type, values):
+    # type: (str, List[Any]) -> Dict[str, Any]
+    """Тело запроса к ERP из пар «ключ-значение».
+
+    Значения всегда строками: на той стороне они попадают в Hashtable как
+    есть, а числа из JSON приезжают дробными и потом разбираются вручную.
+    Пустые значения не отправляются вовсе — обработчику они ничего не
+    сообщают, а в логе станции мешают читать.
+    """
+    prms = [{"Key": "eventType", "Value": event_type}]
+    for key, value in values:
+        text = "" if value is None else str(value)
+        if text:
+            prms.append({"Key": key, "Value": text})
+    return {"prms": prms}
+
+
+def build_call_start_request(linked_id, dialed_number, caller_phone):
+    # type: (str, str, str) -> Dict[str, Any]
+    """Звонок принят. dialedNumber обязателен: по нему ERP ищет телефон линии,
+    без него обращение не создастся вовсе."""
+    return build_erp_request(EVENT_CALL_START, [
+        ("linkedId", linked_id),
+        ("dialedNumber", dialed_number),
+        ("callerPhone", caller_phone),
+    ])
+
+
+def build_equipment_request(document_id, recognized_text, equipment_type_name, direction_name):
+    # type: (Any, str, str, str) -> Dict[str, Any]
+    """Бот понял тему разговора.
+
+    Код типа оборудования (equipmentTypeId) не шлём: у сервиса его нет, пока
+    база знаний живёт файлом, а код телефонного направления — это другой
+    справочник, и отправить его вместо кода оборудования значит проставить в
+    обращении случайную технику. Обработчик умеет искать тип по названию.
+    """
+    return build_erp_request(EVENT_EQUIPMENT, [
+        ("documentId", document_id),
+        ("recognizedText", recognized_text),
+        ("equipmentTypeName", equipment_type_name),
+        ("directionName", direction_name),
+    ])
+
+
+def build_transfer_request(document_id, redirect_exten, direction_name, recognized_text):
+    # type: (Any, str, str, str) -> Dict[str, Any]
+    return build_erp_request(EVENT_TRANSFER, [
+        ("documentId", document_id),
+        ("redirectExten", redirect_exten),
+        ("directionName", direction_name),
+        ("recognizedText", recognized_text),
+    ])
+
+
+def parse_erp_response(items):
+    # type: (Any) -> ErpAnswer
+    """Ответ ERP — такой же список пар. Разбор не имеет права падать: что бы
+    ни пришло, разговор продолжается."""
+    pairs = {}
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                pairs[str(item.get("Key", ""))] = str(item.get("Value", ""))
+    document_id = pairs.get("documentId", "")
+    if document_id in ("0", "None"):
+        document_id = ""  # нулевой код — это отсутствие обращения, а не его номер
+    return ErpAnswer(
+        result=pairs.get("Result", ""),
+        document_id=document_id,
+        message=pairs.get("Message", ""),
+    )
+
+
+def remember_recognized_text(previous, point, text):
+    # type: (str, str, str) -> str
+    """Какую реплику показывать оператору как вопрос клиента.
+
+    В обращение и в ПЦК уходит одна реплика, и это должен быть вопрос, а не
+    «да» в ответ на уточнение бота: оператор, которому досталось обращение с
+    текстом «да», не узнает из него ничего. Поэтому ответ в точке
+    подтверждения запомненный вопрос не затирает.
+    """
+    if not text:
+        return previous
+    if point == POINT_CONFIRM:
+        return previous
+    return text
+
+
+def direction_name_of(answer):
+    # type: (DialogAnswer) -> str
+    """Название телефонного направления для истории обращения.
+
+    Отдельного поля с названием направления у сервиса нет: в записи базы
+    знаний лежит название типа оборудования, и оно дословно совпадает с
+    названием направления в справочнике ERP — сверено по всем 27 записям
+    боевой базы, у которых направление проставлено (53 «Стиральные машины»,
+    27 «БТ-МБТ (ХД/Кофе/УБТ/Пылесосы/Швейки)» и так далее, расхождений нет).
+    Когда база знаний переедет в справочники ERP, название направления
+    начнёт приходить своим ключом, и менять придётся только эту функцию.
+    """
+    return answer.equipment_type
+
+
+def should_send_equipment(answer, already_sent):
+    # type: (DialogAnswer, bool) -> bool
+    """Тема разговора стала известна и в ERP ещё не уходила.
+
+    Признак — появление в ответе сервиса оборудования или направления: до
+    подтверждения клиентом сервис их не присылает.
+    """
+    if already_sent:
+        return False
+    return bool(answer.equipment_type or answer.telephone_direction_id)
+
+
+def send_to_erp(service_address, body, post=None, log=None):
+    # type: (str, Dict[str, Any], Any, Any) -> Any
+    """Отправить событие в ERP и разобрать ответ. Никогда не бросает.
+
+    Ровно та же логика, что у боевого скрипта: обращение — вещь полезная, но
+    ради него нельзя ни уронить разговор, ни заставить клиента слушать
+    тишину. Любой отказ — строка в лог станции и едем дальше.
+    """
+    if not ERP_INTEGRATION:
+        return None
+    if post is None:
+        post = requests.post
+    url = erp_url(service_address)
+    try:
+        response = post(url, json=body, timeout=ERP_TIMEOUT_S)
+        if response.status_code != 200:
+            if log:
+                log("ERP: статус ответа {0} на {1}".format(response.status_code, url))
+            return None
+        return parse_erp_response(response.json())
+    except Exception as error:
+        if log:
+            log("ERP ERROR ({0}): {1}".format(url, error))
+        return None
 
 
 def _atomic_write(path, content):
@@ -187,13 +395,31 @@ def _main():  # pragma: no cover - требует живого канала Aste
         except Exception:
             return default
 
+    def set_var(name, value):
+        try:
+            with _agi_lock:
+                agi.set_variable(name, value)
+        except Exception as error:
+            log_it("SET VAR {0} ERROR: {1}".format(name, error))
+
     service_host = get_var("SpeechServiceHost", "10.20.0.10")
     grpc_port = get_var("SpeechServiceGrpcPort", "50051")
     http_port = get_var("SpeechServiceHttpPort", "8080")
     linked_id = agi.env.get("agi_uniqueid", "")
+    # Набранный номер: по нему ERP ищет телефон линии, поэтому без него
+    # обращение не создастся вовсе.
+    dialed_number = agi.env.get("agi_extension", "")
+    caller_phone = agi.env.get("agi_callerid", "")
+    aster2_address = get_var("Aster2ServiceAddress", DEFAULT_ASTER2_SERVICE_ADDRESS)
     http_base = "http://{0}:{1}".format(service_host, http_port)
 
-    state = {"point": "Start"}
+    state = {
+        "point": "Start",
+        # Код созданного обращения и то, что уже успели про него сообщить.
+        "document_id": "",
+        "equipment_sent": False,
+        "last_text": "",
+    }
 
     def fetch_audio(text, file_name):
         target = os.path.join(AUDIO_CACHE_DIR, file_name + ".wav")
@@ -234,6 +460,12 @@ def _main():  # pragma: no cover - требует живого канала Aste
             agi.appexec(application, path)
 
     def ask_dialog(text, silence):
+        remembered = remember_recognized_text(state["last_text"], state["point"], text)
+        if remembered != state["last_text"]:
+            state["last_text"] = remembered
+            # Скрипт последней воли поднимается отдельным процессом и нашей
+            # памяти не видит: вопрос клиента он возьмёт только отсюда.
+            set_var("LastRecognizedText", remembered)
         payload = build_dialog_request(linked_id, state["point"], text, silence)
         response = requests.post(http_base + "/dialog", json=payload, timeout=15)
         response.raise_for_status()
@@ -242,13 +474,65 @@ def _main():  # pragma: no cover - требует живого канала Aste
             state["point"] = answer.conversation_point
         return answer
 
+    def open_erp_case():
+        """Завести обращение в ERP. Звонок при любом отказе идёт дальше."""
+        erp_answer = send_to_erp(
+            aster2_address,
+            build_call_start_request(linked_id, dialed_number, caller_phone),
+            log=log_it,
+        )
+        if erp_answer is None or not erp_answer.document_id:
+            log_it("ERP: обращение не создано ({0})".format(
+                erp_answer.message if erp_answer else "нет ответа"))
+            return
+        state["document_id"] = erp_answer.document_id
+        # Тем же способом код обращения достаётся скрипту последней воли:
+        # своей памяти основного скрипта он не видит, а при обрыве канала
+        # основной скрипт умирает мгновенно и сообщить ничего не успевает.
+        set_var("documentId", erp_answer.document_id)
+        log_it("ERP: обращение {0} создано".format(erp_answer.document_id))
+
+    def report_equipment(answer):
+        if not state["document_id"] or not should_send_equipment(answer, state["equipment_sent"]):
+            return
+        send_to_erp(
+            aster2_address,
+            build_equipment_request(
+                state["document_id"],
+                state["last_text"],
+                answer.equipment_type,
+                direction_name_of(answer),
+            ),
+            log=log_it,
+        )
+        # Отметку ставим независимо от успеха: повторять на каждой реплике
+        # звонок, которому и так не ответили, смысла нет.
+        state["equipment_sent"] = True
+
+    def report_transfer(redirect_exten, direction_name):
+        if not state["document_id"]:
+            return
+        send_to_erp(
+            aster2_address,
+            build_transfer_request(
+                state["document_id"], redirect_exten, direction_name, state["last_text"]
+            ),
+            log=log_it,
+        )
+
     def apply(answer):
         global _redirect_done
         step = decide_next_step(answer)
+        # Про тему разговора сообщаем до озвучки, а не после: фраза о переводе
+        # длится пару секунд, и если клиент бросит трубку на ней, скрипт умрёт
+        # мгновенно (SIGHUP, см. ниже) — в обращении так и останется
+        # «Неизвестное оборудование», хотя бот тему уже понял.
+        report_equipment(answer)
         speak(answer, blocking=(step != "listen"))
         if step == "listen":
             return True
         if step == "redirect":
+            report_transfer(answer.redirect_exten, direction_name_of(answer))
             if REAL_REDIRECT:
                 log_it("REDIRECT -> {0}".format(answer.redirect_exten))
                 with _agi_lock:
@@ -280,6 +564,10 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # молчим и не кладём трубку сразу.
         global _redirect_done
         log_it("SERVICE FAILOVER ({0}) -> exten {1}".format(error, SUPPORT_FALLBACK_EXTEN))
+        # Обращение уже создано, и оператор должен увидеть, что бот довёл
+        # звонок до перевода, а не бросил клиента. Направление здесь пустое:
+        # речевой сервис лёг, темы разговора мы так и не узнали.
+        report_transfer(SUPPORT_FALLBACK_EXTEN, "")
         try:
             if os.path.exists(SERVICE_UNAVAILABLE_SOUND + ".wav"):
                 with _agi_lock:
@@ -326,6 +614,10 @@ def _main():  # pragma: no cover - требует живого канала Aste
         channel = grpc.insecure_channel("{0}:{1}".format(service_host, grpc_port))
         try:
             try:
+                # Обращение заводится в момент приёма звонка, а не при переводе:
+                # трубку бросают и на первой секунде, а чтобы обращение ушло в
+                # ПЦК при обрыве, к этому моменту оно должно существовать.
+                open_erp_case()
                 if not apply(ask_dialog("", False)):
                     return
                 stub = speech_pb2_grpc.SpeechStub(channel)

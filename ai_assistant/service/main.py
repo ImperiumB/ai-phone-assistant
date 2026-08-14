@@ -222,7 +222,9 @@ def main() -> None:
 
     log.info("Загружаем движок распознавания %s", cfg.stt_engine)
     engine = create_engine(
-        cfg.stt_engine, model_path=os.environ.get("AIA_VOSK_MODEL_PATH", "")
+        cfg.stt_engine,
+        model_path=os.environ.get("AIA_VOSK_MODEL_PATH", ""),
+        model_name=cfg.gigaam_model,
     )
 
     log.info("Загружаем VAD и синтез")

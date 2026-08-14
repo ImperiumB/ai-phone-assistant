@@ -53,7 +53,7 @@ class GigaamEngine(SttEngine):
     # внутри чужой библиотеки.
     target_sample_rate = 16000
 
-    def __init__(self, model_name: str = "v2_rnnt"):
+    def __init__(self, model_name: str = "v3_rnnt"):
         _ensure_ffmpeg_on_path()
 
         import gigaam

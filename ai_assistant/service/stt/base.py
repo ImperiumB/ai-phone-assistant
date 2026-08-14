@@ -41,5 +41,5 @@ def create_engine(name: str, **kwargs) -> SttEngine:
     if name == "gigaam":
         from ai_assistant.service.stt.gigaam_engine import GigaamEngine
 
-        return GigaamEngine(kwargs.get("model_name", "v2_rnnt"))
+        return GigaamEngine(kwargs.get("model_name", "v3_rnnt"))
     raise ValueError("Неизвестный движок распознавания: {0}".format(name))

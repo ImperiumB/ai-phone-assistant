@@ -8,6 +8,7 @@ class Config:
     grpc_port: int
     http_port: int
     stt_engine: str
+    gigaam_model: str
     tts_model: str
     tts_voice: str
     embedder_model: str
@@ -36,6 +37,11 @@ def load_config() -> Config:
         grpc_port=_env_int("GRPC_PORT", 50051),
         http_port=_env_int("HTTP_PORT", 8080),
         stt_engine=_env_str("STT_ENGINE", "vosk"),
+        # v3_rnnt, а не v2_rnnt: замер 14.08.2026 на одном материале дал
+        # распознавание 0.281 с против 0.378 с при том же результате.
+        # Другие варианты: v3_ctc (ещё быстрее, чуть менее точна),
+        # v3_e2e_rnnt (расставляет пунктуацию и заглавные буквы).
+        gigaam_model=_env_str("GIGAAM_MODEL", "v3_rnnt"),
         tts_model=_env_str("TTS_MODEL", "v4_ru"),
         tts_voice=_env_str("TTS_VOICE", "eugene"),
         embedder_model=_env_str("EMBEDDER_MODEL", "ai-forever/ru-en-RoSBERTa"),

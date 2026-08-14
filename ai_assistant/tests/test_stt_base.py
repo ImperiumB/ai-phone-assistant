@@ -150,3 +150,46 @@ def test_gigaam_matches_vosks_empty_input_behaviour():
     """
     engine = _gigaam_engine_without_model()
     assert engine.transcribe(b"") == ""
+
+
+def test_engine_factory_passes_model_name_to_gigaam(monkeypatch):
+    """Модель GigaAM должна приходить из настроек, а не быть зашитой в код."""
+    import ai_assistant.service.stt.gigaam_engine as gigaam_module
+
+    captured = {}
+
+    class FakeGigaam:
+        target_sample_rate = 16000
+
+        def __init__(self, model_name="v3_rnnt"):
+            captured["model_name"] = model_name
+
+        def transcribe(self, pcm):
+            return ""
+
+    monkeypatch.setattr(gigaam_module, "GigaamEngine", FakeGigaam)
+    from ai_assistant.service.stt.base import create_engine
+
+    create_engine("gigaam", model_name="v3_e2e_rnnt")
+    assert captured["model_name"] == "v3_e2e_rnnt"
+
+
+def test_engine_factory_defaults_gigaam_to_third_version(monkeypatch):
+    import ai_assistant.service.stt.gigaam_engine as gigaam_module
+
+    captured = {}
+
+    class FakeGigaam:
+        target_sample_rate = 16000
+
+        def __init__(self, model_name="v3_rnnt"):
+            captured["model_name"] = model_name
+
+        def transcribe(self, pcm):
+            return ""
+
+    monkeypatch.setattr(gigaam_module, "GigaamEngine", FakeGigaam)
+    from ai_assistant.service.stt.base import create_engine
+
+    create_engine("gigaam")
+    assert captured["model_name"] == "v3_rnnt"

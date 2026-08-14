@@ -19,6 +19,7 @@ def test_defaults_are_applied(monkeypatch):
     # Третья версия: замер 14.08.2026 дал распознавание 0.281 с против 0.378 с
     # у v2_rnnt при том же результате.
     assert cfg.gigaam_model == "v3_rnnt"
+    assert cfg.prewarm_tts is True
 
 
 def test_environment_overrides_defaults(monkeypatch):

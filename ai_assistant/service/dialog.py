@@ -82,6 +82,10 @@ def _playback_name(text: str, audio_signature: str = "") -> str:
 class _SessionState:
     def __init__(self) -> None:
         self.record = None
+        #: Мера близости, с которой нашлась record. Нужна не только логу: она
+        #: уходит в ответ и дальше в обращение ERP, по ней потом видно,
+        #: насколько уверенно бот определил тему.
+        self.score = 0.0
         self.silence_count = 0
 
 
@@ -195,13 +199,19 @@ class DialogEngine:
         if found is None:
             if text:
                 self._knowledge.add(text)
-            return self._transfer(self._support_exten)
+            # Совпадение ниже порога всё равно отдаём наружу: по нему потом
+            # разбирают, промахнулись мы чуть-чуть или не поняли вопрос вовсе.
+            # Но только как справку — тип оборудования по нему не проставляется.
+            return self._transfer(self._support_exten, match=match, trusted=False)
 
-        record, _score = found
+        record, score = found
         if not record.clarifying_question:
-            return self._transfer(self._support_exten)
+            # Уточнять нечего, переводим сразу и туда же, куда и раньше — но
+            # тема разговора известна, и обращение в ERP должно её получить.
+            return self._transfer(self._support_exten, match=found, trusted=True)
 
         state.record = record
+        state.score = score
         return self._speak(record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
 
     def _log_similarity(self, text: str, match: Optional[Any]) -> None:
@@ -249,13 +259,7 @@ class DialogEngine:
 
         if self._matches(text, record.positive_answers):
             exten = self._exten_for(record)
-            extra = {
-                "EquipmentType": record.equipment_type,
-                "Scenario": record.scenario,
-                # Код направления пригодится обработчику ERP на следующем этапе:
-                # по нему проставляется тип оборудования в обращении.
-                "TelephoneDirectionId": str(record.telephone_direction_id or ""),
-            }
+            extra = self._match_extra((record, state.score), trusted=True)
             return self._speak(
                 record.positive_reply, ACTION_REDIRECT, POINT_FINISHED, exten=exten, extra=extra
             )
@@ -292,8 +296,54 @@ class DialogEngine:
                     return True
         return False
 
-    def _transfer(self, exten: str) -> List[Dict[str, str]]:
-        return self._speak(self._phrases.transfer, ACTION_REDIRECT, POINT_FINISHED, exten=exten)
+    @staticmethod
+    def _match_extra(
+        match: Optional[Any], trusted: bool
+    ) -> Optional[Dict[str, str]]:
+        """Что известно про найденную запись — для обращения в ERP.
+
+        AGI-скрипт заводит обращение на время звонка и заполняет его из
+        ответа сервиса; всё, чего здесь нет, до ERP не доедет вообще.
+
+        `trusted` разделяет два разных случая. Совпадение выше порога
+        (или подтверждённое клиентом) — тема разговора определена, тип
+        оборудования и направление можно проставлять в обращении.
+        Совпадение ниже порога — справочные сведения для разбора звонков:
+        код записи, её вопрос и мера близости уходят, а оборудование нет,
+        иначе оператор увидит в обращении тему, в которую бот сам не
+        поверил.
+        """
+        if match is None:
+            return None
+        record, score = match
+        extra = {
+            "KnowledgeRecordId": str(record.id or ""),
+            "MatchedQuestion": record.question,
+            "Similarity": "{0:.4f}".format(score),
+        }
+        if trusted:
+            extra.update({
+                "EquipmentType": record.equipment_type,
+                "Scenario": record.scenario,
+                # Код направления обработчик ERP кладёт в историю обращения,
+                # а по названию оборудования ищет тип в справочнике.
+                "TelephoneDirectionId": str(record.telephone_direction_id or ""),
+            })
+        return extra
+
+    def _transfer(
+        self,
+        exten: str,
+        match: Optional[Any] = None,
+        trusted: bool = False,
+    ) -> List[Dict[str, str]]:
+        return self._speak(
+            self._phrases.transfer,
+            ACTION_REDIRECT,
+            POINT_FINISHED,
+            exten=exten,
+            extra=self._match_extra(match, trusted),
+        )
 
     def _keep_listening(self, point: str) -> List[Dict[str, str]]:
         """Ничего не произносить и остаться в той же точке разговора.

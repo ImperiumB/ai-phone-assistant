@@ -11,7 +11,7 @@ def test_defaults_are_applied(monkeypatch):
     assert cfg.grpc_port == 50051
     assert cfg.http_port == 8080
     assert cfg.stt_engine == "vosk"
-    assert cfg.similarity_threshold == pytest.approx(0.75)
+    assert cfg.similarity_threshold == pytest.approx(0.65)
     assert cfg.utterance_pause_ms == 1500
     assert cfg.silence_timeout_ms == 15000
     assert cfg.stt_timeout_s == 10

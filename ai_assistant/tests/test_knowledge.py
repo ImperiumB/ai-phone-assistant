@@ -238,3 +238,100 @@ def test_knowledge_base_adds_search_prefixes():
     base.search("стиральная машина не отжимает")
     assert any(t.startswith("search_query: ") for t in embedder.received_texts), \
         f"Запрос должен иметь префикс search_query:, получено: {embedder.received_texts}"
+
+
+def test_variants_lead_to_their_own_record():
+    """Синоним обязан находить свою запись наравне с основной формулировкой."""
+    embedder = FakeEmbedder({
+        "стиральная машина не отжимает": [1.0, 0.0, 0.0],
+        "стиралка машинка сломалась": [1.0, 0.0, 0.0],
+        "не морозит холодильник": [0.0, 1.0, 0.0],
+    })
+    records = [
+        KnowledgeRecord(
+            id=1,
+            question="стиральная машина не отжимает",
+            question_variants=["стиралка машинка сломалась"],
+            clarifying_question="Речь о стиральной машине?",
+        ),
+        KnowledgeRecord(
+            id=2,
+            question="не морозит холодильник",
+            clarifying_question="Речь о холодильнике?",
+        ),
+    ]
+    base = KnowledgeBase(records, embedder, threshold=0.75)
+
+    by_main = base.search("стиральная машина не отжимает")
+    by_variant = base.search("стиралка машинка сломалась")
+
+    assert by_main is not None and by_main[0].id == 1
+    assert by_variant is not None and by_variant[0].id == 1
+
+
+def test_variants_of_unmarked_records_stay_out_of_search():
+    """Запись без уточняющего вопроса не участвует в поиске даже вариантами."""
+    embedder = FakeEmbedder({"мусорная фраза": [1.0, 0.0, 0.0]})
+    records = [
+        KnowledgeRecord(id=1, question="мусорная фраза", question_variants=["мусорная фраза"]),
+    ]
+    base = KnowledgeBase(records, embedder, threshold=0.5)
+    assert base.search("мусорная фраза") is None
+
+
+def test_empty_variants_are_ignored():
+    embedder = FakeEmbedder({"вопрос": [1.0, 0.0, 0.0]})
+    records = [
+        KnowledgeRecord(
+            id=1,
+            question="вопрос",
+            question_variants=["", "   "],
+            clarifying_question="Точно?",
+        ),
+    ]
+    base = KnowledgeBase(records, embedder, threshold=0.5)
+    found = base.search("вопрос")
+    assert found is not None and found[0].id == 1
+
+
+def test_knowledge_base_file_variants_are_loaded(tmp_path):
+    import json
+
+    source = [{
+        "id": 7,
+        "question": "течёт посудомойка",
+        "question_variants": ["посудомоечная машина протекает"],
+        "clarifying_question": "Речь о посудомоечной машине?",
+        "positive_answers": ["да"],
+        "negative_answers": ["нет"],
+        "positive_reply": "Соединяю",
+        "scenario": "redirect_sales",
+        "equipment_type": "Посудомоечные машины",
+    }]
+    path = tmp_path / "kb.json"
+    path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+
+    embedder = FakeEmbedder({
+        "течёт посудомойка": [1.0, 0.0, 0.0],
+        "посудомоечная машина протекает": [1.0, 0.0, 0.0],
+    })
+    base = load_knowledge_base(str(path), embedder, threshold=0.75)
+    found = base.search("посудомоечная машина протекает")
+    assert found is not None and found[0].id == 7
+
+
+def test_real_knowledge_base_has_variants_for_every_record():
+    """Живая база обязана содержать синонимы: без них порог отсекает нормальную речь."""
+    import json
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parents[1] / "knowledge_base.json"
+    records = json.loads(path.read_text(encoding="utf-8"))
+
+    assert records, "база знаний пуста"
+    for record in records:
+        variants = record.get("question_variants", [])
+        assert len(variants) >= 3, (
+            "у записи %s всего %s синонимов — живая речь так не покрывается"
+            % (record["id"], len(variants))
+        )

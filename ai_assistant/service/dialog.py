@@ -26,6 +26,12 @@ ACTION_HANGUP = "Hangup"
 
 SCENARIO_SUPPORT = "redirect_support"
 SCENARIO_SALES = "redirect_sales"
+# Перевод по телефонному направлению из справочника ULTIMA.TELEPHONE_DIRECTIONS.
+# У каждого направления своё поле «Номер для приёма переведённого звонка», и
+# бот переводит именно туда — вместо двух захардкоженных отделов. Это же
+# закрывает пункт ТЗ про справочник сценариев: вариантами дальнейших действий
+# становятся сами направления, а не самописный перечень.
+SCENARIO_DIRECTION = "redirect_direction"
 
 # Демон живёт постоянно, а состояние разговора копится по ключу звонка
 # (linkedId) и раньше не удалялось вообще — это неограниченный рост памяти
@@ -216,14 +222,35 @@ class DialogEngine:
             score, threshold, verdict, text, record.question,
         )
 
+    def _exten_for(self, record) -> str:
+        """Куда переводить звонок по этой записи базы знаний.
+
+        Основной путь — номер приёма самого телефонного направления. Два
+        старых сценария (продажи/сопровождение) оставлены ради обратной
+        совместимости: на них написаны прежние записи и тесты.
+        """
+        if record.scenario == SCENARIO_DIRECTION and record.redirect_exten:
+            return record.redirect_exten
+        if record.redirect_exten:
+            return record.redirect_exten
+        if record.scenario == SCENARIO_SALES:
+            return self._sales_exten
+        return self._support_exten
+
     def _handle_confirmation(self, state: _SessionState, text: str) -> List[Dict[str, str]]:
         record = state.record
         if record is None:
             return self._transfer(self._support_exten)
 
         if self._matches(text, record.positive_answers):
-            exten = self._sales_exten if record.scenario == SCENARIO_SALES else self._support_exten
-            extra = {"EquipmentType": record.equipment_type, "Scenario": record.scenario}
+            exten = self._exten_for(record)
+            extra = {
+                "EquipmentType": record.equipment_type,
+                "Scenario": record.scenario,
+                # Код направления пригодится обработчику ERP на следующем этапе:
+                # по нему проставляется тип оборудования в обращении.
+                "TelephoneDirectionId": str(record.telephone_direction_id or ""),
+            }
             return self._speak(
                 record.positive_reply, ACTION_REDIRECT, POINT_FINISHED, exten=exten, extra=extra
             )

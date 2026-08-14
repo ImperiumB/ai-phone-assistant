@@ -28,6 +28,12 @@ class KnowledgeRecord:
     positive_reply: str = ""
     scenario: str = ""
     equipment_type: str = ""
+    #: Код записи справочника «Телефонные направления» (ULTIMA.TELEPHONE_DIRECTIONS).
+    telephone_direction_id: int = 0
+    #: Номер для приёма переведённого звонка, поле «Номер для приёма
+    #: переведённого звонка» того же справочника. Бот переводит именно туда,
+    #: а не в захардкоженные отделы: у каждого направления свой приёмник.
+    redirect_exten: str = ""
 
 
 class SentenceTransformerEmbedder:

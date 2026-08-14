@@ -30,10 +30,10 @@ rem Menshe - otvechaet zhivee, no perebivaet zadumavshegosya.
 rem Bolshe - razgovor oshchushchaetsya slomannym.
 set AIA_UTTERANCE_PAUSE_MS=1000
 
-rem Porog blizosti voprosa k baze znaniy (0..1).
-rem Nizhe - bot chashche "uznaet" vopros, no chashche oshibaetsya.
+rem Porog blizosti voprosa k baze znaniy (0..1). 0.65 podobran zamerom 14.08.2026:
+rem vernye popadaniya 0.669-0.857, postoronnie voprosy 0.455-0.568.
 rem Vyshe - chashche chestno perevodit na spetsialista.
-set AIA_SIMILARITY_THRESHOLD=0.75
+set AIA_SIMILARITY_THRESHOLD=0.65
 
 cd /d "%~dp0"
 echo.

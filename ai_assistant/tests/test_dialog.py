@@ -753,3 +753,106 @@ def test_mishearing_of_yes_leads_to_transfer():
         result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText=heard)
         assert result["Action"] == ACTION_REDIRECT, "ответ %r не принят как согласие" % heard
         assert result["RedirectExten"] == "7105"
+
+
+# --- Контекст найденной записи для обращения в ERP (UL-18797) -----------------
+
+
+def test_confirmation_carries_the_match_context_for_erp():
+    """Найденная запись, её вопрос и мера близости обязаны доходить до AGI-скрипта.
+
+    Раньше они оставались внутри сервиса: наружу уходил голый RedirectExten,
+    и обращение в ERP заполнять было нечем.
+    """
+    engine_obj = engine(FakeKnowledge(DIRECTION_RECORD, score=0.83))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник не морозит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+
+    assert result["KnowledgeRecordId"] == "10"
+    assert result["MatchedQuestion"] == DIRECTION_RECORD.question
+    assert float(result["Similarity"]) == pytest.approx(0.83)
+    assert result["EquipmentType"] == "Холодильники"
+    assert result["TelephoneDirectionId"] == "52"
+    assert result["Scenario"] == "redirect_direction"
+
+
+def test_transfer_of_a_record_without_clarifying_question_carries_equipment():
+    """Самый частый путь — перевод из _transfer, а не из ветки подтверждения.
+
+    Запись нашлась выше порога, уточнять нечего — тип оборудования известен
+    и обязан уйти в обращение так же, как и после подтверждения.
+    """
+    record = KnowledgeRecord(
+        id=7,
+        question="нужен мастер по кофемашине",
+        clarifying_question="",
+        scenario="redirect_direction",
+        equipment_type="Кофемашины",
+        telephone_direction_id=24,
+        redirect_exten="7097",
+    )
+    result = answer(
+        engine(FakeKnowledge(record, score=0.91)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="нужен мастер по кофемашине",
+    )
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["EquipmentType"] == "Кофемашины"
+    assert result["TelephoneDirectionId"] == "24"
+    assert result["KnowledgeRecordId"] == "7"
+    assert float(result["Similarity"]) == pytest.approx(0.91)
+
+
+def test_transfer_after_a_miss_reports_similarity_but_no_equipment():
+    """Промах по порогу — мера близости нужна для разбора, тип оборудования нет.
+
+    Проставить в обращении оборудование по совпадению, которому сами не
+    поверили, значит соврать оператору: пусть остаётся «Неизвестное».
+    """
+    result = answer(
+        engine(FakeKnowledge(DIRECTION_RECORD, score=0.4, threshold=0.75)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="а вы вообще чем занимаетесь",
+    )
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert float(result["Similarity"]) == pytest.approx(0.4)
+    assert result["MatchedQuestion"] == DIRECTION_RECORD.question
+    assert "EquipmentType" not in result
+    assert "TelephoneDirectionId" not in result
+
+
+def test_transfer_on_silence_has_no_match_context():
+    """Клиент вообще ничего не сказал — сравнивать было не с чем."""
+    engine_obj = engine(FakeKnowledge(DIRECTION_RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert "KnowledgeRecordId" not in result
+    assert "EquipmentType" not in result
+
+
+def test_empty_knowledge_base_transfer_has_no_match_context():
+    result = answer(
+        engine(FakeKnowledge(None)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="во сколько вы открываетесь",
+    )
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert "MatchedQuestion" not in result
+    assert "Similarity" not in result
+
+
+def test_clarifying_question_does_not_claim_equipment_yet():
+    """Догадка ещё не подтверждена клиентом — в обращение её писать рано."""
+    result = answer(
+        engine(FakeKnowledge(DIRECTION_RECORD, score=0.8)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="холодильник не морозит",
+    )
+
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert "EquipmentType" not in result

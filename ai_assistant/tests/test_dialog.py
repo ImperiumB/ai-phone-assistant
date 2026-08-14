@@ -700,3 +700,56 @@ def test_second_round_after_no_leads_to_a_new_direction():
     assert second["TextToSpeak"] == holodilnik.clarifying_question
     confirmed = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
     assert confirmed["RedirectExten"] == "7104"
+
+
+def test_real_knowledge_base_accepts_common_mishearings():
+    """Согласие клиента должно ловиться и при ошибке распознавания.
+
+    Живой звонок 14.08.2026: клиент сказал «да», GigaAM разобрал «так»,
+    в списке согласий такого слова не было — бот попросил переформулировать
+    вопрос, хотя человек ответил чётко. Односложное «да» на телефонном
+    канале движок путает регулярно.
+    """
+    import json
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parents[1] / "knowledge_base.json"
+    records = json.loads(path.read_text(encoding="utf-8"))
+
+    must_accept = ["да", "так", "ага", "угу", "верно", "точно", "конечно", "хорошо"]
+    must_reject = ["нет", "не то", "неверно", "не совсем"]
+
+    for record in records:
+        positive = record["positive_answers"]
+        negative = record["negative_answers"]
+        for word in must_accept:
+            assert word in positive, (
+                "запись %s не принимает согласие %r" % (record["id"], word)
+            )
+        for word in must_reject:
+            assert word in negative, (
+                "запись %s не принимает отказ %r" % (record["id"], word)
+            )
+        assert not set(positive) & set(negative), (
+            "запись %s: слово есть и в согласиях, и в отказах" % record["id"]
+        )
+
+
+def test_mishearing_of_yes_leads_to_transfer():
+    """«так» вместо «да» должно приводить к переводу, а не к просьбе переформулировать."""
+    record = KnowledgeRecord(
+        id=1,
+        question="стиральная машина не отжимает",
+        clarifying_question="Речь о стиральной машине?",
+        positive_answers=["да", "так", "ага", "верно"],
+        negative_answers=["нет", "не то"],
+        positive_reply="Соединяю со специалистом",
+        scenario="redirect_direction",
+        redirect_exten="7105",
+    )
+    for heard in ("да", "так", "ага", "верно"):
+        engine_obj = engine(FakeKnowledge(record))
+        answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка сломалась")
+        result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText=heard)
+        assert result["Action"] == ACTION_REDIRECT, "ответ %r не принят как согласие" % heard
+        assert result["RedirectExten"] == "7105"

@@ -580,3 +580,55 @@ def test_real_question_still_reaches_the_knowledge_base():
         recognizedText="стиралка не крутит",
     )
     assert result["TextToSpeak"] == RECORD.clarifying_question
+
+
+DIRECTION_RECORD = KnowledgeRecord(
+    id=10,
+    question="не морозит холодильник",
+    clarifying_question="Речь о холодильнике?",
+    positive_answers=["да"],
+    negative_answers=["нет"],
+    positive_reply="Соединяю со специалистом по холодильникам",
+    scenario="redirect_direction",
+    equipment_type="Холодильники",
+    telephone_direction_id=52,
+    redirect_exten="7104",
+)
+
+
+def test_direction_scenario_transfers_to_its_own_extension():
+    """Перевод идёт на номер телефонного направления, а не в захардкоженный отдел."""
+    engine_obj = engine(FakeKnowledge(DIRECTION_RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник не морозит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["RedirectExten"] == "7104"
+    assert result["EquipmentType"] == "Холодильники"
+    assert result["TelephoneDirectionId"] == "52"
+
+
+def test_old_sales_scenario_still_works():
+    """Прежние записи без направления продолжают работать по старым сценариям."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+    assert result["RedirectExten"] == "500"
+
+
+def test_direction_extension_wins_over_scenario():
+    """Если у записи есть номер направления — он важнее старого сценария."""
+    mixed = KnowledgeRecord(
+        id=11,
+        question="течёт посудомойка",
+        clarifying_question="Речь о посудомоечной машине?",
+        positive_answers=["да"],
+        negative_answers=["нет"],
+        positive_reply="Соединяю",
+        scenario="redirect_sales",
+        redirect_exten="7112",
+    )
+    engine_obj = engine(FakeKnowledge(mixed))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="течёт посудомойка")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+    assert result["RedirectExten"] == "7112"

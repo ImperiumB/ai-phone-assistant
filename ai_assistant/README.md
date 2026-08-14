@@ -81,12 +81,13 @@ Vosk/GigaAM почти не влияет на время старта, пото�
 | `AIA_GRPC_PORT` | `50051` | Порт gRPC-потока распознавания |
 | `AIA_HTTP_PORT` | `8080` | Порт HTTP-ручек (`/dialog`, `/tts`, `/health`, `/metrics`) |
 | `AIA_STT_ENGINE` | `vosk` | Движок распознавания: `vosk` или `gigaam` |
+| `AIA_PREWARM_TTS` | `1` | Синтезировать все известные фразы при старте. Холодный синтез стоит до 2 секунд, и клиент слушает их как тишину. Выключается значением `0` |
 | `AIA_GIGAAM_MODEL` | `v3_rnnt` | Модель GigaAM. Замер 14.08.2026 на одном материале: `v3_rnnt` 0,281 с против `v2_rnnt` 0,378 с при том же результате. Ещё есть `v3_ctc` (быстрее, чуть менее точна) и `v3_e2e_rnnt` (расставляет пунктуацию и заглавные буквы) |
 | `AIA_VOSK_MODEL_PATH` | — (пусто) | Путь к модели Vosk. Читается отдельно в `main.py`, обязателен при `AIA_STT_ENGINE=vosk` |
-| `AIA_TTS_MODEL` | `v4_ru` | Модель синтеза Silero |
+| `AIA_TTS_MODEL` | `v4_ru` | Модель синтеза Silero. `v5_ru` звучит иначе и синтезирует медленнее |
 | `AIA_TTS_VOICE` | `eugene` | Голос синтеза по умолчанию |
 | `AIA_EMBEDDER_MODEL` | `ai-forever/ru-en-RoSBERTa` | Модель эмбеддингов для базы знаний |
-| `AIA_SIMILARITY_THRESHOLD` | `0.75` | Порог сходства при поиске по базе знаний |
+| `AIA_SIMILARITY_THRESHOLD` | `0.65` | Порог сходства при поиске по базе знаний. Подобран замером 14.08.2026: верные попадания 0,669-0,857, посторонние вопросы 0,455-0,568. Чем больше синонимов в записях, тем выше можно держать порог |
 | `AIA_SILENCE_TIMEOUT_MS` | `15000` | Таймаут тишины в VAD |
 | `AIA_UTTERANCE_PAUSE_MS` | `1500` | Пауза, которой сегментируется конец реплики. Меньше — бот отвечает живее, но перебьёт задумавшегося; больше — разговор ощущается сломанным |
 | `AIA_STT_TIMEOUT_S` | `10` | Таймаут распознавания одной реплики |
@@ -106,9 +107,11 @@ scp ai_assistant/proto/speech_pb2.py ai_assistant/proto/speech_pb2_grpc.py \
 scp ai_assistant/sounds/service_unavailable.wav root@<астериск>:/var/lib/asterisk/sounds/ai_bot/service_unavailable.wav
 ssh root@<астериск> "chmod +x /var/lib/asterisk/agi-bin/ai_assistant.py && \
                      python3 -m py_compile /var/lib/asterisk/agi-bin/ai_assistant.py && \
-                     mkdir -p /var/lib/asterisk/sounds/ai_bot/cache && \
-                     chown asterisk:asterisk /var/lib/asterisk/sounds/ai_bot/cache"
+                     mkdir -p /var/lib/asterisk/sounds/ai_bot/cache"
 ```
+
+Владельца каталога менять не нужно: на станции `asterisk-ai` Астериск работает
+под `root` (проверено 13.08.2026), пользователя `asterisk` там нет вообще.
 
 Подробный пошаговый разбор для человека, который пойдёт на станцию (включая
 резервную копию диалплана, правку `extensions.conf`, проверку сети и
@@ -127,7 +130,7 @@ ssh root@<астериск> "chmod +x /var/lib/asterisk/agi-bin/ai_assistant.py 
 py -3.12 -m pytest ai_assistant/tests -q
 ```
 
-99 юнит-тестов идут по умолчанию. 4 интеграционных теста (маркер
+151 юнит-тест идёт по умолчанию. 4 интеграционных теста (маркер
 `integration`) требуют реальных моделей и переменных `AIA_VOSK_MODEL_PATH` /
 `AIA_TEST_WAV` — без них два из них тихо пропускаются (`skipped`), это
 нормально, а не ошибка.

@@ -156,6 +156,49 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                 )
 
 
+def collect_speakable_phrases(phrases: Phrases, knowledge) -> List[str]:
+    """Всё, что бот вообще способен произнести.
+
+    Служебные фразы плюс уточняющие вопросы и ответы при согласии из базы
+    знаний. Записи без уточняющего вопроса — это ещё не размеченные
+    неопознанные реплики, бот их не произносит и синтезировать их незачем.
+    """
+    texts = [phrases.greeting, phrases.misrecognition, phrases.transfer, phrases.silence]
+    for record in knowledge.records:
+        if not record.clarifying_question:
+            continue
+        texts.append(record.clarifying_question)
+        if record.positive_reply:
+            texts.append(record.positive_reply)
+
+    unique: List[str] = []
+    seen = set()
+    for text in texts:
+        text = (text or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            unique.append(text)
+    return unique
+
+
+def prewarm_tts_cache(tts_cache, voice: str, texts: List[str]) -> Tuple[int, float]:
+    """Синтезировать фразы заранее, чтобы звонок не ждал холодного синтеза.
+
+    Холодный синтез стоит до двух секунд, и клиент слышит их как тишину.
+    Отказ синтеза здесь не должен ронять запуск сервиса: фраза просто
+    синтезируется позже, по ходу звонка, как было раньше.
+    """
+    started = time.perf_counter()
+    done = 0
+    for text in texts:
+        try:
+            tts_cache.get(text, voice)
+            done += 1
+        except Exception:
+            log.exception("Не удалось заранее синтезировать фразу: %r", text[:60])
+    return done, time.perf_counter() - started
+
+
 def build_http_app(
     dialog_engine: DialogEngine,
     tts_cache,
@@ -244,6 +287,12 @@ def main() -> None:
         sales_exten="500",
         audio_signature="{0}|{1}".format(cfg.tts_model, cfg.tts_voice),
     )
+
+    if cfg.prewarm_tts:
+        speakable = collect_speakable_phrases(phrases, knowledge)
+        log.info("Прогреваем синтез: %s фраз", len(speakable))
+        done, elapsed = prewarm_tts_cache(tts_cache, cfg.tts_voice, speakable)
+        log.info("Синтез прогрет: %s из %s фраз за %.1f с", done, len(speakable), elapsed)
 
     # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
     # без этого /metrics копил бы данные, пока не кончится память.

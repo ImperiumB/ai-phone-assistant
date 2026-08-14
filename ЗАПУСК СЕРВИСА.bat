@@ -35,6 +35,10 @@ rem vernye popadaniya 0.669-0.857, postoronnie voprosy 0.455-0.568.
 rem Vyshe - chashche chestno perevodit na spetsialista.
 set AIA_SIMILARITY_THRESHOLD=0.65
 
+rem Sintezirovat vse izvestnye frazy pri starte (1) ili po hodu zvonka (0).
+rem Holodnyy sintez stoit do 2 sekund, i klient slushaet ih kak tishinu.
+set AIA_PREWARM_TTS=1
+
 cd /d "%~dp0"
 echo.
 echo   STT    : %AIA_STT_ENGINE%

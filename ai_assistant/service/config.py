@@ -18,6 +18,7 @@ class Config:
     stt_timeout_s: int
     knowledge_path: str
     tts_cache_dir: str
+    prewarm_tts: bool
 
 
 def _env_str(name: str, default: str) -> str:
@@ -26,6 +27,13 @@ def _env_str(name: str, default: str) -> str:
 
 def _env_int(name: str, default: int) -> int:
     return int(os.environ.get("AIA_" + name, default))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get("AIA_" + name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on", "да")
 
 
 def _env_float(name: str, default: float) -> float:
@@ -63,4 +71,8 @@ def load_config() -> Config:
         stt_timeout_s=_env_int("STT_TIMEOUT_S", 10),
         knowledge_path=_env_str("KNOWLEDGE_PATH", "ai_assistant/knowledge_base.json"),
         tts_cache_dir=_env_str("TTS_CACHE_DIR", "/tmp/aia_tts_cache"),
+        # Синтезировать все известные фразы при старте, а не по ходу звонка.
+        # Холодный синтез стоит до 2 секунд (замер 14.08.2026 на v5_ru), и
+        # клиент слушает их как тишину. Старт удлиняется, звонки — нет.
+        prewarm_tts=_env_bool("PREWARM_TTS", True),
     )

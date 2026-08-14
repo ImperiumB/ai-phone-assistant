@@ -514,3 +514,92 @@ def test_tts_endpoint_logs_synthesis_duration(client, caplog):
         response = client.get("/tts", params={"text": "здравствуйте"})
     assert response.status_code == 200
     assert any("TTS" in record.message for record in caplog.records)
+
+
+class RecordingTtsCache:
+    """Считает, что и сколько раз синтезировалось."""
+
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self._fail_on = fail_on or set()
+
+    def get(self, text, voice):
+        if text in self._fail_on:
+            raise RuntimeError("синтез не удался")
+        self.calls.append((text, voice))
+        return "/tmp/%s.wav" % len(self.calls)
+
+
+class KnowledgeStub:
+    def __init__(self, records):
+        self._records = records
+
+    @property
+    def records(self):
+        return list(self._records)
+
+
+def _phrases():
+    from ai_assistant.service.dialog import Phrases
+
+    return Phrases(
+        greeting="Здравствуйте, чем могу помочь?",
+        misrecognition="Переформулируйте, пожалуйста",
+        transfer="Перевожу звонок",
+        silence="Вы меня слышите?",
+    )
+
+
+def test_prewarm_collects_service_phrases_and_knowledge_answers():
+    from ai_assistant.service.main import collect_speakable_phrases
+
+    records = [
+        KnowledgeRecord(
+            id=1, question="стиралка", clarifying_question="Речь о стиральной машине?",
+            positive_reply="Соединяю с продажами",
+        ),
+        # Неразмеченная неопознанная реплика — бот её не произносит
+        KnowledgeRecord(id=2, question="во сколько вы работаете"),
+    ]
+    texts = collect_speakable_phrases(_phrases(), KnowledgeStub(records))
+
+    assert "Здравствуйте, чем могу помочь?" in texts
+    assert "Речь о стиральной машине?" in texts
+    assert "Соединяю с продажами" in texts
+    assert "во сколько вы работаете" not in texts
+
+
+def test_prewarm_does_not_repeat_the_same_phrase():
+    from ai_assistant.service.main import collect_speakable_phrases
+
+    records = [
+        KnowledgeRecord(id=i, question="q%s" % i, clarifying_question="Точно?",
+                        positive_reply="Соединяю")
+        for i in (1, 2, 3)
+    ]
+    texts = collect_speakable_phrases(_phrases(), KnowledgeStub(records))
+    assert texts.count("Точно?") == 1
+    assert texts.count("Соединяю") == 1
+
+
+def test_prewarm_synthesizes_every_phrase_once():
+    from ai_assistant.service.main import prewarm_tts_cache
+
+    cache = RecordingTtsCache()
+    done, elapsed = prewarm_tts_cache(cache, "eugene", ["раз", "два", "три"])
+
+    assert done == 3
+    assert [text for text, _ in cache.calls] == ["раз", "два", "три"]
+    assert all(voice == "eugene" for _, voice in cache.calls)
+    assert elapsed >= 0
+
+
+def test_prewarm_failure_does_not_stop_the_service():
+    """Отказ синтеза одной фразы не должен ронять запуск — она синтезируется позже."""
+    from ai_assistant.service.main import prewarm_tts_cache
+
+    cache = RecordingTtsCache(fail_on={"два"})
+    done, _ = prewarm_tts_cache(cache, "eugene", ["раз", "два", "три"])
+
+    assert done == 2
+    assert [text for text, _ in cache.calls] == ["раз", "три"]

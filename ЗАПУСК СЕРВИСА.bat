@@ -12,6 +12,11 @@ rem ===========================================================================
 rem Dvizhok raspoznavaniya: gigaam (bystree, put k modeli ne nuzhen) ili vosk
 set AIA_STT_ENGINE=gigaam
 
+rem Model GigaAM. v3_rnnt - obychnyy vybor (bystree v2_rnnt na tret).
+rem   v3_ctc      - eshche bystree, chut menee tochnaya
+rem   v3_e2e_rnnt - stavit punktuatsiyu i zaglavnye bukvy
+set AIA_GIGAAM_MODEL=v3_rnnt
+
 rem Tolko dlya vosk: put k raspakovannoy modeli
 set AIA_VOSK_MODEL_PATH=C:\Users\user\models\vosk-model-small-ru-0.22
 
@@ -33,6 +38,7 @@ set AIA_SIMILARITY_THRESHOLD=0.75
 cd /d "%~dp0"
 echo.
 echo   STT    : %AIA_STT_ENGINE%
+echo   STT_M  : %AIA_GIGAAM_MODEL%
 echo   TTS    : %AIA_TTS_MODEL% / %AIA_TTS_VOICE%
 echo   PAUSE  : %AIA_UTTERANCE_PAUSE_MS% ms
 echo   THRESH : %AIA_SIMILARITY_THRESHOLD%

@@ -16,6 +16,9 @@ def test_defaults_are_applied(monkeypatch):
     assert cfg.silence_timeout_ms == 15000
     assert cfg.stt_timeout_s == 10
     assert cfg.tts_voice == "eugene"
+    # Третья версия: замер 14.08.2026 дал распознавание 0.281 с против 0.378 с
+    # у v2_rnnt при том же результате.
+    assert cfg.gigaam_model == "v3_rnnt"
 
 
 def test_environment_overrides_defaults(monkeypatch):

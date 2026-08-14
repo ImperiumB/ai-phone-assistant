@@ -81,6 +81,7 @@ Vosk/GigaAM почти не влияет на время старта, пото�
 | `AIA_GRPC_PORT` | `50051` | Порт gRPC-потока распознавания |
 | `AIA_HTTP_PORT` | `8080` | Порт HTTP-ручек (`/dialog`, `/tts`, `/health`, `/metrics`) |
 | `AIA_STT_ENGINE` | `vosk` | Движок распознавания: `vosk` или `gigaam` |
+| `AIA_GIGAAM_MODEL` | `v3_rnnt` | Модель GigaAM. Замер 14.08.2026 на одном материале: `v3_rnnt` 0,281 с против `v2_rnnt` 0,378 с при том же результате. Ещё есть `v3_ctc` (быстрее, чуть менее точна) и `v3_e2e_rnnt` (расставляет пунктуацию и заглавные буквы) |
 | `AIA_VOSK_MODEL_PATH` | — (пусто) | Путь к модели Vosk. Читается отдельно в `main.py`, обязателен при `AIA_STT_ENGINE=vosk` |
 | `AIA_TTS_MODEL` | `v4_ru` | Модель синтеза Silero |
 | `AIA_TTS_VOICE` | `eugene` | Голос синтеза по умолчанию |

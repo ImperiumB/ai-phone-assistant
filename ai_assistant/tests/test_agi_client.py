@@ -7,13 +7,24 @@ import pytest
 import requests
 
 from ai_assistant.agi.ai_assistant import (
+    ERP_INTEGRATION,
+    ERP_TIMEOUT_S,
     REAL_REDIRECT,
     DialogAnswer,
     _atomic_write,
+    build_call_start_request,
     build_dialog_request,
+    build_equipment_request,
+    build_transfer_request,
     decide_failure_step,
     decide_next_step,
+    direction_name_of,
+    erp_url,
     parse_dialog_response,
+    parse_erp_response,
+    remember_recognized_text,
+    send_to_erp,
+    should_send_equipment,
 )
 
 
@@ -170,3 +181,242 @@ def test_source_avoids_pep604_unions_in_annotations():
     for node in ast.walk(tree):
         if isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.BinOp):
             pytest.fail("Аннотация вида X | Y не работает на Python 3.9")
+
+
+# --- Обращение в ERP на время звонка (UL-18797) -------------------------------
+
+
+def erp_pairs(request):
+    return {item["Key"]: item["Value"] for item in request["prms"]}
+
+
+class FakeResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+
+def test_erp_integration_is_on_by_default():
+    """Выключатель существует ради отладки, но по умолчанию интеграция работает."""
+    assert ERP_INTEGRATION is True
+
+
+def test_erp_url_is_built_from_the_channel_variable():
+    assert erp_url("10.0.0.1:65/Aster2ServiceWebHttp") == (
+        "http://10.0.0.1:65/Aster2ServiceWebHttp/ReturnConversationIntermediateResult3"
+    )
+
+
+def test_erp_url_tolerates_a_trailing_slash():
+    assert erp_url("10.0.0.1:65/svc/") == (
+        "http://10.0.0.1:65/svc/ReturnConversationIntermediateResult3"
+    )
+
+
+def test_call_start_request_carries_the_three_keys_erp_needs():
+    request = build_call_start_request("1755.42", "74951468847", "79161234567")
+    pairs = erp_pairs(request)
+    assert pairs["eventType"] == "AiAssistantCallStart"
+    assert pairs["linkedId"] == "1755.42"
+    # Набранный номер — по нему ERP ищет телефон линии, без него обращения нет.
+    assert pairs["dialedNumber"] == "74951468847"
+    assert pairs["callerPhone"] == "79161234567"
+
+
+def test_erp_values_are_always_strings():
+    """Служба перекладывает пары в Hashtable как есть, числа приезжают дробными."""
+    request = build_equipment_request(12345, "холодильник не морозит", "Холодильники", "Холодильники")
+    for item in request["prms"]:
+        assert isinstance(item["Key"], str)
+        assert isinstance(item["Value"], str)
+    assert erp_pairs(request)["documentId"] == "12345"
+
+
+def test_equipment_request_carries_the_topic():
+    request = build_equipment_request("12345", "холодильник не морозит", "Холодильники", "Холодильники")
+    pairs = erp_pairs(request)
+    assert pairs["eventType"] == "AiAssistantEquipment"
+    assert pairs["documentId"] == "12345"
+    assert pairs["recognizedText"] == "холодильник не морозит"
+    assert pairs["equipmentTypeName"] == "Холодильники"
+    assert pairs["directionName"] == "Холодильники"
+
+
+def test_empty_values_are_not_sent_at_all():
+    """Пустое значение ключа обработчику ERP ничего не сообщает, только мусорит."""
+    pairs = erp_pairs(build_equipment_request("12345", "", "Холодильники", ""))
+    assert "recognizedText" not in pairs
+    assert "directionName" not in pairs
+
+
+def test_transfer_request_carries_where_the_call_went():
+    request = build_transfer_request("12345", "7104", "Холодильники", "холодильник не морозит")
+    pairs = erp_pairs(request)
+    assert pairs["eventType"] == "AiAssistantTransfer"
+    assert pairs["documentId"] == "12345"
+    assert pairs["redirectExten"] == "7104"
+    assert pairs["directionName"] == "Холодильники"
+    assert pairs["recognizedText"] == "холодильник не морозит"
+
+
+def test_erp_answer_is_parsed():
+    answer = parse_erp_response([
+        {"Key": "Result", "Value": "OK"},
+        {"Key": "documentId", "Value": "1204567"},
+        {"Key": "Message", "Value": "Обращение создано"},
+    ])
+    assert answer.ok is True
+    assert answer.document_id == "1204567"
+    assert answer.message == "Обращение создано"
+
+
+def test_failed_erp_answer_is_not_ok():
+    answer = parse_erp_response([
+        {"Key": "Result", "Value": "FAIL"},
+        {"Key": "documentId", "Value": "0"},
+        {"Key": "Message", "Value": "Не найден телефон линии"},
+    ])
+    assert answer.ok is False
+    # Нулевой код — это отсутствие обращения, запоминать его нельзя.
+    assert answer.document_id == ""
+
+
+def test_erp_answer_of_unexpected_shape_does_not_explode():
+    answer = parse_erp_response("совсем не то, чего мы ждали")
+    assert answer.ok is False
+    assert answer.document_id == ""
+
+
+def test_equipment_is_sent_once_when_the_topic_becomes_known():
+    known = DialogAnswer(action="Redirect", text_to_speak="", file_to_playback="",
+                         conversation_point="Finished", redirect_exten="7104",
+                         equipment_type="Холодильники", telephone_direction_id="52")
+    assert should_send_equipment(known, already_sent=False) is True
+    assert should_send_equipment(known, already_sent=True) is False
+
+
+def test_the_question_is_remembered_not_the_confirmation():
+    """Обращение с текстом «да» оператору ничего не говорит."""
+    question = remember_recognized_text("", "AskQuestion", "холодильник не морозит")
+    assert question == "холодильник не морозит"
+    assert remember_recognized_text(question, "Confirm", "да") == "холодильник не морозит"
+
+
+def test_empty_recognition_does_not_erase_the_question():
+    assert remember_recognized_text("холодильник не морозит", "AskQuestion", "") == (
+        "холодильник не морозит"
+    )
+
+
+def test_a_second_question_replaces_the_first():
+    """Бот не угадал, клиент переспросил по-другому — в обращении нужен второй вопрос."""
+    assert remember_recognized_text("холодильник не морозит", "AskQuestion", "нужен мастер по плите") == (
+        "нужен мастер по плите"
+    )
+
+
+def test_direction_name_comes_from_the_equipment_type_of_the_record():
+    """Отдельного поля с названием направления у сервиса нет, а в справочнике
+    ERP название направления совпадает с названием типа оборудования."""
+    answer = DialogAnswer(action="Redirect", text_to_speak="", file_to_playback="",
+                          conversation_point="Finished", redirect_exten="7104",
+                          equipment_type="Холодильники", telephone_direction_id="52")
+    assert direction_name_of(answer) == "Холодильники"
+
+
+def test_direction_name_is_empty_when_the_topic_is_unknown():
+    answer = DialogAnswer(action="Redirect", text_to_speak="", file_to_playback="",
+                          conversation_point="Finished", redirect_exten="489")
+    assert direction_name_of(answer) == ""
+
+
+def test_equipment_is_not_sent_while_the_topic_is_unknown():
+    unknown = DialogAnswer(action="Recognize", text_to_speak="", file_to_playback="",
+                           conversation_point="AskQuestion", redirect_exten="")
+    assert should_send_equipment(unknown, already_sent=False) is False
+
+
+def test_dialog_answer_carries_the_erp_context():
+    answer = parse_dialog_response([
+        {"Key": "Action", "Value": "Redirect"},
+        {"Key": "RedirectExten", "Value": "7104"},
+        {"Key": "EquipmentType", "Value": "Холодильники"},
+        {"Key": "Scenario", "Value": "redirect_direction"},
+        {"Key": "TelephoneDirectionId", "Value": "52"},
+        {"Key": "KnowledgeRecordId", "Value": "10"},
+        {"Key": "MatchedQuestion", "Value": "не морозит холодильник"},
+        {"Key": "Similarity", "Value": "0.8312"},
+    ])
+    assert answer.equipment_type == "Холодильники"
+    assert answer.scenario == "redirect_direction"
+    assert answer.telephone_direction_id == "52"
+    assert answer.knowledge_record_id == "10"
+    assert answer.matched_question == "не морозит холодильник"
+    assert answer.similarity == "0.8312"
+
+
+def test_old_answer_without_erp_context_still_parses():
+    answer = parse_dialog_response([{"Key": "Action", "Value": "Recognize"}])
+    assert answer.equipment_type == ""
+    assert answer.knowledge_record_id == ""
+
+
+def test_erp_call_returns_the_parsed_answer():
+    def fake_post(url, json=None, timeout=None):
+        return FakeResponse([{"Key": "Result", "Value": "OK"}, {"Key": "documentId", "Value": "77"}])
+
+    answer = send_to_erp("host/svc", {"prms": []}, post=fake_post)
+    assert answer is not None
+    assert answer.document_id == "77"
+
+
+def test_erp_call_uses_a_short_timeout():
+    """Клиент в трубке важнее обращения: ждать ERP дольше пары секунд нельзя."""
+    seen = {}
+
+    def fake_post(url, json=None, timeout=None):
+        seen["timeout"] = timeout
+        seen["url"] = url
+        return FakeResponse([{"Key": "Result", "Value": "OK"}])
+
+    send_to_erp("host/svc", {"prms": []}, post=fake_post)
+    assert seen["timeout"] == ERP_TIMEOUT_S
+    assert ERP_TIMEOUT_S <= 5
+    assert seen["url"].endswith("/ReturnConversationIntermediateResult3")
+
+
+def test_erp_call_survives_a_dead_service():
+    def fake_post(url, json=None, timeout=None):
+        raise requests.exceptions.ConnectionError("ERP лежит")
+
+    assert send_to_erp("host/svc", {"prms": []}, post=fake_post) is None
+
+
+def test_erp_call_survives_a_broken_answer():
+    def fake_post(url, json=None, timeout=None):
+        raise ValueError("не разобрался json")
+
+    assert send_to_erp("host/svc", {"prms": []}, post=fake_post) is None
+
+
+def test_erp_call_ignores_a_non_200_answer():
+    def fake_post(url, json=None, timeout=None):
+        return FakeResponse("Internal Server Error", status_code=500)
+
+    assert send_to_erp("host/svc", {"prms": []}, post=fake_post) is None
+
+
+def test_erp_call_is_skipped_entirely_when_integration_is_off(monkeypatch):
+    """Выключатель должен снимать сам запрос, а не только его последствия."""
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append(url)
+        return FakeResponse([{"Key": "Result", "Value": "OK"}])
+
+    monkeypatch.setattr("ai_assistant.agi.ai_assistant.ERP_INTEGRATION", False)
+    assert send_to_erp("host/svc", {"prms": []}, post=fake_post) is None
+    assert calls == []

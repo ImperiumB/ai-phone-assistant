@@ -31,9 +31,9 @@ rem Bolshe - razgovor oshchushchaetsya slomannym.
 set AIA_UTTERANCE_PAUSE_MS=1000
 
 rem Porog blizosti voprosa k baze znaniy (0..1). 0.65 podobran zamerom 14.08.2026:
-rem vernye popadaniya 0.669-0.857, postoronnie voprosy 0.455-0.568.
+rem 34 zhivyh frazy 0.684-0.832, postoronnie voprosy 0.465-0.597.
 rem Vyshe - chashche chestno perevodit na spetsialista.
-set AIA_SIMILARITY_THRESHOLD=0.65
+set AIA_SIMILARITY_THRESHOLD=0.64
 
 rem Sintezirovat vse izvestnye frazy pri starte (1) ili po hodu zvonka (0).
 rem Holodnyy sintez stoit do 2 sekund, i klient slushaet ih kak tishinu.

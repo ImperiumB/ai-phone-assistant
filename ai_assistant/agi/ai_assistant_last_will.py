@@ -28,7 +28,7 @@ import requests
 
 # Те же значения, что в ai_assistant.py. Продублированы, а не импортированы:
 # см. про самодостаточность в шапке файла.
-DEFAULT_ASTER2_SERVICE_ADDRESS = "10.20.0.15:65/Aster2ServiceWebHttp"
+DEFAULT_ASTER2_SERVICE_ADDRESS = "10.20.0.12:3511/Aster2ServiceWebHttp"
 ERP_ENDPOINT = "ReturnConversationIntermediateResult3"
 ERP_TIMEOUT_S = 5
 

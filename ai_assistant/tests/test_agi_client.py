@@ -432,3 +432,45 @@ def test_erp_call_is_skipped_entirely_when_integration_is_off(monkeypatch):
     monkeypatch.setattr("ai_assistant.agi.ai_assistant.ERP_INTEGRATION", False)
     assert send_to_erp("host/svc", {"prms": []}, post=fake_post) is None
     assert calls == []
+
+
+def test_dialog_answer_carries_the_equipment_type_code():
+    """Код типа оборудования приходит от сервиса вместе с названием."""
+    answer = parse_dialog_response([
+        {"Key": "Action", "Value": "Redirect"},
+        {"Key": "EquipmentType", "Value": "Холодильники"},
+        {"Key": "EquipmentTypeId", "Value": "31"},
+    ])
+    assert answer.equipment_type_id == "31"
+
+
+def test_old_answer_without_the_equipment_type_code_still_parses():
+    """Сервис прежней сборки этого ключа не присылает — разговор от него не зависит."""
+    answer = parse_dialog_response([{"Key": "Action", "Value": "Recognize"}])
+    assert answer.equipment_type_id == ""
+
+
+def test_equipment_request_carries_the_equipment_type_code():
+    """Обработчик ERP предпочитает код названию: по названию он искал тип
+    строкой, и это единственное место цепочки на совпадении текста."""
+    request = build_equipment_request(
+        "12345", "холодильник не морозит", "Холодильники", "Холодильники", "31"
+    )
+    pairs = erp_pairs(request)
+    assert pairs["equipmentTypeId"] == "31"
+    assert pairs["equipmentTypeName"] == "Холодильники"
+
+
+def test_equipment_request_without_the_code_sends_only_the_name():
+    """Тема не про технику — кода нет, пустой ключ обработчику ничего не скажет."""
+    pairs = erp_pairs(build_equipment_request("12345", "жалоба", "", "Жалобы"))
+    assert "equipmentTypeId" not in pairs
+
+
+def test_equipment_is_sent_when_only_the_code_is_known():
+    """Название типа со временем станет необязательным — код заменяет его целиком.
+    Признак «тема известна» не должен держаться на одном названии."""
+    known = DialogAnswer(action="Redirect", text_to_speak="", file_to_playback="",
+                         conversation_point="Finished", redirect_exten="7104",
+                         equipment_type_id="31")
+    assert should_send_equipment(known, already_sent=False) is True

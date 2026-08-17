@@ -23,8 +23,10 @@ from ai_assistant.agi.ai_assistant import (
     parse_dialog_response,
     parse_erp_response,
     remember_recognized_text,
+    build_unknown_request,
     send_to_erp,
     should_send_equipment,
+    should_send_unknown_question,
 )
 
 
@@ -474,3 +476,106 @@ def test_equipment_is_sent_when_only_the_code_is_known():
                          conversation_point="Finished", redirect_exten="7104",
                          equipment_type_id="31")
     assert should_send_equipment(known, already_sent=False) is True
+
+
+# --- Неопознанный вопрос в базу знаний ERP (UL-17568) -------------------------
+
+
+def redirect_answer(**kwargs):
+    fields = dict(action="Redirect", text_to_speak="", file_to_playback="",
+                  conversation_point="Finished", redirect_exten="489")
+    fields.update(kwargs)
+    return DialogAnswer(**fields)
+
+
+def test_dialog_answer_carries_the_unrecognized_question_flag():
+    answer = parse_dialog_response([
+        {"Key": "Action", "Value": "Redirect"},
+        {"Key": "RedirectExten", "Value": "489"},
+        {"Key": "UnknownQuestion", "Value": "True"},
+    ])
+    assert answer.unknown_question is True
+
+
+def test_old_answer_without_the_flag_still_parses():
+    """Сервис прежней сборки этого ключа не присылает — разговор от него не зависит."""
+    assert parse_dialog_response([{"Key": "Action", "Value": "Recognize"}]).unknown_question is False
+
+
+def test_unknown_question_is_sent_when_the_bot_found_no_answer():
+    answer = redirect_answer(unknown_question=True)
+    assert should_send_unknown_question(
+        answer, "AskQuestion", "во сколько вы открываетесь", False
+    ) is True
+
+
+def test_silence_transfer_is_not_an_unknown_question():
+    """Двойное молчание тоже уводит звонок на сопровождение, но вопроса не было."""
+    assert should_send_unknown_question(redirect_answer(), "AskQuestion", "", True) is False
+
+
+def test_silence_flag_wins_over_anything_the_service_said():
+    """Реплики не было — что бы ни пришло в ответе, записывать нечего."""
+    assert should_send_unknown_question(
+        redirect_answer(unknown_question=True), "AskQuestion", "холодильник", True
+    ) is False
+
+
+def test_empty_recognition_is_not_an_unknown_question():
+    """Щелчок в линии, шорох, кашель — распозналось пусто, вопроса нет."""
+    assert should_send_unknown_question(
+        redirect_answer(unknown_question=True), "AskQuestion", "   ", False
+    ) is False
+
+
+def test_service_failure_is_not_an_unknown_question():
+    """Аварийный перевод при отказе речевого сервиса: ответа нет вовсе."""
+    assert should_send_unknown_question(None, "AskQuestion", "холодильник не морозит", False) is False
+
+
+def test_found_answer_is_not_an_unknown_question():
+    known = redirect_answer(redirect_exten="7104", equipment_type="Холодильники",
+                            equipment_type_id="31", telephone_direction_id="52")
+    assert should_send_unknown_question(known, "Confirm", "да", False) is False
+
+
+def test_answer_at_the_confirmation_point_is_never_an_unknown_question():
+    """«Да»/«нет» — это ответ на уточнение бота, а не вопрос клиента.
+
+    Даже если сессия разговора на сервисе потерялась и он увёл звонок на общее
+    сопровождение, отправлять отсюда нечего: сам вопрос прозвучал раньше и
+    тогда же был найден в базе.
+    """
+    assert should_send_unknown_question(
+        redirect_answer(unknown_question=True), "Confirm", "да", False
+    ) is False
+
+
+def test_nothing_is_sent_while_the_bot_keeps_talking():
+    """Бот продолжает разговор — итог звонка ещё не известен."""
+    listening = DialogAnswer(action="Recognize", text_to_speak="", file_to_playback="",
+                             conversation_point="AskQuestion", redirect_exten="",
+                             unknown_question=True)
+    assert should_send_unknown_question(listening, "AskQuestion", "холодильник", False) is False
+
+
+def test_unknown_request_carries_the_question_and_the_case():
+    request = build_unknown_request("12345", "во сколько вы открываетесь")
+    pairs = erp_pairs(request)
+    assert pairs["eventType"] == "AiAssistantUnknown"
+    assert pairs["documentId"] == "12345"
+    assert pairs["recognizedText"] == "во сколько вы открываетесь"
+
+
+def test_unknown_question_obeys_the_erp_switch(monkeypatch):
+    """Пятое событие подчиняется тому же выключателю, что и остальные четыре."""
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append(url)
+        return FakeResponse([{"Key": "Result", "Value": "OK"}])
+
+    monkeypatch.setattr("ai_assistant.agi.ai_assistant.ERP_INTEGRATION", False)
+    body = build_unknown_request("12345", "во сколько вы открываетесь")
+    assert send_to_erp("host/svc", body, post=fake_post) is None
+    assert calls == []

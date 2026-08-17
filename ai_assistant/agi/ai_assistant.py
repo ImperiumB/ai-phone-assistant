@@ -73,6 +73,7 @@ POINT_CONFIRM = "Confirm"
 EVENT_CALL_START = "AiAssistantCallStart"
 EVENT_EQUIPMENT = "AiAssistantEquipment"
 EVENT_TRANSFER = "AiAssistantTransfer"
+EVENT_UNKNOWN = "AiAssistantUnknown"
 
 CHUNK_SIZE = 8000  # 4000 отсчётов = 0,5 секунды при 8000 Гц
 CALL_TIMEOUT_S = 120
@@ -113,6 +114,10 @@ class DialogAnswer:
     knowledge_record_id: str = ""
     matched_question: str = ""
     similarity: str = ""
+    #: Сервис не нашёл подходящей записи: мера близости ниже порога либо база
+    #: пуста. Единственное поле ответа не строкой — это признак, а не значение,
+    #: и решение по нему принимается прямо здесь, в скрипте.
+    unknown_question: bool = False
 
 
 def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
@@ -132,6 +137,7 @@ def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
         knowledge_record_id=pairs.get("KnowledgeRecordId", ""),
         matched_question=pairs.get("MatchedQuestion", ""),
         similarity=pairs.get("Similarity", ""),
+        unknown_question=pairs.get("UnknownQuestion", "").strip().lower() in ("true", "1", "yes"),
     )
 
 
@@ -256,6 +262,19 @@ def build_transfer_request(document_id, redirect_exten, direction_name, recogniz
     ])
 
 
+def build_unknown_request(document_id, recognized_text):
+    # type: (Any, str) -> Dict[str, Any]
+    """Бот не нашёл ответа — вопрос клиента едет в справочник ERP.
+
+    Отсекать короткие тексты и точные повторы не нужно: этим занимается сам
+    обработчик, и делает это по всей базе, а не по одному звонку.
+    """
+    return build_erp_request(EVENT_UNKNOWN, [
+        ("documentId", document_id),
+        ("recognizedText", recognized_text),
+    ])
+
+
 def parse_erp_response(items):
     # type: (Any) -> ErpAnswer
     """Ответ ERP — такой же список пар. Разбор не имеет права падать: что бы
@@ -316,6 +335,39 @@ def should_send_equipment(answer, already_sent):
     if already_sent:
         return False
     return bool(answer.equipment_type or answer.equipment_type_id or answer.telephone_direction_id)
+
+
+def should_send_unknown_question(answer, point, recognized_text, silence):
+    # type: (Any, str, str, bool) -> bool
+    """Стоит ли записывать эту реплику в базу знаний ERP как неопознанный вопрос.
+
+    На сопровождение звонок уходит по нескольким разным поводам, и только один
+    из них годится для справочника: клиент произнёс осмысленную фразу, а
+    подходящей записи под неё не нашлось. Остальные поводы — не он, и каждый
+    отсекается здесь своим условием:
+
+    * `answer is None` — речевой сервис не ответил вовсе, звонок уводит
+      аварийный перевод (failover_to_support). Вопроса никто не расслышал.
+    * `silence` — клиент промолчал дважды. Реплики не было.
+    * пустой `recognized_text` — распозналось пусто: щелчок в линии, шорох,
+      кашель. Вопроса опять же не прозвучало.
+    * точка `Confirm` — клиент отвечает «да»/«нет» на уточняющий вопрос бота.
+      Сам вопрос прозвучал раньше и тогда же был найден в базе; ответ «нет»
+      разговор не заканчивает — бот переспрашивает, и следующая реплика
+      клиента либо найдётся, либо честно уедет сюда промахом по порогу.
+    * действие не `Redirect` — разговор ещё идёт, итог не известен.
+    * `unknown_question` — это уже слово самого сервиса: перевод случился
+      из-за промаха по порогу. Порог знает только он.
+    """
+    if answer is None:
+        return False
+    if silence or not recognized_text.strip():
+        return False
+    if point == POINT_CONFIRM:
+        return False
+    if answer.action != ACTION_REDIRECT:
+        return False
+    return bool(answer.unknown_question)
 
 
 def send_to_erp(service_address, body, post=None, log=None):

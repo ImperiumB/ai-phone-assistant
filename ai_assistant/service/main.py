@@ -31,6 +31,12 @@ GRPC_SHUTDOWN_GRACE_SECONDS = 5
 # dialog.py._session().
 MAX_ACTIVE_TIMELINES = 1000
 
+# Куда уезжают записи без своего телефонного направления. Это настройка
+# сервиса, а не справочника: в ERP таких номеров нет, а деться подобным
+# записям куда-то нужно.
+SUPPORT_EXTEN = "489"
+SALES_EXTEN = "500"
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "proto"))
 import speech_pb2  # noqa: E402
 import speech_pb2_grpc  # noqa: E402
@@ -165,6 +171,27 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                 )
 
 
+def build_dialog_factory(support_exten: str, sales_exten: str, audio_signature: str = ""):
+    """Как из присланной посылки получается движок диалога.
+
+    Служебные фразы бота берутся из той же посылки: их правят в той же группе
+    линий, что и базу знаний, и разъезд между ними было бы видно только на
+    живом звонке. Номера отделов остаются настройкой сервиса — в справочниках
+    ERP их нет, а деться записи без своего направления куда-то должны.
+    """
+
+    def factory(knowledge, feed: ParsedFeed) -> DialogEngine:
+        return DialogEngine(
+            knowledge,
+            feed.phrases,
+            support_exten=support_exten,
+            sales_exten=sales_exten,
+            audio_signature=audio_signature,
+        )
+
+    return factory
+
+
 class KnowledgeState:
     """Текущая база знаний и сведения о посылке, из которой она собрана.
 
@@ -173,15 +200,20 @@ class KnowledgeState:
     знаний наполовину обновлённой, потому что такое расхождение не видно.
     """
 
-    def __init__(self, cache_path, embedder, threshold=0.64, dialog_factory=None):
+    def __init__(self, cache_path, embedder, threshold=0.64, dialog_factory=None,
+                 fallback_engine=None):
         self._cache_path = cache_path
         self._embedder = embedder
         self._threshold = threshold
         self._dialog_factory = dialog_factory
+        # Движок на базе из файла — он обслуживает звонки, пока первой посылки
+        # не было, и разговоры при первой же подмене надо перенимать у него.
+        self._fallback_engine = fallback_engine
         self._lock = threading.Lock()
 
         self.knowledge = None
         self.dialog_engine = None
+        self.phrases = None
         self.generated_at = None
         self.received_at = None
         self.record_count = 0
@@ -191,10 +223,16 @@ class KnowledgeState:
         knowledge = KnowledgeBase(feed.records, self._embedder, self._threshold)
         phrase_count = sum(1 + len(r.question_variants) for r in feed.records)
         engine = self._dialog_factory(knowledge, feed) if self._dialog_factory else None
+        if engine is not None:
+            # Разговоры, идущие прямо сейчас, переезжают на новый движок
+            # целиком — иначе клиент, услышавший уточняющий вопрос секунду
+            # назад, ответит «да» движку, который про его звонок не знает.
+            engine.adopt_sessions(self.dialog_engine or self._fallback_engine)
 
         with self._lock:
             self.knowledge = knowledge
             self.dialog_engine = engine
+            self.phrases = feed.phrases
             self.generated_at = feed.generated_at
             self.received_at = datetime.now().isoformat(timespec="seconds")
             self.record_count = len(feed.records)
@@ -278,7 +316,14 @@ def build_http_app(
     @app.post("/dialog")
     def dialog(payload: dict):
         prms = prms_to_dict(payload.get("prms", []))
-        result = dialog_engine.handle(prms)
+        # Порядок выбора: пришедшая от ERP база знаний, если она есть, иначе
+        # прежняя из файла. Ссылку берём один раз на весь запрос — посылка,
+        # применённая посреди разговора, не должна расщепить одну реплику
+        # между двумя базами.
+        engine = dialog_engine
+        if state is not None and state.dialog_engine is not None:
+            engine = state.dialog_engine
+        result = engine.handle(prms)
 
         # Сквозная разбивка задержки (Important из финального ревью): у
         # звонка тот же linkedId, что и session_id в gRPC-потоке — находим
@@ -333,14 +378,20 @@ def build_http_app(
     def health():
         # Возраст данных — единственный способ заметить, что робот перестал
         # приносить справочники: сервис при этом жив и отвечает на звонки
-        # прежней базой знаний, и по одному "ok" поломки не видно.
-        knowledge_info = {"records": 0, "phrases": 0, "generated_at": None, "received_at": None}
+        # прежней базой знаний, и по одному "ok" поломки не видно. По той же
+        # причине здесь и source: "feed" — звонки обслуживает присланная база,
+        # "file" — прежняя из файла.
+        knowledge_info = {
+            "records": 0, "phrases": 0, "generated_at": None, "received_at": None,
+            "source": "file",
+        }
         if state is not None:
             knowledge_info = {
                 "records": state.record_count,
                 "phrases": state.phrase_count,
                 "generated_at": state.generated_at,
                 "received_at": state.received_at,
+                "source": "feed" if state.dialog_engine is not None else "file",
             }
         return {"status": "ok", "knowledge": knowledge_info}
 
@@ -373,19 +424,24 @@ def main() -> None:
         silence="Вы меня слышите?",
         wrong_guess="Тогда подскажите, пожалуйста, что вас интересует?",
     )
+    audio_signature = "{0}|{1}".format(cfg.tts_model, cfg.tts_voice)
     dialog_engine = DialogEngine(
         knowledge,
         phrases,
-        support_exten="489",
-        sales_exten="500",
-        audio_signature="{0}|{1}".format(cfg.tts_model, cfg.tts_voice),
+        support_exten=SUPPORT_EXTEN,
+        sales_exten=SALES_EXTEN,
+        audio_signature=audio_signature,
     )
 
-    if cfg.prewarm_tts:
-        speakable = collect_speakable_phrases(phrases, knowledge)
+    def prewarm(source_phrases, source_knowledge) -> None:
+        if not cfg.prewarm_tts:
+            return
+        speakable = collect_speakable_phrases(source_phrases, source_knowledge)
         log.info("Прогреваем синтез: %s фраз", len(speakable))
         done, elapsed = prewarm_tts_cache(tts_cache, cfg.tts_voice, speakable)
         log.info("Синтез прогрет: %s из %s фраз за %.1f с", done, len(speakable), elapsed)
+
+    prewarm(phrases, knowledge)
 
     # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
     # без этого /metrics копил бы данные, пока не кончится память.
@@ -420,20 +476,26 @@ def main() -> None:
     server.start()
     log.info("gRPC слушает порт %s", cfg.grpc_port)
 
-    # Приёмник справочников из ERP. Живой разговор он пока не трогает: диалог
-    # обслуживает база знаний из файла, как и раньше. Здесь только приём,
-    # копия на диске и возраст данных в /health — подмена базы под звонками
-    # будет отдельным шагом, чтобы её можно было включить осознанно.
+    # Приёмник справочников из ERP. Пришедшая база знаний обслуживает звонки
+    # сама (см. выбор движка в /dialog), база из файла остаётся страховкой на
+    # то время, пока первая посылка не пришла.
     knowledge_state = KnowledgeState(
         cache_path=cfg.feed_cache_path,
         embedder=embedder,
         threshold=cfg.similarity_threshold,
+        dialog_factory=build_dialog_factory(SUPPORT_EXTEN, SALES_EXTEN, audio_signature),
+        fallback_engine=dialog_engine,
     )
     if knowledge_state.restore_from_disk():
         log.info(
             "Поднята копия последней посылки: %s записей, собрана %s",
             knowledge_state.record_count, knowledge_state.generated_at,
         )
+        # Звонки пойдут по ней же, значит и синтез греть надо по ней: иначе
+        # первый после перезапуска клиент слушает тишину холодного синтеза.
+        # Фразы посылок, пришедших уже во время работы, синтезируются по ходу
+        # разговора — как было и раньше для новых записей базы знаний.
+        prewarm(knowledge_state.phrases, knowledge_state.knowledge)
 
     app = build_http_app(
         dialog_engine,

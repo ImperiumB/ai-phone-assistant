@@ -767,3 +767,169 @@ def test_state_with_an_unusable_copy_starts_empty(tmp_path):
 
     assert state.restore_from_disk() is False
     assert state.knowledge is None
+
+
+def file_dialog_engine():
+    """Движок на прежней базе из файла — тем и отличается, что здоровается иначе."""
+    phrases = Phrases(
+        greeting="Приветствие из файла",
+        misrecognition="Переформулируйте, пожалуйста",
+        transfer="Перевожу звонок",
+        silence="Вы меня слышите?",
+    )
+    return DialogEngine(FakeKnowledge(), phrases, support_exten="489", sales_exten="500")
+
+
+def feed_serving_app(tmp_path):
+    """Сервис, умеющий обслуживать звонки присланной базой знаний."""
+    from ai_assistant.service.main import KnowledgeState, build_dialog_factory
+
+    fallback = file_dialog_engine()
+    state = KnowledgeState(
+        cache_path=str(tmp_path / "feed.json"),
+        embedder=FakeEmbedderForFeed(),
+        dialog_factory=build_dialog_factory("489", "500"),
+        fallback_engine=fallback,
+    )
+    app = build_http_app(fallback, FakeTtsCache(tmp_path), voice="baya", state=state)
+    return state, TestClient(app)
+
+
+def ask(client, linked_id, point, text="", silence=False):
+    response = client.post("/dialog", json={"prms": [
+        {"Key": "linkedId", "Value": linked_id},
+        {"Key": "conversationPoint", "Value": point},
+        {"Key": "recognizedText", "Value": text},
+        {"Key": "silenceDetected", "Value": "True" if silence else "False"},
+    ]})
+    return {item["Key"]: item["Value"] for item in response.json()}
+
+
+def feed_with_its_own_wording():
+    """Посылка, которую видно в разговоре: и приветствие, и уточняющий вопрос
+    отличаются от того, что лежит в файле."""
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    payload = minimal_payload()
+    payload["settings"]["greeting"] = "Здравствуйте, это справочник"
+    payload["records"][0]["clarifying_question"] = "Это стиральная машина из справочника?"
+    return payload
+
+
+def test_calls_are_served_by_the_file_base_until_a_feed_arrives(tmp_path):
+    """Сервис поднялся, копии нет, ERP ещё не присылала — разговор работает как раньше."""
+    _, client = feed_serving_app(tmp_path)
+
+    assert ask(client, "call-1", "Start")["TextToSpeak"] == "Приветствие из файла"
+
+
+def test_calls_switch_to_the_feed_base_as_soon_as_it_arrives(tmp_path):
+    """Ради этого всё и затевалось: правка в справочнике меняет разговор."""
+    _, client = feed_serving_app(tmp_path)
+
+    client.post("/knowledge", json=feed_with_its_own_wording())
+
+    assert ask(client, "call-2", "Start")["TextToSpeak"] == "Здравствуйте, это справочник"
+    answer = ask(client, "call-2", "AskQuestion", "стиралка сломалась")
+    assert answer["TextToSpeak"] == "Это стиральная машина из справочника?"
+
+
+def test_rejected_feed_keeps_serving_the_previous_one(tmp_path):
+    """Кривая посылка не должна возвращать звонки на файл и вообще ничего менять."""
+    _, client = feed_serving_app(tmp_path)
+    client.post("/knowledge", json=feed_with_its_own_wording())
+
+    client.post("/knowledge", json={"нет": "ничего"})
+
+    assert ask(client, "call-3", "Start")["TextToSpeak"] == "Здравствуйте, это справочник"
+
+
+def test_a_call_in_progress_is_not_split_between_two_bases(tmp_path):
+    """Посылка приходит посреди разговора — клиент дослушивает свой звонок.
+
+    Бот спросил уточняющий вопрос по одной базе, клиент отвечает «да» уже по
+    другой. Без переноса разговоров новый движок про этот звонок ничего не
+    знает и вместо перевода по своей теме увёз бы клиента на общий номер
+    сопровождения.
+    """
+    _, client = feed_serving_app(tmp_path)
+    client.post("/knowledge", json=feed_with_its_own_wording())
+    first = ask(client, "call-4", "AskQuestion", "стиралка сломалась")
+    assert first["ConversationPoint"] == "Confirm"
+
+    client.post("/knowledge", json=feed_with_its_own_wording())
+
+    answer = ask(client, "call-4", "Confirm", "да")
+    assert answer["Action"] == "Redirect"
+    assert answer["RedirectExten"] == "7105"  # номер своей записи, а не общее сопровождение
+
+
+def test_health_tells_which_base_serves_the_calls(tmp_path):
+    """По «ok» не видно, чем сейчас отвечает бот — файлом или справочником."""
+    _, client = feed_serving_app(tmp_path)
+
+    assert client.get("/health").json()["knowledge"]["source"] == "file"
+
+    client.post("/knowledge", json=feed_with_its_own_wording())
+
+    assert client.get("/health").json()["knowledge"]["source"] == "feed"
+
+
+def test_health_of_a_service_without_feed_reception_says_file(tmp_path):
+    app = build_http_app(file_dialog_engine(), FakeTtsCache(tmp_path), voice="baya")
+    client = TestClient(app)
+
+    assert client.get("/health").json()["knowledge"]["source"] == "file"
+
+
+def test_restored_copy_serves_the_calls_right_after_a_restart(tmp_path):
+    """Перезапуск не должен возвращать бота на файл: копия для того и лежит."""
+    from ai_assistant.service.knowledge_feed import save_feed
+    from ai_assistant.service.main import KnowledgeState, build_dialog_factory
+
+    cache = str(tmp_path / "feed.json")
+    save_feed(feed_with_its_own_wording(), cache)
+
+    state = KnowledgeState(
+        cache_path=cache,
+        embedder=FakeEmbedderForFeed(),
+        dialog_factory=build_dialog_factory("489", "500"),
+    )
+    assert state.restore_from_disk() is True
+    app = build_http_app(file_dialog_engine(), FakeTtsCache(tmp_path), voice="baya", state=state)
+
+    assert ask(TestClient(app), "call-5", "Start")["TextToSpeak"] == "Здравствуйте, это справочник"
+
+
+def test_feed_dialog_factory_keeps_the_extensions_of_the_service():
+    """Записи без своего номера по-прежнему уезжают на сопровождение."""
+    from ai_assistant.service.knowledge_feed import parse_feed
+    from ai_assistant.service.main import build_dialog_factory
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    payload = minimal_payload()
+    del payload["records"][0]["redirect_exten"]
+    feed = parse_feed(payload)
+    engine = build_dialog_factory("489", "500")(FakeKnowledge(), feed)
+
+    silence = {"linkedId": "call-6", "conversationPoint": "AskQuestion", "silenceDetected": "True"}
+    engine.handle(silence)  # на первое молчание бот переспрашивает
+    result = {item["Key"]: item["Value"] for item in engine.handle(silence)}
+    assert result["RedirectExten"] == "489"
+
+
+def test_a_call_started_on_the_file_base_survives_the_first_feed(tmp_path):
+    """Первая же посылка приходится на чей-нибудь разговор — он тоже должен доиграть.
+
+    Тот же случай, что и подмена одной присланной базы другой, только прежним
+    движком здесь оказывается тот, что работает на файле.
+    """
+    _, client = feed_serving_app(tmp_path)
+    first = ask(client, "call-7", "AskQuestion", "стиралка не крутит")
+    assert first["ConversationPoint"] == "Confirm"
+
+    client.post("/knowledge", json=feed_with_its_own_wording())
+
+    answer = ask(client, "call-7", "Confirm", "да")
+    assert answer["Action"] == "Redirect"
+    assert answer["RedirectExten"] == "500"  # номер записи из файла, а не общее сопровождение

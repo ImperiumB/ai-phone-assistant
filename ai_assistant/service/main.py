@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from concurrent import futures
+from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
 import grpc
@@ -41,8 +42,16 @@ from ai_assistant.service.dialog import (  # noqa: E402
     prms_to_dict,
 )
 from ai_assistant.service.knowledge import (  # noqa: E402
+    KnowledgeBase,
     SentenceTransformerEmbedder,
     load_knowledge_base,
+)
+from ai_assistant.service.knowledge_feed import (  # noqa: E402
+    FeedError,
+    ParsedFeed,
+    load_feed,
+    parse_feed,
+    save_feed,
 )
 from ai_assistant.service.metrics import (  # noqa: E402
     STAGE_DIALOG_DONE,
@@ -156,6 +165,62 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                 )
 
 
+class KnowledgeState:
+    """Текущая база знаний и сведения о посылке, из которой она собрана.
+
+    Подмена — одной операцией в самом конце: пока новый индекс считается,
+    звонки обслуживаются прежним. Кривая посылка не должна оставлять базу
+    знаний наполовину обновлённой, потому что такое расхождение не видно.
+    """
+
+    def __init__(self, cache_path, embedder, threshold=0.64, dialog_factory=None):
+        self._cache_path = cache_path
+        self._embedder = embedder
+        self._threshold = threshold
+        self._dialog_factory = dialog_factory
+        self._lock = threading.Lock()
+
+        self.knowledge = None
+        self.dialog_engine = None
+        self.generated_at = None
+        self.received_at = None
+        self.record_count = 0
+        self.phrase_count = 0
+
+    def apply(self, feed: ParsedFeed) -> None:
+        knowledge = KnowledgeBase(feed.records, self._embedder, self._threshold)
+        phrase_count = sum(1 + len(r.question_variants) for r in feed.records)
+        engine = self._dialog_factory(knowledge, feed) if self._dialog_factory else None
+
+        with self._lock:
+            self.knowledge = knowledge
+            self.dialog_engine = engine
+            self.generated_at = feed.generated_at
+            self.received_at = datetime.now().isoformat(timespec="seconds")
+            self.record_count = len(feed.records)
+            self.phrase_count = phrase_count
+
+    def accept(self, payload) -> ParsedFeed:
+        # Порядок важен: сначала разбор и применение, и только потом запись на
+        # диск. Иначе на диск попадёт посылка, которую сервис не смог применить,
+        # и после перезапуска он поднимется именно на ней.
+        feed = parse_feed(payload)
+        self.apply(feed)
+        save_feed(payload, self._cache_path)
+        return feed
+
+    def restore_from_disk(self) -> bool:
+        payload = load_feed(self._cache_path)
+        if payload is None:
+            return False
+        try:
+            self.apply(parse_feed(payload))
+            return True
+        except FeedError:
+            log.exception("Копия посылки не разбирается, стартуем без неё")
+            return False
+
+
 def collect_speakable_phrases(phrases: Phrases, knowledge) -> List[str]:
     """Всё, что бот вообще способен произнести.
 
@@ -205,6 +270,7 @@ def build_http_app(
     voice: str,
     active_timelines: Optional[Dict[str, Tuple[CallTimeline, dict]]] = None,
     timelines_lock: Optional[threading.Lock] = None,
+    state: Optional["KnowledgeState"] = None,
 ) -> FastAPI:
     app = FastAPI(title="AI Assistant speech service")
     lock = timelines_lock or threading.Lock()
@@ -248,9 +314,35 @@ def build_http_app(
         log.info("TTS %.1f ms | voice=%s | text=%.80r", duration_ms, voice_name or voice, text)
         return FileResponse(path, media_type="audio/wav")
 
+    @app.post("/knowledge")
+    def knowledge_feed(payload: dict):
+        if state is None:
+            raise HTTPException(status_code=503, detail="Приём справочников не настроен")
+        try:
+            feed = state.accept(payload)
+        except FeedError as error:
+            log.warning("Посылка отвергнута: %s", error)
+            raise HTTPException(status_code=400, detail=str(error))
+        log.info(
+            "Принята база знаний: %s записей, %s формулировок, собрана %s",
+            state.record_count, state.phrase_count, feed.generated_at,
+        )
+        return {"records": state.record_count, "phrases": state.phrase_count}
+
     @app.get("/health")
     def health():
-        return {"status": "ok"}
+        # Возраст данных — единственный способ заметить, что робот перестал
+        # приносить справочники: сервис при этом жив и отвечает на звонки
+        # прежней базой знаний, и по одному "ok" поломки не видно.
+        knowledge_info = {"records": 0, "phrases": 0, "generated_at": None, "received_at": None}
+        if state is not None:
+            knowledge_info = {
+                "records": state.record_count,
+                "phrases": state.phrase_count,
+                "generated_at": state.generated_at,
+                "received_at": state.received_at,
+            }
+        return {"status": "ok", "knowledge": knowledge_info}
 
     return app
 
@@ -328,7 +420,29 @@ def main() -> None:
     server.start()
     log.info("gRPC слушает порт %s", cfg.grpc_port)
 
-    app = build_http_app(dialog_engine, tts_cache, cfg.tts_voice, active_timelines, timelines_lock)
+    # Приёмник справочников из ERP. Живой разговор он пока не трогает: диалог
+    # обслуживает база знаний из файла, как и раньше. Здесь только приём,
+    # копия на диске и возраст данных в /health — подмена базы под звонками
+    # будет отдельным шагом, чтобы её можно было включить осознанно.
+    knowledge_state = KnowledgeState(
+        cache_path=cfg.feed_cache_path,
+        embedder=embedder,
+        threshold=cfg.similarity_threshold,
+    )
+    if knowledge_state.restore_from_disk():
+        log.info(
+            "Поднята копия последней посылки: %s записей, собрана %s",
+            knowledge_state.record_count, knowledge_state.generated_at,
+        )
+
+    app = build_http_app(
+        dialog_engine,
+        tts_cache,
+        cfg.tts_voice,
+        active_timelines,
+        timelines_lock,
+        state=knowledge_state,
+    )
 
     @app.get("/metrics")
     def metrics():

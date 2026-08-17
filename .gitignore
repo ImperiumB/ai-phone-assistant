@@ -4,3 +4,4 @@ __pycache__/
 .superpowers/
 Входящее от заказчика/
 /tmp_audio/
+ai_assistant/knowledge_feed_cache.json

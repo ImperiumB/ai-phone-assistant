@@ -6,11 +6,17 @@ ERP толкает содержимое справочников POST-запро
 Посылка применяется целиком или не применяется вовсе: наполовину обновлённая
 база знаний хуже устаревшей, потому что расхождение в ней не видно.
 """
+import json
+import logging
+import os
+import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ai_assistant.service.dialog import SCENARIO_DIRECTION, Phrases
 from ai_assistant.service.knowledge import KnowledgeRecord
+
+log = logging.getLogger("aia.feed")
 
 
 class FeedError(Exception):
@@ -116,3 +122,38 @@ def parse_feed(payload: Dict[str, Any]) -> ParsedFeed:
         voice=str(settings.get("voice") or "").strip(),
         line_group_id=_optional_int(settings.get("line_group_id"), "line_group_id", "настройки"),
     )
+
+
+def save_feed(payload: Dict[str, Any], path: str) -> None:
+    """Сохранить посылку на диск атомарно.
+
+    Копия нужна, чтобы сервис поднимался сразу после перезапуска: он встаёт
+    за минуту, а робот приносит данные раз в десять. Имя временного файла
+    уникально — на той же грабле уже спотыкались в кэше синтеза.
+    """
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    tmp_path = "{0}.{1}.tmp".format(path, uuid.uuid4().hex)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass  # обычный случай: файл уже переименован
+
+
+def load_feed(path: str) -> Optional[Dict[str, Any]]:
+    """Прочитать копию. Отсутствие или порча копии — не повод падать при старте."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        log.exception("Копия посылки повреждена и будет проигнорирована: %s", path)
+        return None

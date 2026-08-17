@@ -135,3 +135,45 @@ def test_blank_phrases_are_dropped():
     payload["records"][0]["phrases"] = ["стиралка сломалась", "", "   "]
     feed = parse_feed(payload)
     assert feed.records[0].question_variants == ["стиралка сломалась"]
+
+
+def test_saved_feed_is_read_back(tmp_path):
+    from ai_assistant.service.knowledge_feed import load_feed, save_feed
+
+    target = str(tmp_path / "feed.json")
+    save_feed(minimal_payload(), target)
+    restored = load_feed(target)
+
+    assert restored is not None
+    assert parse_feed(restored).records[0].question == "стиральная машина не отжимает"
+
+
+def test_load_returns_none_when_file_is_absent(tmp_path):
+    from ai_assistant.service.knowledge_feed import load_feed
+
+    assert load_feed(str(tmp_path / "нет-такого.json")) is None
+
+
+def test_load_returns_none_on_broken_file(tmp_path):
+    """Битую копию нельзя применять и нельзя падать из-за неё при старте."""
+    from ai_assistant.service.knowledge_feed import load_feed
+
+    target = tmp_path / "feed.json"
+    target.write_text("{это не json", encoding="utf-8")
+    assert load_feed(str(target)) is None
+
+
+def test_save_leaves_no_temporary_file(tmp_path):
+    from ai_assistant.service.knowledge_feed import save_feed
+
+    target = tmp_path / "feed.json"
+    save_feed(minimal_payload(), str(target))
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_save_creates_missing_directory(tmp_path):
+    from ai_assistant.service.knowledge_feed import load_feed, save_feed
+
+    target = str(tmp_path / "глубже" / "feed.json")
+    save_feed(minimal_payload(), target)
+    assert load_feed(target) is not None

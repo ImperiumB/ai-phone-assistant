@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-08-14T15:00:00",
+  "settings": {
+    "line_group_id": 1,
+    "voice": "eugene",
+    "greeting": "Здравствуйте, чем могу помочь?",
+    "misrecognition": "Попробуйте переформулировать свой вопрос, пожалуйста",
+    "transfer": "Минуту, перевожу ваш звонок на специалиста",
+    "silence": "Вы меня слышите?",
+    "wrong_guess": "Тогда подскажите, пожалуйста, что вас интересует?",
+    "positive_answers": [
+      "да",
+      "так"
+    ],
+    "negative_answers": [
+      "нет",
+      "не то"
+    ]
+  },
+  "records": [
+    {
+      "id": 1,
+      "question": "стиральная машина не отжимает",
+      "phrases": [
+        "стиралка сломалась",
+        "не крутит бельё"
+      ],
+      "clarifying_question": "Речь о стиральной машине?",
+      "positive_reply": "Соединяю со специалистом",
+      "equipment_type": "Стиральные машины",
+      "equipment_type_id": 17,
+      "telephone_direction_id": 53,
+      "redirect_exten": "7105"
+    }
+  ]
+}

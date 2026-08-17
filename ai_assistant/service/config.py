@@ -17,6 +17,7 @@ class Config:
     utterance_pause_ms: int
     stt_timeout_s: int
     knowledge_path: str
+    feed_cache_path: str
     tts_cache_dir: str
     prewarm_tts: bool
 
@@ -76,6 +77,10 @@ def load_config() -> Config:
         utterance_pause_ms=_env_int("UTTERANCE_PAUSE_MS", 1500),
         stt_timeout_s=_env_int("STT_TIMEOUT_S", 10),
         knowledge_path=_env_str("KNOWLEDGE_PATH", "ai_assistant/knowledge_base.json"),
+        # Копия последней присланной посылки. Сервис поднимается с неё, не
+        # дожидаясь робота: перезапуск занимает минуту, робот приходит раз в
+        # десять.
+        feed_cache_path=_env_str("FEED_CACHE_PATH", "ai_assistant/knowledge_feed_cache.json"),
         tts_cache_dir=_env_str("TTS_CACHE_DIR", "/tmp/aia_tts_cache"),
         # Синтезировать все известные фразы при старте, а не по ходу звонка.
         # Холодный синтез стоит до 2 секунд (замер 14.08.2026 на v5_ru), и

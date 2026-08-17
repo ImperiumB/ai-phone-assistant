@@ -20,6 +20,7 @@ def test_defaults_are_applied(monkeypatch):
     # у v2_rnnt при том же результате.
     assert cfg.gigaam_model == "v3_rnnt"
     assert cfg.prewarm_tts is True
+    assert cfg.feed_cache_path == "ai_assistant/knowledge_feed_cache.json"
 
 
 def test_environment_overrides_defaults(monkeypatch):

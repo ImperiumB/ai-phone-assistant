@@ -603,3 +603,167 @@ def test_prewarm_failure_does_not_stop_the_service():
 
     assert done == 2
     assert [text for text, _ in cache.calls] == ["раз", "три"]
+
+
+class FakeEmbedderForFeed:
+    """Отдаёт вектор фиксированной длины — модель в тестах не грузим."""
+
+    def encode(self, texts):
+        import numpy as np
+
+        return np.array([[1.0, 0.0]] * len(texts), dtype="float32")
+
+
+def test_feed_endpoint_applies_records(tmp_path):
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    response = client.post("/knowledge", json=minimal_payload())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["records"] == 1
+    assert body["phrases"] == 3  # каноничная формулировка плюс две из phrases
+
+
+def test_feed_endpoint_keeps_the_equipment_type_code(tmp_path):
+    """Код оборудования обязан доехать до записи: по нему обработчик ERP
+    проставляет технику в обращении, не угадывая её по названию."""
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    client.post("/knowledge", json=minimal_payload())
+
+    assert state.knowledge.records[0].equipment_type_id == 17
+
+
+def test_feed_endpoint_rejects_broken_payload(tmp_path):
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    response = client.post("/knowledge", json={"records": []})
+
+    assert response.status_code == 400
+    assert "settings" in response.json()["detail"] or "запис" in response.json()["detail"]
+
+
+def test_broken_payload_does_not_replace_working_knowledge(tmp_path):
+    """Кривая посылка не должна оставлять базу знаний в промежуточном состоянии."""
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    client.post("/knowledge", json=minimal_payload())
+    before = state.record_count
+
+    client.post("/knowledge", json={"нет": "ничего"})
+
+    assert state.record_count == before
+    assert state.knowledge is not None
+
+
+def test_broken_payload_does_not_overwrite_the_copy_on_disk(tmp_path):
+    """На диск попадает только то, что сервис смог применить: иначе после
+    перезапуска он поднимется на посылке, которую сам же и отверг."""
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+    from ai_assistant.service.knowledge_feed import load_feed
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    cache = str(tmp_path / "feed.json")
+    state = KnowledgeState(cache_path=cache, embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    client.post("/knowledge", json=minimal_payload())
+    client.post("/knowledge", json={"нет": "ничего"})
+
+    assert load_feed(cache)["records"][0]["question"] == "стиральная машина не отжимает"
+
+
+def test_health_reports_feed_age(tmp_path):
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    before = client.get("/health").json()
+    assert before["knowledge"]["received_at"] is None
+
+    client.post("/knowledge", json=minimal_payload())
+    after = client.get("/health").json()
+
+    assert after["status"] == "ok"
+    assert after["knowledge"]["records"] == 1
+    assert after["knowledge"]["received_at"] is not None
+    assert after["knowledge"]["generated_at"] == "2026-08-14T15:00:00"
+
+
+def test_health_without_feed_reception_still_answers(tmp_path):
+    """Сервис, поднятый без приёма справочников, обязан отвечать на проверку живости."""
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene")
+    client = TestClient(app)
+
+    body = client.get("/health").json()
+
+    assert body["status"] == "ok"
+    assert body["knowledge"]["records"] == 0
+
+
+def test_feed_endpoint_without_state_says_it_is_not_configured(tmp_path):
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene")
+    client = TestClient(app)
+
+    assert client.post("/knowledge", json={}).status_code == 503
+
+
+def test_state_restores_from_disk(tmp_path):
+    """После перезапуска сервис поднимается на последней копии, а не пустым."""
+    from ai_assistant.service.main import KnowledgeState
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+    from ai_assistant.service.knowledge_feed import save_feed
+
+    cache = str(tmp_path / "feed.json")
+    save_feed(minimal_payload(), cache)
+
+    state = KnowledgeState(cache_path=cache, embedder=FakeEmbedderForFeed())
+    assert state.restore_from_disk() is True
+    assert state.record_count == 1
+
+
+def test_state_without_a_copy_on_disk_starts_empty(tmp_path):
+    from ai_assistant.service.main import KnowledgeState
+
+    state = KnowledgeState(cache_path=str(tmp_path / "нет-такого.json"), embedder=FakeEmbedderForFeed())
+
+    assert state.restore_from_disk() is False
+    assert state.knowledge is None
+
+
+def test_state_with_an_unusable_copy_starts_empty(tmp_path):
+    """Копия читается, но не разбирается — стартуем без неё, а не падаем."""
+    from ai_assistant.service.main import KnowledgeState
+    from ai_assistant.service.knowledge_feed import save_feed
+
+    cache = str(tmp_path / "feed.json")
+    save_feed({"records": []}, cache)
+
+    state = KnowledgeState(cache_path=cache, embedder=FakeEmbedderForFeed())
+
+    assert state.restore_from_disk() is False
+    assert state.knowledge is None

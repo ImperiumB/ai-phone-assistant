@@ -3,16 +3,23 @@
 """Последняя воля виртуального AI-помощника (UL-18797).
 
 Астериск запускает этот скрипт на `exten => h`, то есть уже после того, как
-канал разорван. Он сообщает в ERP, что клиент положил трубку, и обращение
-уходит в ПЦК — иначе человек, который до нас не дозвонился, останется без
-ответа.
+канал разорван. Он сообщает в ERP, чем кончился звонок: длительностью
+разговора и — если клиент остался без ответа по нашей вине — причиной отказа,
+по которой обращение уходит в ПЦК.
+
+Обратный звонок положен не за каждый обрыв. Клиент, который передумал и бросил
+трубку, догонять себя звонком не просил, а если перезванивать за любой сброс,
+достаточно насбрасывать сотню звонков, чтобы получить сотню исходящих от
+операторов. Поэтому в ПЦК уводит только заполненный `failureReason`, а
+подделать его снаружи нельзя: причину называет наш же скрипт.
 
 Отдельный скрипт нужен не для красоты: основной `ai_assistant.py` при обрыве
 канала умирает мгновенно (SIGHUP переведён на SIG_DFL, и это сделано
 намеренно — зомби-процессы копились и роняли станцию целиком). Сказать
 что-либо об обрыве он поэтому не может физически, и всё, что нужно знать
 последней воле, он заранее кладёт в переменные канала: `documentId`,
-`ScriptFinished`, `LastRecognizedText`, `conversation_start_time`.
+`ScriptFinished`, `LastRecognizedText`, `conversation_start_time`,
+`AiFailureReason`.
 
 Скрипт намеренно самодостаточен: ничего не импортирует из `ai_assistant.py`,
 чтобы не тянуть за собой grpc и сгенерированные заглушки protobuf. На станции
@@ -34,6 +41,11 @@ ERP_ENDPOINT = "ReturnConversationIntermediateResult3"
 ERP_TIMEOUT_S = 5
 
 EVENT_HANGUP = "AiAssistantHangup"
+
+# Переменная канала, в которую основной скрипт кладёт причину отказа нашей
+# стороны. Имя продублировано, а не импортировано: см. про самодостаточность
+# в шапке файла. Тест сверяет, что оба скрипта называют её одинаково.
+FAILURE_REASON_VAR = "AiFailureReason"
 
 
 def erp_url(service_address):
@@ -62,9 +74,9 @@ def call_length_seconds(start_raw, now):
 
 
 def build_hangup_request(document_id, linked_id, recognized_text, script_finished,
-                         call_length=0.0):
-    # type: (Any, str, str, Any, float) -> Dict[str, Any]
-    """Тело запроса об оборванном звонке.
+                         call_length=0.0, failure_reason=""):
+    # type: (Any, str, str, Any, float, Any) -> Dict[str, Any]
+    """Тело запроса о завершившемся звонке.
 
     `documentId` может не приехать вовсе: трубку бросают и на первой секунде,
     когда обращение ещё не создано. Поэтому `linkedId` отправляется всегда —
@@ -74,12 +86,18 @@ def build_hangup_request(document_id, linked_id, recognized_text, script_finishe
     `callLengthSeconds` отправляется всегда, даже нулевой: ERP проставляет его
     в табличную часть звонков обращения, и «нуля» там ждут не меньше, чем
     настоящей длительности.
+
+    `failureReason` — причина, по которой клиент остался без ответа по нашей
+    вине. Заполнена — обращение уходит в ПЦК, и причину прочтёт оператор в
+    истории. Пустой ключ не отправляется: пустое значение и есть «в ПЦК не
+    уводим», сообщать о нём отдельно нечем.
     """
     values = [
         ("documentId", document_id),
         ("linkedId", linked_id),
         ("recognizedText", recognized_text),
         ("scriptFinished", script_finished),
+        ("failureReason", failure_reason),
         # Точка как разделитель — формат фиксированный, от локали не зависит.
         ("callLengthSeconds", "{0:.2f}".format(call_length)),
     ]
@@ -93,26 +111,23 @@ def build_hangup_request(document_id, linked_id, recognized_text, script_finishe
     return {"prms": prms}
 
 
-def should_report_hangup(script_finished, document_id, linked_id):
-    # type: (str, str, str) -> bool
-    """Был ли это именно обрыв, а не нормальный конец разговора.
+def should_report_hangup(document_id, linked_id):
+    # type: (str, str) -> bool
+    """Есть ли о чём сообщать в ERP.
 
-    Расширение `h` Астериск исполняет на любом завершении канала, в том числе
-    когда бот сам довёл разговор до перевода и положил трубку. Обработчик ERP
-    на событие обрыва уводит обращение в ПЦК и признака завершённости не
-    смотрит — значит отличать одно от другого обязаны мы, иначе каждый
-    успешно переведённый звонок попадёт ещё и в «Перезвонить целевому
-    клиенту», и оператор будет перезванивать тому, с кем уже поговорили.
+    Расширение `h` Астериск исполняет на любом завершении канала, и событие
+    уходит на любом из них — в том числе когда бот сам довёл разговор до
+    перевода. Раньше завершённый разговор здесь глушился, потому что решение о
+    ПЦК принималось по `scriptFinished`; теперь его принимает `failureReason`,
+    а длительность звонка ERP проставляет в обращение на любом пути — заглуши
+    событие, и про нормально завершённый разговор она не узнает ничего.
 
-    `ScriptFinished` основной скрипт выставляет в True ровно там, где сам
-    решил закончить: перевод, отбой по решению диалога, аварийный перевод при
-    отказе речевого сервиса. Если он оборвался или умер от SIGHUP, значение
-    так и останется False — это и есть брошенная трубка.
+    Единственный случай, когда сообщать нечем: не приехало ни кода обращения,
+    ни идентификатора канала — ERP такое событие не к чему прицепить. Ноль и
+    пустая строка — это одно и то же «кода нет».
     """
-    if str(script_finished).strip().lower() in ("true", "1", "yes"):
-        return False
     if document_id.strip() in ("", "0") and not linked_id.strip():
-        return False  # сообщать не о чем: ни обращения, ни канала
+        return False
     return True
 
 
@@ -180,19 +195,21 @@ def _main():  # pragma: no cover - требует живого канала Aste
     recognized_text = get_var("LastRecognizedText")
     aster2_address = get_var("Aster2ServiceAddress", DEFAULT_ASTER2_SERVICE_ADDRESS)
     call_length = call_length_seconds(get_var("conversation_start_time"), time.time())
+    failure_reason = get_var(FAILURE_REASON_VAR)
 
     log_it("=== AI ASSISTANT LAST WILL {0} (обращение {1}, ScriptFinished={2},"
-           " длительность {3:.2f} сек) ===".format(
-               linked_id, document_id or "не создано", script_finished, call_length))
+           " длительность {3:.2f} сек, причина: {4}) ===".format(
+               linked_id, document_id or "не создано", script_finished, call_length,
+               failure_reason or "нет, клиент положил трубку сам"))
 
-    if not should_report_hangup(script_finished, document_id, linked_id):
-        log_it("LAST WILL: разговор завершён самим ботом, обрыва не было")
+    if not should_report_hangup(document_id, linked_id):
+        log_it("LAST WILL: сообщать не о чем — ни обращения, ни канала")
     else:
         try:
             send_last_will(
                 aster2_address,
                 build_hangup_request(document_id, linked_id, recognized_text,
-                                     script_finished, call_length),
+                                     script_finished, call_length, failure_reason),
                 log=log_it,
             )
         except Exception:

@@ -16,6 +16,7 @@ from ai_assistant.agi.ai_assistant import (
     build_dialog_request,
     build_equipment_request,
     build_transfer_request,
+    build_unknown_request,
     decide_failure_step,
     decide_next_step,
     direction_name_of,
@@ -23,7 +24,6 @@ from ai_assistant.agi.ai_assistant import (
     parse_dialog_response,
     parse_erp_response,
     remember_recognized_text,
-    build_unknown_request,
     send_to_erp,
     should_send_equipment,
     should_send_unknown_question,
@@ -579,3 +579,15 @@ def test_unknown_question_obeys_the_erp_switch(monkeypatch):
     body = build_unknown_request("12345", "во сколько вы открываетесь")
     assert send_to_erp("host/svc", body, post=fake_post) is None
     assert calls == []
+
+
+def test_unknown_question_is_reported_from_the_call_flow():
+    """Решение принимается на том же шаге, что и сообщение о теме разговора.
+
+    `_main()` требует живого канала Asterisk, поэтому проверяем по исходнику:
+    без вызова из apply() чистая функция осталась бы мёртвым кодом.
+    """
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert "report_unknown_question(answer)" in source
+    assert "build_unknown_request(" in source

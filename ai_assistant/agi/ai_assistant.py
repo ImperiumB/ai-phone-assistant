@@ -489,6 +489,13 @@ def _main():  # pragma: no cover - требует живого канала Aste
         "document_id": "",
         "equipment_sent": False,
         "last_text": "",
+        # Точка, реплика и признак молчания того шага, ответ на который сейчас
+        # разбирается. Ответ сервиса уводит разговор в следующую точку, а
+        # решение по неопознанному вопросу принимается по той, в которой
+        # клиент говорил.
+        "asked_point": "Start",
+        "asked_text": "",
+        "asked_silence": False,
     }
 
     def fetch_audio(text, file_name):
@@ -536,6 +543,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
             # Скрипт последней воли поднимается отдельным процессом и нашей
             # памяти не видит: вопрос клиента он возьмёт только отсюда.
             set_var("LastRecognizedText", remembered)
+        state["asked_point"] = state["point"]
+        state["asked_text"] = text
+        state["asked_silence"] = silence
         payload = build_dialog_request(linked_id, state["point"], text, silence)
         response = requests.post(http_base + "/dialog", json=payload, timeout=15)
         response.raise_for_status()
@@ -585,6 +595,27 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # звонок, которому и так не ответили, смысла нет.
         state["equipment_sent"] = True
 
+    def report_unknown_question(answer):
+        """Бот не нашёл ответа — вопрос клиента едет в справочник ERP.
+
+        Обращение обязано существовать: событие цепляется именно к нему.
+        """
+        if not state["document_id"]:
+            return
+        if not should_send_unknown_question(
+            answer, state["asked_point"], state["asked_text"], state["asked_silence"]
+        ):
+            return
+        send_to_erp(
+            aster2_address,
+            # Запомненный вопрос, а не сырая реплика этого шага: источник
+            # текста для ERP в скрипте один на все события. В этой точке
+            # разговора они совпадают — в точке подтверждения, где они
+            # расходятся, событие не отправляется вовсе.
+            build_unknown_request(state["document_id"], state["last_text"]),
+            log=log_it,
+        )
+
     def report_transfer(redirect_exten, direction_name):
         if not state["document_id"]:
             return
@@ -604,6 +635,10 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # мгновенно (SIGHUP, см. ниже) — в обращении так и останется
         # «Неизвестное оборудование», хотя бот тему уже понял.
         report_equipment(answer)
+        # По той же причине, что и тема: одно из двух событий, взаимно
+        # исключающих друг друга — либо тему узнали, либо вопрос остался
+        # неопознанным. Лишней задержки перед озвучкой это не добавляет.
+        report_unknown_question(answer)
         speak(answer, blocking=(step != "listen"))
         if step == "listen":
             return True

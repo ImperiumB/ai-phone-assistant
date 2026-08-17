@@ -1,0 +1,2296 @@
+{
+ "_": "Снимок справочников AI-помощника из боевой базы. Нужен генератору sql/08, чтобы не досылать то, что уже заведено.",
+ "snapshot_date": "2026-08-17",
+ "source": "ULTIMA.AI_SCENARIOS, ULTIMA.AI_KNOWLEDGE_BASE, ULTIMA.AI_KB_PHRASES",
+ "scenarios": [
+  {
+   "id": 1,
+   "telephone_direction_id": 53,
+   "action_type": 1,
+   "name": "Стиральные машины"
+  },
+  {
+   "id": 2,
+   "telephone_direction_id": 52,
+   "action_type": 1,
+   "name": "Холодильники"
+  },
+  {
+   "id": 3,
+   "telephone_direction_id": 61,
+   "action_type": 1,
+   "name": "Посудомоечные машины"
+  },
+  {
+   "id": 4,
+   "telephone_direction_id": 24,
+   "action_type": 1,
+   "name": "Кофемашины"
+  },
+  {
+   "id": 5,
+   "telephone_direction_id": 101,
+   "action_type": 1,
+   "name": "СВЧ"
+  },
+  {
+   "id": 6,
+   "telephone_direction_id": 2,
+   "action_type": 1,
+   "name": "Вар/Дух/Электроплиты"
+  },
+  {
+   "id": 7,
+   "telephone_direction_id": 62,
+   "action_type": 1,
+   "name": "Водонагреватели"
+  },
+  {
+   "id": 8,
+   "telephone_direction_id": 4,
+   "action_type": 1,
+   "name": "Кондиционеры"
+  },
+  {
+   "id": 9,
+   "telephone_direction_id": 55,
+   "action_type": 1,
+   "name": "Пылесосы"
+  },
+  {
+   "id": 10,
+   "telephone_direction_id": 27,
+   "action_type": 1,
+   "name": "БТ-МБТ (ХД/Кофе/УБТ/Пылесосы/Швейки)"
+  },
+  {
+   "id": 11,
+   "telephone_direction_id": 60,
+   "action_type": 1,
+   "name": "Установка БТ"
+  },
+  {
+   "id": 12,
+   "telephone_direction_id": 25,
+   "action_type": 1,
+   "name": "ТВ"
+  },
+  {
+   "id": 13,
+   "telephone_direction_id": 113,
+   "action_type": 1,
+   "name": "Настройка каналов"
+  },
+  {
+   "id": 14,
+   "telephone_direction_id": 59,
+   "action_type": 1,
+   "name": "Проектор"
+  },
+  {
+   "id": 15,
+   "telephone_direction_id": 58,
+   "action_type": 1,
+   "name": "Мониторы"
+  },
+  {
+   "id": 16,
+   "telephone_direction_id": 21,
+   "action_type": 1,
+   "name": "ПК и нотбуки"
+  },
+  {
+   "id": 17,
+   "telephone_direction_id": 22,
+   "action_type": 1,
+   "name": "Оргтехника"
+  },
+  {
+   "id": 18,
+   "telephone_direction_id": 19,
+   "action_type": 1,
+   "name": "Iphone"
+  },
+  {
+   "id": 19,
+   "telephone_direction_id": 57,
+   "action_type": 1,
+   "name": "Ipad"
+  },
+  {
+   "id": 20,
+   "telephone_direction_id": 100,
+   "action_type": 1,
+   "name": "Samsung"
+  },
+  {
+   "id": 21,
+   "telephone_direction_id": 102,
+   "action_type": 1,
+   "name": "Karcher"
+  },
+  {
+   "id": 22,
+   "telephone_direction_id": 20,
+   "action_type": 1,
+   "name": "СиП"
+  },
+  {
+   "id": 23,
+   "telephone_direction_id": 67,
+   "action_type": 1,
+   "name": "Ремонт окон"
+  },
+  {
+   "id": 24,
+   "telephone_direction_id": 51,
+   "action_type": 1,
+   "name": "Дезинсекция"
+  },
+  {
+   "id": 25,
+   "telephone_direction_id": 50,
+   "action_type": 1,
+   "name": "Клининг"
+  },
+  {
+   "id": 26,
+   "telephone_direction_id": 98,
+   "action_type": 1,
+   "name": "Ветеринарные услуги"
+  },
+  {
+   "id": 27,
+   "telephone_direction_id": 54,
+   "action_type": 1,
+   "name": "Интернет на дачу"
+  }
+ ],
+ "records": [
+  {
+   "id": 1,
+   "scenario_id": 1,
+   "equipment_type_id": 119,
+   "is_from_bot": 0,
+   "question": "стиральная машина не отжимает"
+  },
+  {
+   "id": 2,
+   "scenario_id": 2,
+   "equipment_type_id": 116,
+   "is_from_bot": 0,
+   "question": "холодильник не морозит"
+  },
+  {
+   "id": 3,
+   "scenario_id": 3,
+   "equipment_type_id": 135,
+   "is_from_bot": 0,
+   "question": "посудомоечная машина не моет посуду"
+  },
+  {
+   "id": 4,
+   "scenario_id": 4,
+   "equipment_type_id": 505,
+   "is_from_bot": 0,
+   "question": "кофемашина не варит кофе"
+  },
+  {
+   "id": 5,
+   "scenario_id": 5,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "микроволновка не греет"
+  },
+  {
+   "id": 6,
+   "scenario_id": 6,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "духовка не греет"
+  },
+  {
+   "id": 7,
+   "scenario_id": 7,
+   "equipment_type_id": 219,
+   "is_from_bot": 0,
+   "question": "водонагреватель не греет воду"
+  },
+  {
+   "id": 8,
+   "scenario_id": 8,
+   "equipment_type_id": 262,
+   "is_from_bot": 0,
+   "question": "кондиционер не охлаждает"
+  },
+  {
+   "id": 9,
+   "scenario_id": 9,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "пылесос не включается"
+  },
+  {
+   "id": 10,
+   "scenario_id": 10,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "нужен ремонт мелкой бытовой техники"
+  },
+  {
+   "id": 11,
+   "scenario_id": 11,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "нужна установка бытовой техники"
+  },
+  {
+   "id": 12,
+   "scenario_id": 12,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "телевизор не включается"
+  },
+  {
+   "id": 13,
+   "scenario_id": 13,
+   "equipment_type_id": 934,
+   "is_from_bot": 0,
+   "question": "нужно настроить каналы на телевизоре"
+  },
+  {
+   "id": 14,
+   "scenario_id": 14,
+   "equipment_type_id": 43,
+   "is_from_bot": 0,
+   "question": "проектор не включается"
+  },
+  {
+   "id": 15,
+   "scenario_id": 15,
+   "equipment_type_id": 21,
+   "is_from_bot": 0,
+   "question": "монитор не включается"
+  },
+  {
+   "id": 16,
+   "scenario_id": 16,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "ноутбук не включается"
+  },
+  {
+   "id": 17,
+   "scenario_id": 17,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "принтер не печатает"
+  },
+  {
+   "id": 18,
+   "scenario_id": 18,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "айфон не включается"
+  },
+  {
+   "id": 19,
+   "scenario_id": 19,
+   "equipment_type_id": 52,
+   "is_from_bot": 0,
+   "question": "айпад не включается"
+  },
+  {
+   "id": 20,
+   "scenario_id": 20,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "телефон самсунг не включается"
+  },
+  {
+   "id": 21,
+   "scenario_id": 21,
+   "equipment_type_id": 879,
+   "is_from_bot": 0,
+   "question": "керхер не включается"
+  },
+  {
+   "id": 22,
+   "scenario_id": 22,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "телефон сломался"
+  },
+  {
+   "id": 23,
+   "scenario_id": 23,
+   "equipment_type_id": 721,
+   "is_from_bot": 0,
+   "question": "окно не закрывается"
+  },
+  {
+   "id": 24,
+   "scenario_id": 24,
+   "equipment_type_id": 915,
+   "is_from_bot": 0,
+   "question": "нужна обработка от тараканов"
+  },
+  {
+   "id": 25,
+   "scenario_id": 25,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "нужна уборка квартиры"
+  },
+  {
+   "id": 26,
+   "scenario_id": 26,
+   "equipment_type_id": 800,
+   "is_from_bot": 0,
+   "question": "нужен ветеринар на дом"
+  },
+  {
+   "id": 27,
+   "scenario_id": 27,
+   "equipment_type_id": 656,
+   "is_from_bot": 0,
+   "question": "нужен интернет на дачу"
+  },
+  {
+   "id": 28,
+   "scenario_id": null,
+   "equipment_type_id": null,
+   "is_from_bot": 0,
+   "question": "ко мне приезжал мастер но техника снова не работает"
+  },
+  {
+   "id": 29,
+   "scenario_id": null,
+   "equipment_type_id": null,
+   "is_from_bot": 1,
+   "question": "здравствуйте а можно заказать пиццу"
+  }
+ ],
+ "phrases": [
+  {
+   "id": 1,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "стиралка машинка сломалась"
+  },
+  {
+   "id": 2,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "стиральная машинка не работает"
+  },
+  {
+   "id": 3,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "стиральная машина не включается"
+  },
+  {
+   "id": 4,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "стиралка течет вода"
+  },
+  {
+   "id": 5,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "машинка стиральная гудит и не крутит барабан"
+  },
+  {
+   "id": 6,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт стиральной машины"
+  },
+  {
+   "id": 7,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по стиральной машине"
+  },
+  {
+   "id": 8,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "почините стиралку пожалуйста"
+  },
+  {
+   "id": 9,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "стиральная машина выбивает автомат"
+  },
+  {
+   "id": 10,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "барабан в стиралке заклинило"
+  },
+  {
+   "id": 11,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "машинка не сливает воду"
+  },
+  {
+   "id": 12,
+   "knowledge_base_id": 1,
+   "is_from_bot": 0,
+   "phrase": "стиралка стучит при отжиме"
+  },
+  {
+   "id": 13,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "холодос подтекает"
+  },
+  {
+   "id": 14,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "холодильник течет"
+  },
+  {
+   "id": 15,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "холодильник не холодит"
+  },
+  {
+   "id": 16,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "морозилка не морозит"
+  },
+  {
+   "id": 17,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "холодильник шумит сильно"
+  },
+  {
+   "id": 18,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт холодильника"
+  },
+  {
+   "id": 19,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по холодильнику"
+  },
+  {
+   "id": 20,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "почините холодильник"
+  },
+  {
+   "id": 21,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "холодильник не включается совсем"
+  },
+  {
+   "id": 22,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "в холодильнике лужа воды"
+  },
+  {
+   "id": 23,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "холодильник постоянно работает не выключается"
+  },
+  {
+   "id": 24,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "иней в морозильной камере"
+  },
+  {
+   "id": 25,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "холодильник подтекает снизу"
+  },
+  {
+   "id": 26,
+   "knowledge_base_id": 2,
+   "is_from_bot": 0,
+   "phrase": "вода скапливается под холодильником"
+  },
+  {
+   "id": 27,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "посудомойка сломалась"
+  },
+  {
+   "id": 28,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "посудомоечная не включается"
+  },
+  {
+   "id": 29,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "посудомойка течет"
+  },
+  {
+   "id": 30,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "машина для посуды не греет воду"
+  },
+  {
+   "id": 31,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "посудомойка не сливает воду"
+  },
+  {
+   "id": 32,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт посудомоечной машины"
+  },
+  {
+   "id": 33,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по посудомойке"
+  },
+  {
+   "id": 34,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "почините посудомоечную машину"
+  },
+  {
+   "id": 35,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "посудомойка выдает ошибку"
+  },
+  {
+   "id": 36,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "посуда после мойки остается грязной"
+  },
+  {
+   "id": 37,
+   "knowledge_base_id": 3,
+   "is_from_bot": 0,
+   "phrase": "посудомоечная машина гудит и не запускается"
+  },
+  {
+   "id": 38,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "кофемашинка сломалась"
+  },
+  {
+   "id": 39,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "кофе машина не включается"
+  },
+  {
+   "id": 40,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "кофемашина течет"
+  },
+  {
+   "id": 41,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "кофемашина не мелет зерна"
+  },
+  {
+   "id": 42,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "кофемашина не греет воду"
+  },
+  {
+   "id": 43,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт кофемашины"
+  },
+  {
+   "id": 44,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по кофемашине"
+  },
+  {
+   "id": 45,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "почините кофемашину"
+  },
+  {
+   "id": 46,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "кофемашина выдает ошибку на экране"
+  },
+  {
+   "id": 47,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "кофемашина сильно шумит"
+  },
+  {
+   "id": 48,
+   "knowledge_base_id": 4,
+   "is_from_bot": 0,
+   "phrase": "капучинатор не взбивает молоко"
+  },
+  {
+   "id": 49,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "свч сломалась"
+  },
+  {
+   "id": 50,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "микроволновая печь не работает"
+  },
+  {
+   "id": 51,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "микроволновка искрит внутри"
+  },
+  {
+   "id": 52,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "микроволновка не включается"
+  },
+  {
+   "id": 53,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "свч печь гудит но не греет"
+  },
+  {
+   "id": 54,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт микроволновки"
+  },
+  {
+   "id": 55,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по свч печи"
+  },
+  {
+   "id": 56,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "почините микроволновку"
+  },
+  {
+   "id": 57,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "тарелка в микроволновке не крутится"
+  },
+  {
+   "id": 58,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "микроволновка щелкает и выключается"
+  },
+  {
+   "id": 59,
+   "knowledge_base_id": 5,
+   "is_from_bot": 0,
+   "phrase": "дверца микроволновки не закрывается"
+  },
+  {
+   "id": 60,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "варочная панель не включается"
+  },
+  {
+   "id": 61,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "электроплита не работает"
+  },
+  {
+   "id": 62,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "духовой шкаф не нагревается"
+  },
+  {
+   "id": 63,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "плита электрическая искрит"
+  },
+  {
+   "id": 64,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "конфорка на варочной панели не работает"
+  },
+  {
+   "id": 65,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт духового шкафа"
+  },
+  {
+   "id": 66,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по варочной панели"
+  },
+  {
+   "id": 67,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "почините электроплиту"
+  },
+  {
+   "id": 68,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "духовка не выключается"
+  },
+  {
+   "id": 69,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "плита выбивает автомат"
+  },
+  {
+   "id": 70,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "сенсор на варочной панели не реагирует"
+  },
+  {
+   "id": 71,
+   "knowledge_base_id": 6,
+   "is_from_bot": 0,
+   "phrase": "духовка дымит внутри"
+  },
+  {
+   "id": 72,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "бойлер сломался"
+  },
+  {
+   "id": 73,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "водонагреватель течет"
+  },
+  {
+   "id": 74,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "бойлер не включается"
+  },
+  {
+   "id": 75,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "горячая вода еле теплая из бойлера"
+  },
+  {
+   "id": 76,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "водонагреватель выбивает автомат"
+  },
+  {
+   "id": 77,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт водонагревателя"
+  },
+  {
+   "id": 78,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по бойлеру"
+  },
+  {
+   "id": 79,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "почините водонагреватель"
+  },
+  {
+   "id": 80,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "бойлер шумит и гудит"
+  },
+  {
+   "id": 81,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "бак водонагревателя протекает"
+  },
+  {
+   "id": 82,
+   "knowledge_base_id": 7,
+   "is_from_bot": 0,
+   "phrase": "бойлер бьет током"
+  },
+  {
+   "id": 83,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "кондер сломался"
+  },
+  {
+   "id": 84,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "кондиционер не включается"
+  },
+  {
+   "id": 85,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "кондиционер течет вода из блока"
+  },
+  {
+   "id": 86,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "кондиционер шумит сильно"
+  },
+  {
+   "id": 87,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "сплит система не работает"
+  },
+  {
+   "id": 88,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт кондиционера"
+  },
+  {
+   "id": 89,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по кондиционеру"
+  },
+  {
+   "id": 90,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "почините кондиционер"
+  },
+  {
+   "id": 91,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "кондиционер дует теплым воздухом"
+  },
+  {
+   "id": 92,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "нужна заправка кондиционера фреоном"
+  },
+  {
+   "id": 93,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "кондиционер пахнет неприятно"
+  },
+  {
+   "id": 94,
+   "knowledge_base_id": 8,
+   "is_from_bot": 0,
+   "phrase": "внешний блок кондиционера гудит"
+  },
+  {
+   "id": 95,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "пылесос перестал всасывать"
+  },
+  {
+   "id": 96,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "пылесос сломался"
+  },
+  {
+   "id": 97,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "робот пылесос не работает"
+  },
+  {
+   "id": 98,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "пылесос сильно шумит"
+  },
+  {
+   "id": 99,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "пылесос дымится"
+  },
+  {
+   "id": 100,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт пылесоса"
+  },
+  {
+   "id": 101,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по пылесосу"
+  },
+  {
+   "id": 102,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "почините пылесос"
+  },
+  {
+   "id": 103,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "пылесос пахнет гарью"
+  },
+  {
+   "id": 104,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "аккумулятор пылесоса не держит заряд"
+  },
+  {
+   "id": 105,
+   "knowledge_base_id": 9,
+   "is_from_bot": 0,
+   "phrase": "щетка пылесоса не крутится"
+  },
+  {
+   "id": 106,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "швейная машинка сломалась"
+  },
+  {
+   "id": 107,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "почините швейную машину"
+  },
+  {
+   "id": 108,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "утюг не греет"
+  },
+  {
+   "id": 109,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "фен не работает"
+  },
+  {
+   "id": 110,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "блендер не включается"
+  },
+  {
+   "id": 111,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "миксер сломался"
+  },
+  {
+   "id": 112,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "мясорубка не крутит"
+  },
+  {
+   "id": 113,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "тостер не греет"
+  },
+  {
+   "id": 114,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "мультиварка не работает"
+  },
+  {
+   "id": 115,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "нужен мастер по мелкой бытовой технике"
+  },
+  {
+   "id": 116,
+   "knowledge_base_id": 10,
+   "is_from_bot": 0,
+   "phrase": "электрочайник не выключается"
+  },
+  {
+   "id": 117,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "подключить стиральную машину"
+  },
+  {
+   "id": 118,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "установить холодильник"
+  },
+  {
+   "id": 119,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "нужен мастер для установки техники"
+  },
+  {
+   "id": 120,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "подключить посудомоечную машину"
+  },
+  {
+   "id": 121,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "повесить кондиционер"
+  },
+  {
+   "id": 122,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "установить варочную панель"
+  },
+  {
+   "id": 123,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "подключить духовой шкаф"
+  },
+  {
+   "id": 124,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "нужна установка новой техники после покупки"
+  },
+  {
+   "id": 125,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "монтаж бытовой техники"
+  },
+  {
+   "id": 126,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "установить вытяжку"
+  },
+  {
+   "id": 127,
+   "knowledge_base_id": 11,
+   "is_from_bot": 0,
+   "phrase": "подключить водонагреватель после покупки"
+  },
+  {
+   "id": 128,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "телек сломался"
+  },
+  {
+   "id": 129,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "телевизор не показывает"
+  },
+  {
+   "id": 130,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "нет изображения на телевизоре"
+  },
+  {
+   "id": 131,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "тв не работает"
+  },
+  {
+   "id": 132,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "телевизор показывает с полосами"
+  },
+  {
+   "id": 133,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "полосы на экране телевизора"
+  },
+  {
+   "id": 134,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "нет звука на телевизоре"
+  },
+  {
+   "id": 135,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "пропал звук на телевизоре"
+  },
+  {
+   "id": 136,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по телевизору"
+  },
+  {
+   "id": 137,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "почините телевизор"
+  },
+  {
+   "id": 138,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "экран телевизора треснул"
+  },
+  {
+   "id": 139,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "телевизор мигает и гаснет"
+  },
+  {
+   "id": 140,
+   "knowledge_base_id": 12,
+   "is_from_bot": 0,
+   "phrase": "хочу узнать статус заказа на ремонт телевизора"
+  },
+  {
+   "id": 141,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "нужен поиск каналов на телевизоре"
+  },
+  {
+   "id": 142,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "сбились каналы на телевизоре"
+  },
+  {
+   "id": 143,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "пропали каналы после отключения света"
+  },
+  {
+   "id": 144,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "помогите настроить каналы на приставке"
+  },
+  {
+   "id": 145,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "нужна перенастройка каналов после переезда"
+  },
+  {
+   "id": 146,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "не находит цифровые каналы при поиске"
+  },
+  {
+   "id": 147,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "нужно заново прописать каналы"
+  },
+  {
+   "id": 148,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "настройка цифрового телевидения"
+  },
+  {
+   "id": 149,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "мало каналов ловит нужно настроить"
+  },
+  {
+   "id": 150,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "перенастроить каналы после смены антенны"
+  },
+  {
+   "id": 151,
+   "knowledge_base_id": 13,
+   "is_from_bot": 0,
+   "phrase": "нужен специалист по настройке каналов"
+  },
+  {
+   "id": 152,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "проектор сломался"
+  },
+  {
+   "id": 153,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "проектор не показывает изображение"
+  },
+  {
+   "id": 154,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт проектора"
+  },
+  {
+   "id": 155,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по проектору"
+  },
+  {
+   "id": 156,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "почините проектор"
+  },
+  {
+   "id": 157,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "проектор мигает и гаснет"
+  },
+  {
+   "id": 158,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "лампа в проекторе перегорела"
+  },
+  {
+   "id": 159,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "проектор показывает размыто"
+  },
+  {
+   "id": 160,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "проектор шумит сильно"
+  },
+  {
+   "id": 161,
+   "knowledge_base_id": 14,
+   "is_from_bot": 0,
+   "phrase": "у проектора нет звука"
+  },
+  {
+   "id": 162,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "монитор компьютера сломался"
+  },
+  {
+   "id": 163,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "монитор не показывает изображение"
+  },
+  {
+   "id": 164,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт монитора"
+  },
+  {
+   "id": 165,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по монитору"
+  },
+  {
+   "id": 166,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "почините монитор"
+  },
+  {
+   "id": 167,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "экран монитора мигает"
+  },
+  {
+   "id": 168,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "на мониторе полосы"
+  },
+  {
+   "id": 169,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "монитор гаснет через пару секунд"
+  },
+  {
+   "id": 170,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "монитор искажает цвета"
+  },
+  {
+   "id": 171,
+   "knowledge_base_id": 15,
+   "is_from_bot": 0,
+   "phrase": "монитор не реагирует на кабель"
+  },
+  {
+   "id": 172,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "комп сломался"
+  },
+  {
+   "id": 173,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "компьютер тормозит"
+  },
+  {
+   "id": 174,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "ноут не заряжается"
+  },
+  {
+   "id": 175,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт компьютера"
+  },
+  {
+   "id": 176,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по ноутбуку"
+  },
+  {
+   "id": 177,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "почините ноутбук"
+  },
+  {
+   "id": 178,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "компьютер синий экран"
+  },
+  {
+   "id": 179,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "ноутбук перегревается"
+  },
+  {
+   "id": 180,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "компьютер не видит жесткий диск"
+  },
+  {
+   "id": 181,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "клавиатура ноутбука не работает"
+  },
+  {
+   "id": 182,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "нужна чистка компьютера от пыли"
+  },
+  {
+   "id": 183,
+   "knowledge_base_id": 16,
+   "is_from_bot": 0,
+   "phrase": "переустановить windows на ноутбуке"
+  },
+  {
+   "id": 184,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "мфу сломался"
+  },
+  {
+   "id": 185,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "принтер не работает"
+  },
+  {
+   "id": 186,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "сканер не сканирует"
+  },
+  {
+   "id": 187,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "копир не копирует"
+  },
+  {
+   "id": 188,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "принтер мнет бумагу"
+  },
+  {
+   "id": 189,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт принтера"
+  },
+  {
+   "id": 190,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по мфу"
+  },
+  {
+   "id": 191,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "почините принтер"
+  },
+  {
+   "id": 192,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "принтер печатает полосами"
+  },
+  {
+   "id": 193,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "нужна заправка картриджа"
+  },
+  {
+   "id": 194,
+   "knowledge_base_id": 17,
+   "is_from_bot": 0,
+   "phrase": "принтер не видит компьютер"
+  },
+  {
+   "id": 195,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "iphone разбился экран"
+  },
+  {
+   "id": 196,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "разбил экран на айфоне"
+  },
+  {
+   "id": 197,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "разбил стекло на айфоне"
+  },
+  {
+   "id": 198,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "уронил айфон и разбил экран"
+  },
+  {
+   "id": 199,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "не заряжается айфон"
+  },
+  {
+   "id": 200,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "села батарея на айфоне"
+  },
+  {
+   "id": 201,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "айфон не включается после падения"
+  },
+  {
+   "id": 202,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "телефон айфон сломался"
+  },
+  {
+   "id": 203,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по айфону"
+  },
+  {
+   "id": 204,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "почините айфон"
+  },
+  {
+   "id": 205,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "айфон не видит сим карту"
+  },
+  {
+   "id": 206,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "камера на айфоне не работает"
+  },
+  {
+   "id": 207,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "айфон завис на яблоке"
+  },
+  {
+   "id": 208,
+   "knowledge_base_id": 18,
+   "is_from_bot": 0,
+   "phrase": "разбит экран на iphone"
+  },
+  {
+   "id": 209,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "ipad разбился экран"
+  },
+  {
+   "id": 210,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "планшет айпад не заряжается"
+  },
+  {
+   "id": 211,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "айпад сломался"
+  },
+  {
+   "id": 212,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт айпада"
+  },
+  {
+   "id": 213,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по айпаду"
+  },
+  {
+   "id": 214,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "почините айпад"
+  },
+  {
+   "id": 215,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "айпад завис и не реагирует"
+  },
+  {
+   "id": 216,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "разбит экран на ipad"
+  },
+  {
+   "id": 217,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "айпад не держит зарядку"
+  },
+  {
+   "id": 218,
+   "knowledge_base_id": 19,
+   "is_from_bot": 0,
+   "phrase": "кнопка домой на айпаде не работает"
+  },
+  {
+   "id": 219,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "самсунг разбился экран"
+  },
+  {
+   "id": 220,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "планшет самсунг сломался"
+  },
+  {
+   "id": 221,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "самсунг не заряжается"
+  },
+  {
+   "id": 222,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт самсунга"
+  },
+  {
+   "id": 223,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по самсунгу"
+  },
+  {
+   "id": 224,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "почините самсунг"
+  },
+  {
+   "id": 225,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "самсунг завис не реагирует"
+  },
+  {
+   "id": 226,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "разбит экран на samsung"
+  },
+  {
+   "id": 227,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "самсунг не включается после воды"
+  },
+  {
+   "id": 228,
+   "knowledge_base_id": 20,
+   "is_from_bot": 0,
+   "phrase": "камера на самсунге не работает"
+  },
+  {
+   "id": 229,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "мойка керхер сломалась"
+  },
+  {
+   "id": 230,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "мойка керхер не включается"
+  },
+  {
+   "id": 231,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "пылесос керхер не работает"
+  },
+  {
+   "id": 232,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "керхер не подаёт воду"
+  },
+  {
+   "id": 233,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "керхер не набирает давление"
+  },
+  {
+   "id": 234,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "керхер протекает"
+  },
+  {
+   "id": 235,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "керхер потёк"
+  },
+  {
+   "id": 236,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по керхеру"
+  },
+  {
+   "id": 237,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "почините керхер"
+  },
+  {
+   "id": 238,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "моющий пылесос керхер не всасывает"
+  },
+  {
+   "id": 239,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "у керхера не крутится шланг"
+  },
+  {
+   "id": 240,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "керхер искрит"
+  },
+  {
+   "id": 241,
+   "knowledge_base_id": 21,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт керхера"
+  },
+  {
+   "id": 242,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "планшет сяоми не работает"
+  },
+  {
+   "id": 243,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "ксиоми не включается"
+  },
+  {
+   "id": 244,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "хуавей не заряжается"
+  },
+  {
+   "id": 245,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "сяоми телефон завис"
+  },
+  {
+   "id": 246,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "разбит экран на андроид телефоне"
+  },
+  {
+   "id": 247,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "планшет не включается андроид"
+  },
+  {
+   "id": 248,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "телефон хонор сломался"
+  },
+  {
+   "id": 249,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "редми завис не реагирует"
+  },
+  {
+   "id": 250,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "реалми не заряжается"
+  },
+  {
+   "id": 251,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "хуавей планшет не включается"
+  },
+  {
+   "id": 252,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "сяоми не видит сим карту"
+  },
+  {
+   "id": 253,
+   "knowledge_base_id": 22,
+   "is_from_bot": 0,
+   "phrase": "андроид телефон не заряжается"
+  },
+  {
+   "id": 254,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "пластиковое окно сломалось"
+  },
+  {
+   "id": 255,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "окно продувает"
+  },
+  {
+   "id": 256,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "ручка на окне не крутится"
+  },
+  {
+   "id": 257,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "стеклопакет треснул"
+  },
+  {
+   "id": 258,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "окно не открывается"
+  },
+  {
+   "id": 259,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "нужен ремонт окон"
+  },
+  {
+   "id": 260,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "мастера вызвать по окну"
+  },
+  {
+   "id": 261,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "почините окно пожалуйста"
+  },
+  {
+   "id": 262,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "окно провисло и цепляет раму"
+  },
+  {
+   "id": 263,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "москитная сетка сломалась"
+  },
+  {
+   "id": 264,
+   "knowledge_base_id": 23,
+   "is_from_bot": 0,
+   "phrase": "фурнитура окна разболталась"
+  },
+  {
+   "id": 265,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "травят клопов"
+  },
+  {
+   "id": 266,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "в квартире появились тараканы"
+  },
+  {
+   "id": 267,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "тараканы завелись на кухне"
+  },
+  {
+   "id": 268,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "тараканы бегают по кухне"
+  },
+  {
+   "id": 269,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "нужна обработка от клопов"
+  },
+  {
+   "id": 270,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "заказать травлю муравьев"
+  },
+  {
+   "id": 271,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "избавиться от блох в квартире"
+  },
+  {
+   "id": 272,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "крысы в подвале"
+  },
+  {
+   "id": 273,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "мыши на кухне"
+  },
+  {
+   "id": 274,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "завелись грызуны в доме"
+  },
+  {
+   "id": 275,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "потравить крыс"
+  },
+  {
+   "id": 276,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "нужна дератизация от грызунов"
+  },
+  {
+   "id": 277,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "нужна обработка от плесени и запаха"
+  },
+  {
+   "id": 278,
+   "knowledge_base_id": 24,
+   "is_from_bot": 0,
+   "phrase": "обработка квартиры после животных"
+  },
+  {
+   "id": 279,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "закажите клининг"
+  },
+  {
+   "id": 280,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "нужна генеральная уборка"
+  },
+  {
+   "id": 281,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "помыть окна и полы после ремонта"
+  },
+  {
+   "id": 282,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "нужна уборка офиса"
+  },
+  {
+   "id": 283,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "химчистка мягкой мебели"
+  },
+  {
+   "id": 284,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "нужна уборка после ремонта"
+  },
+  {
+   "id": 285,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "заказать мойку окон"
+  },
+  {
+   "id": 286,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "нужна регулярная уборка квартиры"
+  },
+  {
+   "id": 287,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "почистить ковры и диван"
+  },
+  {
+   "id": 288,
+   "knowledge_base_id": 25,
+   "is_from_bot": 0,
+   "phrase": "нужен клининг для дома"
+  },
+  {
+   "id": 289,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "заболела кошка нужен врач"
+  },
+  {
+   "id": 290,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "собаке нужна прививка"
+  },
+  {
+   "id": 291,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "нужен осмотр животного ветеринаром"
+  },
+  {
+   "id": 292,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "питомцу плохо нужна помощь"
+  },
+  {
+   "id": 293,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "вызвать ветеринара на дом"
+  },
+  {
+   "id": 294,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "нужна стрижка когтей животному"
+  },
+  {
+   "id": 295,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "кот не ест нужен ветеринар"
+  },
+  {
+   "id": 296,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "нужна кастрация кота"
+  },
+  {
+   "id": 297,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "собака поранилась нужна помощь врача"
+  },
+  {
+   "id": 298,
+   "knowledge_base_id": 26,
+   "is_from_bot": 0,
+   "phrase": "нужен осмотр щенка"
+  },
+  {
+   "id": 299,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "подключить интернет на даче"
+  },
+  {
+   "id": 300,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "нужен вайфай на даче"
+  },
+  {
+   "id": 301,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "интернет на дачу не ловит"
+  },
+  {
+   "id": 302,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "хочу провести интернет за городом"
+  },
+  {
+   "id": 303,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "нужен роутер для дачи"
+  },
+  {
+   "id": 304,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "плохой сигнал интернета на даче"
+  },
+  {
+   "id": 305,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "подключить wifi на дачном участке"
+  },
+  {
+   "id": 306,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "нужен мобильный интернет для дачи"
+  },
+  {
+   "id": 307,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "интернет на даче постоянно отключается"
+  },
+  {
+   "id": 308,
+   "knowledge_base_id": 27,
+   "is_from_bot": 0,
+   "phrase": "хочу подключить интернет в загородном доме"
+  },
+  {
+   "id": 309,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "у меня уже был мастер но не помогло"
+  },
+  {
+   "id": 310,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "снова сломалось после ремонта"
+  },
+  {
+   "id": 311,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "опять не работает после того как уже чинили"
+  },
+  {
+   "id": 312,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "это гарантийный случай, мастер уже приезжал"
+  },
+  {
+   "id": 313,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "уже вызывал мастера но проблема осталась"
+  },
+  {
+   "id": 314,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "техника второй раз ломается после ремонта"
+  },
+  {
+   "id": 315,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "хочу обратиться по ранее оформленному заказу"
+  },
+  {
+   "id": 316,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "звоню уточнить по уже открытой заявке на повторный визит"
+  },
+  {
+   "id": 317,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "мастер приезжал а техника опять не работает"
+  },
+  {
+   "id": 318,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "повторный вызов мастера по гарантии"
+  },
+  {
+   "id": 319,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "чинили но снова сломалось"
+  },
+  {
+   "id": 320,
+   "knowledge_base_id": 28,
+   "is_from_bot": 0,
+   "phrase": "звоню по уже оформленной заявке насчет мастера"
+  }
+ ]
+}

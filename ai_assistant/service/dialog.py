@@ -222,7 +222,9 @@ class DialogEngine:
             # Совпадение ниже порога всё равно отдаём наружу: по нему потом
             # разбирают, промахнулись мы чуть-чуть или не поняли вопрос вовсе.
             # Но только как справку — тип оборудования по нему не проставляется.
-            return self._transfer(self._support_exten, match=match, trusted=False)
+            return self._transfer(
+                self._support_exten, match=match, trusted=False, unknown_question=True
+            )
 
         record, score = found
         if not record.clarifying_question:
@@ -361,13 +363,25 @@ class DialogEngine:
         exten: str,
         match: Optional[Any] = None,
         trusted: bool = False,
+        unknown_question: bool = False,
     ) -> List[Dict[str, str]]:
+        extra = self._match_extra(match, trusted)
+        if unknown_question:
+            # Клиент задал вопрос, а подходящей записи не нашлось — этот вопрос
+            # надо занести в справочник ERP на ручную разметку (UL-17568).
+            # Признак ставит сервис, а не AGI-скрипт: только здесь известен
+            # порог близости, и только отсюда видно, что перевод случился
+            # именно из-за промаха, а не из-за молчания клиента. По пустому
+            # типу оборудования это не вывести — у записей вроде «жалоба»
+            # техники нет и без всякого промаха.
+            extra = dict(extra or {})
+            extra["UnknownQuestion"] = "True"
         return self._speak(
             self._phrases.transfer,
             ACTION_REDIRECT,
             POINT_FINISHED,
             exten=exten,
-            extra=self._match_extra(match, trusted),
+            extra=extra,
         )
 
     def _keep_listening(self, point: str) -> List[Dict[str, str]]:

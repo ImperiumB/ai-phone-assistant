@@ -13,6 +13,7 @@ import requests
 
 from ai_assistant.agi.ai_assistant_last_will import (
     ERP_TIMEOUT_S,
+    FAILURE_REASON_VAR,
     build_hangup_request,
     call_length_seconds,
     erp_url,
@@ -111,31 +112,82 @@ def test_call_length_uses_a_dot_as_the_decimal_separator():
     assert "," not in pairs["callLengthSeconds"]
 
 
-def test_hangup_is_reported_when_the_script_did_not_finish():
-    """Клиент бросил трубку посреди разговора — ради этого скрипт и нужен."""
-    assert should_report_hangup("False", "1204567", "1755.42") is True
+# --- Причина отказа нашей стороны (UL-18797) ----------------------------------
+#
+# Обратный звонок положен клиенту только тогда, когда он остался без ответа по
+# нашей вине: отказал речевой сервис, упал скрипт, разговор упёрся в предел
+# длительности. Причину называет основной скрипт — кладёт её в переменную
+# канала; последняя воля только передаёт её в ERP, а решение по ней принимает
+# обработчик 15422.
 
 
-@pytest.mark.parametrize("finished", ["True", "true", "1", "yes"])
-def test_finished_conversation_is_not_reported_as_a_hangup(finished):
-    """Разговор доведён до конца самим ботом — обращение в ПЦК уводить нельзя.
+@pytest.mark.parametrize("reason", [
+    "отказал речевой сервис",
+    "ошибка в скрипте",
+    "превышена длительность разговора",
+])
+def test_failure_reason_is_sent_when_our_side_failed(reason):
+    pairs = pairs_of(
+        build_hangup_request("1204567", "1755.42", "", "True", failure_reason=reason)
+    )
+    assert pairs["failureReason"] == reason
 
-    Обработчик ERP на событие обрыва переводит обращение в «Перезвонить
-    целевому клиенту», и признака завершённости он не смотрит. Значит
-    отличать нормальный конец разговора от брошенной трубки обязан скрипт:
-    иначе каждый переведённый на оператора звонок попадёт ещё и в ПЦК.
+
+def test_no_failure_reason_when_the_client_hung_up_himself():
+    """Клиент передумал и бросил трубку — это не наша вина и не повод звонить.
+
+    Пустой ключ ERP означает «в ПЦК не уводим», и слать его незачем: пустые
+    значения тело запроса и так отбрасывает.
     """
-    assert should_report_hangup(finished, "1204567", "1755.42") is False
+    pairs = pairs_of(build_hangup_request("1204567", "1755.42", "вопрос", "False"))
+    assert "failureReason" not in pairs
+
+
+def test_hangup_is_reported_when_the_client_hung_up():
+    """Обычный сброс клиентом: длительность звонка ERP ждёт и в этом случае."""
+    assert should_report_hangup("1204567", "1755.42") is True
+
+
+def test_finished_conversation_is_reported_too():
+    """Разговор доведён ботом до конца — событие всё равно уходит.
+
+    Раньше скрипт его глушил: решение о ПЦК принималось по `scriptFinished`, и
+    каждый переведённый звонок иначе попадал бы в «Перезвонить целевому
+    клиенту». Теперь решает `failureReason`, а длительность звонка ERP
+    проставляет в табличную часть на любом пути — глушить событие больше
+    нельзя, иначе про нормально завершённый разговор она не узнает ничего.
+    """
+    assert should_report_hangup("1204567", "1755.42") is True
 
 
 def test_nothing_is_reported_when_there_is_nothing_to_report():
     """Ни обращения, ни канала — звонок в ERP уходить не должен вовсе."""
-    assert should_report_hangup("False", "", "") is False
+    assert should_report_hangup("", "") is False
+    assert should_report_hangup("0", "  ") is False
 
 
 def test_hangup_is_reported_by_channel_alone():
     """Обрыв на первой секунде: обращение ERP найдёт по каналу сама."""
-    assert should_report_hangup("", "", "1755.42") is True
+    assert should_report_hangup("", "1755.42") is True
+
+
+def test_reason_is_taken_from_the_channel_variable():
+    """Своей памяти основного скрипта последняя воля не видит.
+
+    `_main()` требует живого канала Asterisk, поэтому проверяем по исходнику —
+    тем же способом, что и остальные переменные канала.
+    """
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant_last_will.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert "get_var(FAILURE_REASON_VAR)" in source
+
+
+def test_both_scripts_agree_on_the_name_of_the_reason_variable():
+    """Имя переменной продублировано в двух файлах ради самодостаточности
+    последней воли — разъедутся имена, и причина потеряется молча."""
+    from ai_assistant.agi.ai_assistant import FAILURE_REASON_VAR as main_script_var
+
+    assert FAILURE_REASON_VAR == main_script_var
 
 
 def test_url_is_built_from_the_channel_variable():

@@ -131,6 +131,26 @@ class DialogEngine:
                 self._sessions[linked_id] = _SessionState()
             return self._sessions[linked_id]
 
+    def adopt_sessions(self, other: Optional["DialogEngine"]) -> None:
+        """Перенять разговоры, идущие прямо сейчас, у прежнего движка.
+
+        База знаний приезжает из ERP посреди рабочего дня, и подмена движка
+        приходится ровно на чей-нибудь разговор. Бот задал уточняющий вопрос
+        по прежней базе, клиент отвечает «да» уже новому движку — а тот про
+        этот звонок ничего не знает и вместо перевода по своей теме увёз бы
+        клиента на общий номер сопровождения.
+
+        Найденная запись лежит в состоянии сессии снимком, а не ссылкой на
+        базу знаний, поэтому разговор честно доигрывается по той теме, о
+        которой бот спрашивал.
+        """
+        if other is None or other is self:
+            return
+        with other._sessions_lock:
+            sessions = dict(other._sessions)
+        with self._sessions_lock:
+            self._sessions.update(sessions)
+
     def handle(self, prms: Dict[str, str]) -> List[Dict[str, str]]:
         linked_id = prms.get("linkedId", "")
         point = prms.get("conversationPoint") or POINT_START

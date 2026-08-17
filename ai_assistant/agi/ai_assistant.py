@@ -665,6 +665,11 @@ def _main():  # pragma: no cover - требует живого канала Aste
         log_it("=== AI ASSISTANT START {0} ===".format(linked_id))
         with _agi_lock:
             agi.set_variable("ScriptFinished", False)
+            # Время старта нужно скрипту последней воли: он считает по нему
+            # длительность разговора для ERP. Кладём именно `time.time()` —
+            # `perf_counter()` у отдельного процесса отсчитывается от своей
+            # точки, и разница вышла бы бессмысленной.
+            agi.set_variable("conversation_start_time", time.time())
         func_timeout(timeout=CALL_TIMEOUT_S, func=run, args=())
     except FunctionTimedOut:
         log_it("Завершено по таймауту {0} сек".format(CALL_TIMEOUT_S))

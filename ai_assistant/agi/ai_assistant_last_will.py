@@ -12,7 +12,7 @@
 намеренно — зомби-процессы копились и роняли станцию целиком). Сказать
 что-либо об обрыве он поэтому не может физически, и всё, что нужно знать
 последней воле, он заранее кладёт в переменные канала: `documentId`,
-`ScriptFinished`, `LastRecognizedText`.
+`ScriptFinished`, `LastRecognizedText`, `conversation_start_time`.
 
 Скрипт намеренно самодостаточен: ничего не импортирует из `ai_assistant.py`,
 чтобы не тянуть за собой grpc и сгенерированные заглушки protobuf. На станции
@@ -21,6 +21,7 @@
 
 ВНИМАНИЕ: исполняется под Python 3.9.2. Синтаксис 3.10+ не использовать.
 """
+import time
 import traceback
 from typing import Any, Dict, List
 
@@ -40,20 +41,47 @@ def erp_url(service_address):
     return "http://{0}/{1}".format(service_address.rstrip("/"), ERP_ENDPOINT)
 
 
-def build_hangup_request(document_id, linked_id, recognized_text, script_finished):
-    # type: (Any, str, str, Any) -> Dict[str, Any]
+def call_length_seconds(start_raw, now):
+    # type: (Any, float) -> float
+    """Сколько длился разговор к моменту обрыва.
+
+    `conversation_start_time` основной скрипт кладёт в канал как `time.time()`,
+    поэтому и здесь сравнивать надо с ним же: `perf_counter()` у двух разных
+    процессов отсчитывается от другой точки, и разница вышла бы бессмысленной.
+
+    Переменной может не быть вовсе (трубку бросили раньше, чем основной скрипт
+    успел её выставить) или в ней может лежать что угодно. Канала уже нет,
+    ругаться некому — любая неудача даёт ноль, а не исключение.
+    """
+    try:
+        started = float(start_raw)
+    except (TypeError, ValueError):
+        return 0.0
+    length = now - started
+    return length if length > 0 else 0.0
+
+
+def build_hangup_request(document_id, linked_id, recognized_text, script_finished,
+                         call_length=0.0):
+    # type: (Any, str, str, Any, float) -> Dict[str, Any]
     """Тело запроса об оборванном звонке.
 
     `documentId` может не приехать вовсе: трубку бросают и на первой секунде,
     когда обращение ещё не создано. Поэтому `linkedId` отправляется всегда —
     по нему ERP находит обращение сама. Ноль и пустая строка — это одно и то
     же «кода нет»: невыставленная переменная канала приезжает то так, то так.
+
+    `callLengthSeconds` отправляется всегда, даже нулевой: ERP проставляет его
+    в табличную часть звонков обращения, и «нуля» там ждут не меньше, чем
+    настоящей длительности.
     """
     values = [
         ("documentId", document_id),
         ("linkedId", linked_id),
         ("recognizedText", recognized_text),
         ("scriptFinished", script_finished),
+        # Точка как разделитель — формат фиксированный, от локали не зависит.
+        ("callLengthSeconds", "{0:.2f}".format(call_length)),
     ]
     prms = [{"Key": "eventType", "Value": EVENT_HANGUP}]
     for key, value in values:
@@ -151,9 +179,11 @@ def _main():  # pragma: no cover - требует живого канала Aste
     script_finished = get_var("ScriptFinished")
     recognized_text = get_var("LastRecognizedText")
     aster2_address = get_var("Aster2ServiceAddress", DEFAULT_ASTER2_SERVICE_ADDRESS)
+    call_length = call_length_seconds(get_var("conversation_start_time"), time.time())
 
-    log_it("=== AI ASSISTANT LAST WILL {0} (обращение {1}, ScriptFinished={2}) ===".format(
-        linked_id, document_id or "не создано", script_finished))
+    log_it("=== AI ASSISTANT LAST WILL {0} (обращение {1}, ScriptFinished={2},"
+           " длительность {3:.2f} сек) ===".format(
+               linked_id, document_id or "не создано", script_finished, call_length))
 
     if not should_report_hangup(script_finished, document_id, linked_id):
         log_it("LAST WILL: разговор завершён самим ботом, обрыва не было")
@@ -161,7 +191,8 @@ def _main():  # pragma: no cover - требует живого канала Aste
         try:
             send_last_will(
                 aster2_address,
-                build_hangup_request(document_id, linked_id, recognized_text, script_finished),
+                build_hangup_request(document_id, linked_id, recognized_text,
+                                     script_finished, call_length),
                 log=log_it,
             )
         except Exception:

@@ -175,6 +175,18 @@ def test_real_redirect_is_off_by_default():
     assert REAL_REDIRECT is False
 
 
+def test_conversation_start_time_is_published_to_the_channel():
+    """Длительность разговора считает скрипт последней воли — по этой переменной.
+
+    Основной скрипт при обрыве канала умирает мгновенно и сам ничего сообщить
+    не успеет, так что время старта обязано лежать в канале с самого начала.
+    `_main()` требует живого канала Asterisk, поэтому проверяем по исходнику.
+    """
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert 'set_variable("conversation_start_time", time.time())' in source
+
+
 def test_source_avoids_pep604_unions_in_annotations():
     source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))

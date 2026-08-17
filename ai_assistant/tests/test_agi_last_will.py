@@ -14,6 +14,7 @@ import requests
 from ai_assistant.agi.ai_assistant_last_will import (
     ERP_TIMEOUT_S,
     build_hangup_request,
+    call_length_seconds,
     erp_url,
     send_last_will,
     should_report_hangup,
@@ -62,6 +63,52 @@ def test_values_are_strings():
     request = build_hangup_request(1204567, "1755.42", "вопрос", False)
     for item in request["prms"]:
         assert isinstance(item["Value"], str)
+
+
+# --- Длительность разговора (UL-18797) ----------------------------------------
+
+
+def test_call_length_is_counted_from_the_start_of_the_conversation():
+    """Основной скрипт кладёт в канал `time.time()` начала разговора."""
+    assert call_length_seconds("1000.5", 1042.75) == 42.25
+
+
+def test_call_length_is_zero_when_the_variable_was_never_set():
+    """Трубку бросили раньше, чем основной скрипт успел выставить переменную."""
+    assert call_length_seconds("", 1042.75) == 0.0
+    assert call_length_seconds(None, 1042.75) == 0.0
+
+
+@pytest.mark.parametrize("garbage", ["не число", "1000,5", "  ", "nan-ish"])
+def test_call_length_survives_garbage_in_the_channel_variable(garbage):
+    """Канала уже нет, ругаться некому: что угодно нечисловое — просто ноль."""
+    assert call_length_seconds(garbage, 1042.75) == 0.0
+
+
+def test_call_length_is_never_negative():
+    """Отрицательной длительности не бывает; если часы станции прыгнули — ноль."""
+    assert call_length_seconds("2000.0", 1042.75) == 0.0
+
+
+def test_hangup_request_carries_the_call_length():
+    """ERP проставляет длительность в табличную часть звонков обращения."""
+    pairs = pairs_of(
+        build_hangup_request("1204567", "1755.42", "", "False", call_length=42.25)
+    )
+    assert pairs["callLengthSeconds"] == "42.25"
+
+
+def test_call_length_is_sent_even_when_it_is_zero():
+    pairs = pairs_of(build_hangup_request("1204567", "1755.42", "", "False"))
+    assert pairs["callLengthSeconds"] == "0.00"
+
+
+def test_call_length_uses_a_dot_as_the_decimal_separator():
+    """ERP разбирает значение как число — запятая ей не годится."""
+    pairs = pairs_of(
+        build_hangup_request("1204567", "1755.42", "", "False", call_length=7.5)
+    )
+    assert "," not in pairs["callLengthSeconds"]
 
 
 def test_hangup_is_reported_when_the_script_did_not_finish():

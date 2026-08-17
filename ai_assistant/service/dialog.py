@@ -324,9 +324,14 @@ class DialogEngine:
         if trusted:
             extra.update({
                 "EquipmentType": record.equipment_type,
+                # Код типа оборудования из справочника ERP. Пока его не было,
+                # обработчик искал тип по названию строкой — единственное место
+                # цепочки, где связь держалась на совпадении текста. Название
+                # уходит по-прежнему: обработчик предпочитает код, а по названию
+                # ищет только там, где кода нет (записи не про технику).
+                "EquipmentTypeId": str(record.equipment_type_id or ""),
                 "Scenario": record.scenario,
-                # Код направления обработчик ERP кладёт в историю обращения,
-                # а по названию оборудования ищет тип в справочнике.
+                # Код направления обработчик ERP кладёт в историю обращения.
                 "TelephoneDirectionId": str(record.telephone_direction_id or ""),
             })
         return extra

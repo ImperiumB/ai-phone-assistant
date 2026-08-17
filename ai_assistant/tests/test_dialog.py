@@ -598,6 +598,7 @@ DIRECTION_RECORD = KnowledgeRecord(
     positive_reply="Соединяю со специалистом по холодильникам",
     scenario="redirect_direction",
     equipment_type="Холодильники",
+    equipment_type_id=31,
     telephone_direction_id=52,
     redirect_exten="7104",
 )
@@ -856,3 +857,67 @@ def test_clarifying_question_does_not_claim_equipment_yet():
 
     assert result["Action"] == ACTION_RECOGNIZE
     assert "EquipmentType" not in result
+
+
+def test_confirmation_carries_the_equipment_type_code():
+    """Код типа оборудования уходит наружу вместе с названием.
+
+    По названию обработчик ERP искал тип строкой — единственное место всей
+    цепочки, где связь держалась на совпадении текста. С приходом кода из
+    справочника поиск по названию отмирает.
+    """
+    engine_obj = engine(FakeKnowledge(DIRECTION_RECORD, score=0.83))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник не морозит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+
+    assert result["EquipmentTypeId"] == "31"
+
+
+def test_transfer_without_clarifying_question_carries_the_equipment_type_code():
+    record = KnowledgeRecord(
+        id=7,
+        question="нужен мастер по кофемашине",
+        clarifying_question="",
+        scenario="redirect_direction",
+        equipment_type="Кофемашины",
+        equipment_type_id=24,
+        telephone_direction_id=24,
+        redirect_exten="7097",
+    )
+    result = answer(
+        engine(FakeKnowledge(record, score=0.91)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="нужен мастер по кофемашине",
+    )
+
+    assert result["EquipmentTypeId"] == "24"
+
+
+def test_record_without_the_equipment_type_code_sends_an_empty_one():
+    """Тема не про технику — кода нет, и подставлять вместо него нечего."""
+    record = KnowledgeRecord(
+        id=8,
+        question="хочу оставить жалобу",
+        clarifying_question="",
+        scenario="redirect_direction",
+        telephone_direction_id=12,
+        redirect_exten="7001",
+    )
+    result = answer(
+        engine(FakeKnowledge(record, score=0.9)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="хочу оставить жалобу",
+    )
+
+    assert result["EquipmentTypeId"] == ""
+
+
+def test_transfer_after_a_miss_does_not_report_the_equipment_type_code():
+    """Совпадению ниже порога не поверили сами — технику в обращение не пишем."""
+    result = answer(
+        engine(FakeKnowledge(DIRECTION_RECORD, score=0.4, threshold=0.75)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="а вы вообще чем занимаетесь",
+    )
+
+    assert "EquipmentTypeId" not in result

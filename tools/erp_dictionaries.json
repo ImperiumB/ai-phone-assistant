@@ -2160,600 +2160,719 @@
   {
    "id": 0,
    "name": "Не указан",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 1,
    "name": "dialplan КП+СЦ (dialplan)",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "913"
   },
   {
    "id": 2,
    "name": "Вар/Дух/Электроплиты",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7072"
   },
   {
    "id": 3,
    "name": "dialplan БТ (dialplan)",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "914"
   },
   {
    "id": 4,
    "name": "Кондиционеры",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7007"
   },
   {
    "id": 5,
    "name": "СЭС_разовые",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7013"
   },
   {
    "id": 6,
    "name": "САППОРТ2 - с договоров",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "911"
   },
   {
    "id": 8,
    "name": "кадры",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "911"
   },
   {
    "id": 9,
    "name": "БТ Гирфанов",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "914"
   },
   {
    "id": 10,
    "name": "Нет",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 11,
    "name": "БТ СЭС - НЕ ИСПОЛЬЗОВАТЬ!!!",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "915"
   },
   {
    "id": 12,
    "name": "АБ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 13,
    "name": "Саппорт Дез/КИТР",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7049"
   },
   {
    "id": 14,
    "name": "ИТ направление тест",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "667"
   },
   {
    "id": 15,
    "name": "HR ЦКП",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": null
   },
   {
    "id": 16,
    "name": "КЦ Решение",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": null
   },
   {
    "id": 17,
    "name": "Сопровождение (redirect)",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7082"
   },
   {
    "id": 18,
    "name": "СЭС МОЛОТОК_HR",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": null
   },
   {
    "id": 19,
    "name": "Iphone",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7124"
   },
   {
    "id": 20,
    "name": "СиП",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7125"
   },
   {
    "id": 21,
    "name": "ПК и нотбуки",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7213"
   },
   {
    "id": 22,
    "name": "Оргтехника",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7009"
   },
   {
    "id": 23,
    "name": "Саппорт БТ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7082"
   },
   {
    "id": 24,
    "name": "Кофемашины",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7016"
   },
   {
    "id": 25,
    "name": "ТВ",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7048"
   },
   {
    "id": 26,
    "name": "СЭС ЯНДЕКС",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "928"
   },
   {
    "id": 27,
    "name": "БТ-МБТ (ХД/Кофе/УБТ/Пылесосы/Швейки)",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7005"
   },
   {
    "id": 28,
    "name": "СЭС БТ КЦ Ольга",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "918"
   },
   {
    "id": 29,
    "name": "Саппорт ПНС+Apple",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7082"
   },
   {
    "id": 30,
    "name": "Аналитики тест 1",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7217"
   },
   {
    "id": 31,
    "name": "Аналитики Тест 2",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7082"
   },
   {
    "id": 32,
    "name": "Аналитики Тест 3",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "911"
   },
   {
    "id": 33,
    "name": "УЦ ГРВ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "6269"
   },
   {
    "id": 34,
    "name": "dialplan ПД",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "740"
   },
   {
    "id": 35,
    "name": "Сопровождение 2 (страховка Сопровождения)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7049"
   },
   {
    "id": 36,
    "name": "ИТ направление тест 2",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "669"
   },
   {
    "id": 37,
    "name": "HR ЦКП (ckphr5)",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": null
   },
   {
    "id": 38,
    "name": "СЭС Проекты (dialplan)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "918"
   },
   {
    "id": 39,
    "name": "РЦ МСК_HR",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7220"
   },
   {
    "id": 40,
    "name": "Школа БТ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 41,
    "name": "Продажа заказов",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "930"
   },
   {
    "id": 42,
    "name": "УЦ ГРВ ресеч",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "747"
   },
   {
    "id": 43,
    "name": "Аналог 602 ТН",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 44,
    "name": "ПК и нотбуки (dialplan)",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "965"
   },
   {
    "id": 45,
    "name": "Iphone&Ipad (dialplan)",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "963"
   },
   {
    "id": 46,
    "name": "СЭС Проекты",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7011"
   },
   {
    "id": 47,
    "name": "Жалобы СЦ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "6021"
   },
   {
    "id": 48,
    "name": "Жалобы БТ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "6023"
   },
   {
    "id": 49,
    "name": "НЬЮ. СЦ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7018"
   },
   {
    "id": 50,
    "name": "Клининг",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7019"
   },
   {
    "id": 51,
    "name": "Дезинсекция",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7025"
   },
   {
    "id": 52,
    "name": "Холодильники",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7087"
   },
   {
    "id": 53,
    "name": "Стиральные машины",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7021"
   },
   {
    "id": 54,
    "name": "Интернет на дачу",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "968"
   },
   {
    "id": 55,
    "name": "Пылесосы",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7073"
   },
   {
    "id": 56,
    "name": "ЧМ_СЭС",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7050"
   },
   {
    "id": 57,
    "name": "Ipad",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "921"
   },
   {
    "id": 58,
    "name": "Мониторы",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7001"
   },
   {
    "id": 59,
    "name": "Проектор",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7001"
   },
   {
    "id": 60,
    "name": "Установка БТ",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7074"
   },
   {
    "id": 61,
    "name": "Посудомоечные машины",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7065"
   },
   {
    "id": 62,
    "name": "Водонагреватели",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7157"
   },
   {
    "id": 63,
    "name": "Сантехника",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 64,
    "name": "Электрика",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 65,
    "name": "МБР",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 66,
    "name": "Сушильные машины",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 67,
    "name": "Ремонт окон",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7076"
   },
   {
    "id": 68,
    "name": "Dyson",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 69,
    "name": "Швейные машины",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 70,
    "name": "Кондиционеры",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 71,
    "name": "Саппорт ТВ",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7001"
   },
   {
    "id": 72,
    "name": "ЧМ_БТ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7039"
   },
   {
    "id": 73,
    "name": "ЧМ_ТВ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7040"
   },
   {
    "id": 74,
    "name": "ЧМ_ПНС",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7041"
   },
   {
    "id": 75,
    "name": "ЧМ_Apple",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7042"
   },
   {
    "id": 76,
    "name": "БТ_МБТ_общее (ХД/СМА/ПМА/КОФЕ/ПЛ/)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7082"
   },
   {
    "id": 77,
    "name": "ЧМ_КМТ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7044"
   },
   {
    "id": 78,
    "name": "ЧМ_СЭС проекты",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7056"
   },
   {
    "id": 79,
    "name": "МБР саппорт",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7046"
   },
   {
    "id": 80,
    "name": "ЧМ ИНД",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7156"
   },
   {
    "id": 81,
    "name": "ЧМ все ТН (аналог 602)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7028"
   },
   {
    "id": 82,
    "name": "ЧМ (СМА/ПМА/СУШ)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7057"
   },
   {
    "id": 83,
    "name": "ЧМ ХД",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7060"
   },
   {
    "id": 84,
    "name": "ЧМ (Кофе)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7061"
   },
   {
    "id": 85,
    "name": "ЧМ (ВЭД)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7062"
   },
   {
    "id": 86,
    "name": "ЧМ _",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7028"
   },
   {
    "id": 87,
    "name": "ЧМ (почта БТ)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7058"
   },
   {
    "id": 88,
    "name": "ЧМ (почта СЭС)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7059"
   },
   {
    "id": 89,
    "name": "ЧМ_бланки",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7064"
   },
   {
    "id": 90,
    "name": "Саппорт Кофе/КМТ",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7049"
   },
   {
    "id": 91,
    "name": "Apple Watch",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7021"
   },
   {
    "id": 92,
    "name": "Ремонт Форсунок",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7068"
   },
   {
    "id": 93,
    "name": "HR ВРН КЦ",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7070"
   },
   {
    "id": 94,
    "name": "Сопровождение целевое",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7082"
   },
   {
    "id": 95,
    "name": "ЧМ УБТ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7081"
   },
   {
    "id": 96,
    "name": "ЧМ (Водонагреватели)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7080"
   },
   {
    "id": 97,
    "name": "ЧМ (Ремонт окон)",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7078"
   },
   {
    "id": 98,
    "name": "Ветеринарные услуги",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7119"
   },
   {
    "id": 99,
    "name": "СЭС Диспетчер",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7198"
   },
   {
    "id": 100,
    "name": "Samsung",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7046"
   },
   {
    "id": 101,
    "name": "СВЧ",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7196"
   },
   {
    "id": 102,
    "name": "Karcher",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7199"
   },
   {
    "id": 103,
    "name": "VIP ФВР",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7198"
   },
   {
    "id": 104,
    "name": "Xiaomi",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": null
   },
   {
    "id": 105,
    "name": "ВЦ МСК",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7208"
   },
   {
    "id": 106,
    "name": "Ветцентр МРТ",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7209"
   },
   {
    "id": 107,
    "name": "УЦ ФВР",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7210"
   },
   {
    "id": 108,
    "name": "Пылесосы",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7073"
   },
   {
    "id": 112,
    "name": "УЦ БС",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7222"
   },
   {
    "id": 113,
    "name": "Настройка каналов",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": "7216"
   },
   {
    "id": 114,
    "name": "Видеодомофоны",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": null
   },
   {
    "id": 115,
    "name": "Установка VPN",
-   "avail_for_redirect": 1
+   "avail_for_redirect": 1,
+   "phone_for_web_req": null
   },
   {
    "id": 116,
    "name": "УЦ БС",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7211"
   },
   {
    "id": 117,
    "name": "ГВЛ HR",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7218"
   },
   {
    "id": 118,
    "name": "Казахстан БТ",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7219"
   },
   {
    "id": 119,
    "name": "ОП2 HR",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7224"
   },
   {
    "id": 120,
    "name": "ЧМ  Дезинсекция",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7225"
   },
   {
    "id": 121,
    "name": "Ткачев HR",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7227"
   },
   {
    "id": 122,
    "name": "РЦ КИТР Логисты",
-   "avail_for_redirect": 0
+   "avail_for_redirect": 0,
+   "phone_for_web_req": "7229"
   }
  ],
- "direction_equipment_links_note": "Вкладка «Типы оборудования» телефонного направления. Выгружены только направления, встречающиеся в базе знаний.",
+ "direction_equipment_links_note": "Вкладка «Типы оборудования» телефонного направления. Выгружены направления, встречающиеся в базе знаний, и направления-кандидаты этапа 3. Направления 29, 47, 48, 71, 90, 91 и 106 в выгрузке отсутствуют не по недосмотру: их вкладка в ULTIMA.TELDDIR_TO_EQUIPTYPES пуста, проверено 17.08.2026.",
  "direction_equipment_links": [
   {
    "telephone_direction_id": 2,
@@ -3552,6 +3671,22 @@
    "equipment_type_id": 721
   },
   {
+   "telephone_direction_id": 92,
+   "equipment_type_id": 961
+  },
+  {
+   "telephone_direction_id": 92,
+   "equipment_type_id": 962
+  },
+  {
+   "telephone_direction_id": 92,
+   "equipment_type_id": 963
+  },
+  {
+   "telephone_direction_id": 92,
+   "equipment_type_id": 964
+  },
+  {
    "telephone_direction_id": 98,
    "equipment_type_id": 800
   },
@@ -3719,5 +3854,6 @@
    "telephone_direction_id": 113,
    "equipment_type_id": 934
   }
- ]
+ ],
+ "phone_for_web_req_note": "PHONE_FOR_WEB_REQ — «Внутренний телефон для заявок с сайта». Именно этот номер берёт боевой астербот (обработчик 13161: redirectExten = telDir[0].PWR). Пустой номер означает, что переводить звонок в направление некуда. EXTEN_FOR_REDIRECT_ID и AVAIL_FOR_REDIRECT в переводе не участвуют."
 }

@@ -104,6 +104,10 @@ class DialogAnswer:
     # умолчанию: ответ сервиса старой сборки (без этих ключей) обязан
     # разбираться без ошибок, разговор от них не зависит.
     equipment_type: str = ""
+    #: Код типа оборудования в справочнике ERP. Строкой, как и всё остальное:
+    #: значения уходят в Hashtable ERP как есть, число там всё равно станет
+    #: текстом. Пустой — у записи кода нет (тема не про технику).
+    equipment_type_id: str = ""
     scenario: str = ""
     telephone_direction_id: str = ""
     knowledge_record_id: str = ""
@@ -122,6 +126,7 @@ def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
         conversation_point=pairs.get("ConversationPoint", ""),
         redirect_exten=pairs.get("RedirectExten", ""),
         equipment_type=pairs.get("EquipmentType", ""),
+        equipment_type_id=pairs.get("EquipmentTypeId", ""),
         scenario=pairs.get("Scenario", ""),
         telephone_direction_id=pairs.get("TelephoneDirectionId", ""),
         knowledge_record_id=pairs.get("KnowledgeRecordId", ""),
@@ -221,18 +226,21 @@ def build_call_start_request(linked_id, dialed_number, caller_phone):
     ])
 
 
-def build_equipment_request(document_id, recognized_text, equipment_type_name, direction_name):
-    # type: (Any, str, str, str) -> Dict[str, Any]
+def build_equipment_request(document_id, recognized_text, equipment_type_name, direction_name,
+                            equipment_type_id=""):
+    # type: (Any, str, str, str, Any) -> Dict[str, Any]
     """Бот понял тему разговора.
 
-    Код типа оборудования (equipmentTypeId) не шлём: у сервиса его нет, пока
-    база знаний живёт файлом, а код телефонного направления — это другой
-    справочник, и отправить его вместо кода оборудования значит проставить в
-    обращении случайную технику. Обработчик умеет искать тип по названию.
+    Код типа оборудования приходит из справочника ERP вместе с базой знаний.
+    Название отправляем по-прежнему: обработчик предпочитает код, а по
+    названию ищет тип строкой только там, где кода нет — это единственное
+    место всей цепочки, где связь держится на совпадении текста, и с приходом
+    кода оно отмирает.
     """
     return build_erp_request(EVENT_EQUIPMENT, [
         ("documentId", document_id),
         ("recognizedText", recognized_text),
+        ("equipmentTypeId", equipment_type_id),
         ("equipmentTypeName", equipment_type_name),
         ("directionName", direction_name),
     ])
@@ -307,7 +315,7 @@ def should_send_equipment(answer, already_sent):
     """
     if already_sent:
         return False
-    return bool(answer.equipment_type or answer.telephone_direction_id)
+    return bool(answer.equipment_type or answer.equipment_type_id or answer.telephone_direction_id)
 
 
 def send_to_erp(service_address, body, post=None, log=None):
@@ -517,6 +525,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
                 state["last_text"],
                 answer.equipment_type,
                 direction_name_of(answer),
+                answer.equipment_type_id,
             ),
             log=log_it,
         )

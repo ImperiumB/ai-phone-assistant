@@ -8,8 +8,9 @@ SQL печатается в stdout, отчёт о том, что не разре
 
 Справочники ERP читаются из снимка `tools/erp_dictionaries.json`: доступ к
 боевой базе только на чтение и только у человека, поэтому генератор не ходит
-в базу сам. Снимок обновляется выгрузкой ID и названий из
-ULTIMA.EQUIPMENT_TYPES и ULTIMA.TELEPHONE_DIRECTIONS.
+в базу сам. Снимок обновляется выгрузкой из ULTIMA.EQUIPMENT_TYPES,
+ULTIMA.TELEPHONE_DIRECTIONS и ULTIMA.TELDDIR_TO_EQUIPTYPES — вкладки «Типы
+оборудования» телефонного направления.
 """
 
 from __future__ import annotations
@@ -32,6 +33,17 @@ ACTION_TYPE_REDIRECT = 1
 # Направление 0 «Не указан» — это отсутствие направления, а не направление.
 # Сценарий по нему не заводится: переводить некуда.
 SENTINEL_DIRECTION_ID = 0
+
+# Правила проставления типа оборудования. Применяются по порядку, выигрывает
+# первое сработавшее. Третьего правила в коде нет: это просто «оставить пусто».
+#
+# Вкладка «Типы оборудования» телефонного направления почти всегда содержит
+# десятки типов, поэтому сама по себе однозначного ответа не даёт. А если
+# направление покрывает два десятка типов и клиент сказал «телек не включается»,
+# то бот честно не знает, какой именно тип: в обращении будет «Неизвестное
+# оборудование», человек уточнит. Выдумывать тип нельзя.
+RULE_ONLY_TYPE = "п.1 единственный тип во вкладке направления"
+RULE_NAME_IN_TAB = "п.2 название совпало, тип есть во вкладке направления"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_KNOWLEDGE_PATH = REPO_ROOT / "ai_assistant" / "knowledge_base.json"
@@ -119,6 +131,58 @@ def resolve_name(name: str, index: dict[str, list[int]]) -> tuple[int | None, st
     return matches[0], None
 
 
+def build_direction_tabs(links: Iterable[dict]) -> dict[int, list[int]]:
+    """Направление -> типы оборудования с его вкладки «Типы оборудования»."""
+    tabs: dict[int, list[int]] = {}
+    for link in links:
+        tabs.setdefault(int(link["telephone_direction_id"]), []).append(
+            int(link["equipment_type_id"])
+        )
+    return tabs
+
+
+def resolve_equipment_type(
+    equipment_name: str,
+    direction_id: int | None,
+    equipment_index: dict[str, list[int]],
+    tabs: dict[int, list[int]],
+) -> tuple[int | None, str | None, str | None]:
+    """Тип оборудования для записи базы знаний.
+
+    Возвращает (код, правило, причина отказа). Правила по порядку:
+      1. на вкладке направления ровно один тип — берём его;
+      2. название из базы знаний дословно совпало с типом справочника И этот
+         тип есть на вкладке направления — берём его;
+      3. иначе пусто.
+    """
+    tab = tabs.get(direction_id) if direction_id is not None else None
+
+    if tab and len(tab) == 1:
+        return tab[0], RULE_ONLY_TYPE, None
+
+    if not equipment_name:
+        return None, None, "в базе знаний тип не указан"
+
+    code, reason = resolve_name(equipment_name, equipment_index)
+    if code is None:
+        return None, None, f"«{equipment_name}»: {reason}"
+
+    if not tab:
+        return None, None, (
+            f"«{equipment_name}» есть в справочнике (код {code}), но вкладка"
+            " направления пуста или направление не указано"
+        )
+
+    if code not in tab:
+        return None, None, (
+            f"«{equipment_name}» есть в справочнике (код {code}), но на вкладке"
+            f" направления {direction_id} его нет — направление покрывает"
+            f" {len(tab)} других типов"
+        )
+
+    return code, RULE_NAME_IN_TAB, None
+
+
 # --------------------------------------------------------------------------
 # План переноса
 # --------------------------------------------------------------------------
@@ -138,6 +202,10 @@ class Record:
     positive_reply: str | None
     scenario_id: int | None
     equipment_type_id: int | None
+    # Чем проставлен тип оборудования (RULE_*) или почему он пуст.
+    equipment_type_name: str | None = None
+    equipment_rule: str | None = None
+    equipment_reason: str | None = None
 
 
 @dataclass
@@ -166,7 +234,11 @@ def build_plan(knowledge: list[dict], reference: dict) -> Plan:
     plan = Plan()
 
     equipment_index = build_name_index(reference["equipment_types"])
+    equipment_names = {
+        int(row["id"]): row["name"] for row in reference["equipment_types"]
+    }
     directions = {int(row["id"]): row for row in reference["telephone_directions"]}
+    tabs = build_direction_tabs(reference.get("direction_equipment_links", []))
 
     # --- сценарии: по одному на каждое направление, встречающееся в базе ---
     scenario_by_direction: dict[int, int] = {}
@@ -218,15 +290,9 @@ def build_plan(knowledge: list[dict], reference: dict) -> Plan:
             )
 
         equipment_name = (record.get("equipment_type") or "").strip()
-        equipment_id = None
-        if equipment_name:
-            equipment_id, reason = resolve_name(equipment_name, equipment_index)
-            if equipment_id is None:
-                plan.issues.append(Issue(f"тип оборудования «{equipment_name}»", reason))
-        else:
-            plan.issues.append(
-                Issue(f"запись {record_id} «{question}»", "тип оборудования не указан")
-            )
+        equipment_id, rule, reason = resolve_equipment_type(
+            equipment_name, direction_id, equipment_index, tabs
+        )
 
         plan.records.append(
             Record(
@@ -236,6 +302,9 @@ def build_plan(knowledge: list[dict], reference: dict) -> Plan:
                 positive_reply=record.get("positive_reply"),
                 scenario_id=scenario_id,
                 equipment_type_id=equipment_id,
+                equipment_type_name=equipment_names.get(equipment_id),
+                equipment_rule=rule,
+                equipment_reason=reason,
             )
         )
 
@@ -258,13 +327,32 @@ def build_plan(knowledge: list[dict], reference: dict) -> Plan:
 
 
 def unresolved_names(plan: Plan) -> list[str]:
-    """Список для человека без повторов, в порядке появления."""
+    """Прочее, что генератор разрешить не смог, без повторов."""
     seen: list[str] = []
     for issue in plan.issues:
         text = str(issue)
         if text not in seen:
             seen.append(text)
     return seen
+
+
+def assigned_types(plan: Plan) -> list[str]:
+    """Записи с проставленным типом оборудования и правило, по которому он взят."""
+    return [
+        f"запись {r.id} «{r.question}» -> тип {r.equipment_type_id}"
+        f" «{r.equipment_type_name}» ({r.equipment_rule})"
+        for r in plan.records
+        if r.equipment_type_id is not None
+    ]
+
+
+def missing_types(plan: Plan) -> list[str]:
+    """Записи без типа оборудования. По ним человек проходит руками."""
+    return [
+        f"запись {r.id} «{r.question}» — {r.equipment_reason}"
+        for r in plan.records
+        if r.equipment_type_id is None
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -310,14 +398,37 @@ def render_sql(plan: Plan, reference: dict, generated_on: date | None = None) ->
     add("-- дублей, а сообщает, что переносить уже некуда. Вставки идут одной")
     add("-- транзакцией, COMMIT один и в самом конце; на любой ошибке — откат.")
 
-    issues = unresolved_names(plan)
     add("--")
-    if issues:
-        add(f"-- РАЗБИРАЕТ ЧЕЛОВЕК ({len(issues)}). Ссылки оставлены пустыми:")
-        for text in issues:
+    add("-- Тип оборудования берётся с вкладки «Типы оборудования» телефонного")
+    add("-- направления (ULTIMA.TELDDIR_TO_EQUIPTYPES). Правила по порядку:")
+    add("--   " + RULE_ONLY_TYPE + ";")
+    add("--   " + RULE_NAME_IN_TAB + ";")
+    add("--   п.3 иначе пусто.")
+    add("-- Пусто — это решение, а не недоработка: если направление покрывает два")
+    add("-- десятка типов, бот не знает, о каком именно речь. В обращении будет")
+    add("-- «Неизвестное оборудование», человек уточнит.")
+
+    assigned = assigned_types(plan)
+    add("--")
+    add(f"-- ТИП ПРОСТАВЛЕН ({len(assigned)}):")
+    for text in assigned:
+        add("--   " + text)
+
+    missing = missing_types(plan)
+    add("--")
+    if missing:
+        add(f"-- БЕЗ ТИПА ОБОРУДОВАНИЯ ({len(missing)}) — пройти руками:")
+        for text in missing:
             add("--   " + text)
     else:
-        add("-- Всё разрешилось: пустых ссылок нет.")
+        add("-- Тип оборудования проставлен во всех записях.")
+
+    issues = unresolved_names(plan)
+    if issues:
+        add("--")
+        add(f"-- ПРОЧЕЕ, РАЗБИРАЕТ ЧЕЛОВЕК ({len(issues)}):")
+        for text in issues:
+            add("--   " + text)
     add("-- " + "=" * 70)
     add("")
     add("SET DEFINE OFF")
@@ -437,12 +548,18 @@ def main(argv: list[str] | None = None) -> int:
         f"Формулировок: {len(plan.phrases) + len(plan.records)}"
         f" ({len(plan.phrases)} в AI_KB_PHRASES + {len(plan.records)} каноничных)",
     ]
+    assigned = assigned_types(plan)
+    report.append(f"Тип оборудования проставлен: {len(assigned)}")
+    report.extend("  " + text for text in assigned)
+
+    missing = missing_types(plan)
+    report.append(f"Без типа оборудования: {len(missing)}")
+    report.extend("  " + text for text in missing)
+
     issues = unresolved_names(plan)
     if issues:
-        report.append(f"Разбирает человек ({len(issues)}):")
+        report.append(f"Прочее, разбирает человек ({len(issues)}):")
         report.extend("  " + text for text in issues)
-    else:
-        report.append("Всё разрешилось: пустых ссылок нет.")
     sys.stderr.reconfigure(encoding="utf-8")
     sys.stderr.write("\n".join(report) + "\n")
     return 0

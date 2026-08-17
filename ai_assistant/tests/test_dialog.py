@@ -921,3 +921,88 @@ def test_transfer_after_a_miss_does_not_report_the_equipment_type_code():
     )
 
     assert "EquipmentTypeId" not in result
+
+
+# --- Признак неопознанного вопроса для базы знаний ERP (UL-17568) -------------
+
+
+def test_miss_below_threshold_is_marked_as_an_unrecognized_question():
+    """Промах по порогу — единственный случай, который годится в базу знаний.
+
+    Только сервис знает про порог близости, поэтому он и обязан назвать этот
+    перевод своим именем: у AGI-скрипта порога нет и вывести признак из
+    пустого типа оборудования он не может (у записи «жалоба» техники тоже
+    нет).
+    """
+    result = answer(
+        engine(FakeKnowledge(DIRECTION_RECORD, score=0.4, threshold=0.75)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="а вы вообще чем занимаетесь",
+    )
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["UnknownQuestion"] == "True"
+
+
+def test_question_to_an_empty_knowledge_base_is_also_unrecognized():
+    """Пустая база — это когда автонаполнение нужнее всего, а сравнивать не с чем."""
+    result = answer(
+        engine(FakeKnowledge(None)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="во сколько вы открываетесь",
+    )
+
+    assert result["UnknownQuestion"] == "True"
+
+
+def test_found_answer_is_not_an_unrecognized_question():
+    record = KnowledgeRecord(
+        id=7,
+        question="нужен мастер по кофемашине",
+        clarifying_question="",
+        scenario="redirect_direction",
+        equipment_type="Кофемашины",
+        redirect_exten="7097",
+    )
+    result = answer(
+        engine(FakeKnowledge(record, score=0.91)),
+        conversationPoint=POINT_ASK_QUESTION,
+        recognizedText="нужен мастер по кофемашине",
+    )
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert "UnknownQuestion" not in result
+
+
+def test_transfer_on_silence_is_not_an_unrecognized_question():
+    """Вопроса не прозвучало вовсе — записывать в справочник нечего."""
+    engine_obj = engine(FakeKnowledge(DIRECTION_RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert "UnknownQuestion" not in result
+
+
+def test_confirmed_topic_is_not_an_unrecognized_question():
+    engine_obj = engine(FakeKnowledge(DIRECTION_RECORD, score=0.83))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник не морозит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+
+    assert "UnknownQuestion" not in result
+
+
+def test_wrong_guess_is_not_reported_as_an_unrecognized_question_yet():
+    """Клиент ответил «нет»: бот не угадал тему, но вопрос ещё в работе.
+
+    Разговор здесь не заканчивается — бот спрашивает, что нужно клиенту, и
+    следующая же реплика либо найдётся в базе, либо честно уйдёт туда как
+    промах по порогу. Отправлять исходный вопрос уже сейчас значит записать
+    в справочник две строки об одном звонке.
+    """
+    engine_obj = engine(FakeKnowledge(DIRECTION_RECORD, score=0.83))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник не морозит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
+
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert "UnknownQuestion" not in result

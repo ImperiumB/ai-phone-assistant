@@ -1,7 +1,7 @@
 {
  "_": "Снимок справочников ERP для tools/export_knowledge_base.py. Только чтение, обновляется выгрузкой из БД.",
  "snapshot_date": "2026-08-17",
- "source": "ULTIMA.EQUIPMENT_TYPES, ULTIMA.TELEPHONE_DIRECTIONS",
+ "source": "ULTIMA.EQUIPMENT_TYPES, ULTIMA.TELEPHONE_DIRECTIONS, ULTIMA.TELDDIR_TO_EQUIPTYPES",
  "equipment_types": [
   {
    "id": 0,
@@ -2751,6 +2751,973 @@
    "id": 122,
    "name": "РЦ КИТР Логисты",
    "avail_for_redirect": 0
+  }
+ ],
+ "direction_equipment_links_note": "Вкладка «Типы оборудования» телефонного направления. Выгружены только направления, встречающиеся в базе знаний.",
+ "direction_equipment_links": [
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 201
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 202
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 203
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 355
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 356
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 357
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 792
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 793
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 794
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 866
+  },
+  {
+   "telephone_direction_id": 2,
+   "equipment_type_id": 941
+  },
+  {
+   "telephone_direction_id": 4,
+   "equipment_type_id": 192
+  },
+  {
+   "telephone_direction_id": 4,
+   "equipment_type_id": 262
+  },
+  {
+   "telephone_direction_id": 4,
+   "equipment_type_id": 263
+  },
+  {
+   "telephone_direction_id": 4,
+   "equipment_type_id": 787
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 14
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 266
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 530
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 532
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 533
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 534
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 535
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 536
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 537
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 651
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 693
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 739
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 780
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 823
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 893
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 936
+  },
+  {
+   "telephone_direction_id": 19,
+   "equipment_type_id": 954
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 23
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 81
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 106
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 107
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 111
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 167
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 449
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 451
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 458
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 459
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 460
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 461
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 464
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 465
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 466
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 467
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 469
+  },
+  {
+   "telephone_direction_id": 20,
+   "equipment_type_id": 470
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 4
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 5
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 6
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 17
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 27
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 28
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 29
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 30
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 31
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 41
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 42
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 46
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 49
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 66
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 166
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 168
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 169
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 270
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 276
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 496
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 625
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 935
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 942
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 943
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 944
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 945
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 946
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 947
+  },
+  {
+   "telephone_direction_id": 21,
+   "equipment_type_id": 949
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 7
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 11
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 12
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 13
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 20
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 44
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 45
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 47
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 225
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 522
+  },
+  {
+   "telephone_direction_id": 22,
+   "equipment_type_id": 761
+  },
+  {
+   "telephone_direction_id": 24,
+   "equipment_type_id": 255
+  },
+  {
+   "telephone_direction_id": 24,
+   "equipment_type_id": 497
+  },
+  {
+   "telephone_direction_id": 24,
+   "equipment_type_id": 505
+  },
+  {
+   "telephone_direction_id": 24,
+   "equipment_type_id": 507
+  },
+  {
+   "telephone_direction_id": 24,
+   "equipment_type_id": 508
+  },
+  {
+   "telephone_direction_id": 24,
+   "equipment_type_id": 894
+  },
+  {
+   "telephone_direction_id": 24,
+   "equipment_type_id": 895
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 3
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 8
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 9
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 22
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 25
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 26
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 68
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 79
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 80
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 108
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 118
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 212
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 406
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 407
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 411
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 412
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 414
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 416
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 426
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 623
+  },
+  {
+   "telephone_direction_id": 25,
+   "equipment_type_id": 624
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 252
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 750
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 751
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 752
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 753
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 754
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 755
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 756
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 758
+  },
+  {
+   "telephone_direction_id": 27,
+   "equipment_type_id": 759
+  },
+  {
+   "telephone_direction_id": 50,
+   "equipment_type_id": 141
+  },
+  {
+   "telephone_direction_id": 50,
+   "equipment_type_id": 309
+  },
+  {
+   "telephone_direction_id": 50,
+   "equipment_type_id": 314
+  },
+  {
+   "telephone_direction_id": 50,
+   "equipment_type_id": 315
+  },
+  {
+   "telephone_direction_id": 50,
+   "equipment_type_id": 316
+  },
+  {
+   "telephone_direction_id": 50,
+   "equipment_type_id": 317
+  },
+  {
+   "telephone_direction_id": 50,
+   "equipment_type_id": 319
+  },
+  {
+   "telephone_direction_id": 51,
+   "equipment_type_id": 320
+  },
+  {
+   "telephone_direction_id": 51,
+   "equipment_type_id": 786
+  },
+  {
+   "telephone_direction_id": 51,
+   "equipment_type_id": 912
+  },
+  {
+   "telephone_direction_id": 51,
+   "equipment_type_id": 914
+  },
+  {
+   "telephone_direction_id": 51,
+   "equipment_type_id": 915
+  },
+  {
+   "telephone_direction_id": 52,
+   "equipment_type_id": 116
+  },
+  {
+   "telephone_direction_id": 52,
+   "equipment_type_id": 300
+  },
+  {
+   "telephone_direction_id": 52,
+   "equipment_type_id": 682
+  },
+  {
+   "telephone_direction_id": 53,
+   "equipment_type_id": 119
+  },
+  {
+   "telephone_direction_id": 53,
+   "equipment_type_id": 405
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 656
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 705
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 707
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 708
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 709
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 710
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 736
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 738
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 764
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 777
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 784
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 797
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 803
+  },
+  {
+   "telephone_direction_id": 54,
+   "equipment_type_id": 922
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 206
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 445
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 509
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 510
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 511
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 513
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 515
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 516
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 517
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 550
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 729
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 748
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 760
+  },
+  {
+   "telephone_direction_id": 55,
+   "equipment_type_id": 907
+  },
+  {
+   "telephone_direction_id": 57,
+   "equipment_type_id": 24
+  },
+  {
+   "telephone_direction_id": 57,
+   "equipment_type_id": 52
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 2
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 15
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 21
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 32
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 33
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 34
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 35
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 36
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 37
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 38
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 39
+  },
+  {
+   "telephone_direction_id": 58,
+   "equipment_type_id": 40
+  },
+  {
+   "telephone_direction_id": 59,
+   "equipment_type_id": 43
+  },
+  {
+   "telephone_direction_id": 60,
+   "equipment_type_id": 194
+  },
+  {
+   "telephone_direction_id": 60,
+   "equipment_type_id": 350
+  },
+  {
+   "telephone_direction_id": 60,
+   "equipment_type_id": 351
+  },
+  {
+   "telephone_direction_id": 60,
+   "equipment_type_id": 353
+  },
+  {
+   "telephone_direction_id": 61,
+   "equipment_type_id": 135
+  },
+  {
+   "telephone_direction_id": 61,
+   "equipment_type_id": 490
+  },
+  {
+   "telephone_direction_id": 62,
+   "equipment_type_id": 219
+  },
+  {
+   "telephone_direction_id": 62,
+   "equipment_type_id": 746
+  },
+  {
+   "telephone_direction_id": 62,
+   "equipment_type_id": 747
+  },
+  {
+   "telephone_direction_id": 62,
+   "equipment_type_id": 795
+  },
+  {
+   "telephone_direction_id": 67,
+   "equipment_type_id": 721
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 800
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 801
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 802
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 804
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 805
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 807
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 867
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 868
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 869
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 870
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 871
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 872
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 873
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 874
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 876
+  },
+  {
+   "telephone_direction_id": 98,
+   "equipment_type_id": 878
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 67
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 450
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 812
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 813
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 814
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 815
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 817
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 818
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 819
+  },
+  {
+   "telephone_direction_id": 100,
+   "equipment_type_id": 820
+  },
+  {
+   "telephone_direction_id": 101,
+   "equipment_type_id": 211
+  },
+  {
+   "telephone_direction_id": 101,
+   "equipment_type_id": 307
+  },
+  {
+   "telephone_direction_id": 101,
+   "equipment_type_id": 891
+  },
+  {
+   "telephone_direction_id": 101,
+   "equipment_type_id": 892
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 879
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 880
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 881
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 882
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 883
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 884
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 885
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 886
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 887
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 888
+  },
+  {
+   "telephone_direction_id": 102,
+   "equipment_type_id": 889
+  },
+  {
+   "telephone_direction_id": 113,
+   "equipment_type_id": 934
   }
  ]
 }

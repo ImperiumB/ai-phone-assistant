@@ -10,6 +10,10 @@ from ai_assistant.agi.ai_assistant import (
     ERP_INTEGRATION,
     ERP_TIMEOUT_S,
     REAL_REDIRECT,
+    REASON_CALL_TIMEOUT,
+    REASON_SCRIPT_ERROR,
+    REASON_SERVICE_UNAVAILABLE,
+    REASON_SPEECH_FAILED,
     DialogAnswer,
     _atomic_write,
     build_call_start_request,
@@ -591,3 +595,97 @@ def test_unknown_question_is_reported_from_the_call_flow():
     source = source_path.read_text(encoding="utf-8")
     assert "report_unknown_question(answer)" in source
     assert "build_unknown_request(" in source
+
+
+# --- Причина отказа нашей стороны (UL-18797) ----------------------------------
+#
+# Обратный звонок положен клиенту только тогда, когда он остался без ответа по
+# нашей вине. Причину называет этот скрипт и кладёт её в переменную канала:
+# скрипт последней воли поднимается отдельным процессом и нашей памяти не
+# видит, а при обрыве канала мы умираем мгновенно (SIGHUP, SIG_DFL).
+#
+# `_main()` требует живого канала Asterisk, поэтому проверяем по исходнику —
+# тем же способом, что и остальные переменные канала.
+
+KNOWN_REASONS = {
+    "REASON_SERVICE_UNAVAILABLE",
+    "REASON_SCRIPT_ERROR",
+    "REASON_CALL_TIMEOUT",
+    "REASON_SPEECH_FAILED",
+}
+
+
+def reason_calls():
+    """Все места, где скрипт называет причину: (объемлющая функция, константа)."""
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    found = []
+
+    def visit(node, function_name):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef):
+                visit(child, child.name)
+                continue
+            if isinstance(child, ast.Call) and getattr(child.func, "id", "") == "set_failure_reason":
+                argument = child.args[0] if child.args else None
+                found.append((function_name, getattr(argument, "id", "")))
+            visit(child, function_name)
+
+    visit(tree, "<module>")
+    return found
+
+
+def test_reason_texts_are_short_and_russian():
+    """Их читает оператор в истории обращения, а не программист в логе."""
+    for reason in (REASON_SERVICE_UNAVAILABLE, REASON_SCRIPT_ERROR,
+                   REASON_CALL_TIMEOUT, REASON_SPEECH_FAILED):
+        assert reason.strip()
+        assert len(reason) <= 60
+        assert any("а" <= letter <= "я" for letter in reason.lower())
+
+
+def test_service_failover_names_the_reason():
+    """Речевой сервис не ответил или оборвался поток распознавания."""
+    assert ("failover_to_support", "REASON_SERVICE_UNAVAILABLE") in reason_calls()
+
+
+def test_unhandled_exception_names_the_reason():
+    """Упал наш скрипт — клиент остался без ответа не по своей воле."""
+    assert ("_main", "REASON_SCRIPT_ERROR") in reason_calls()
+
+
+def test_call_timeout_names_the_reason():
+    """Разговор упёрся в предельную длительность (CALL_TIMEOUT_S)."""
+    assert ("_main", "REASON_CALL_TIMEOUT") in reason_calls()
+
+
+def test_failed_playback_names_the_reason():
+    """Ответ не удалось озвучить — клиент услышал тишину вместо ответа."""
+    assert ("speak", "REASON_SPEECH_FAILED") in reason_calls()
+
+
+def test_reason_is_set_only_on_our_own_failures():
+    """Клиент, положивший трубку, причиной не является: там переменная пуста.
+
+    Причин ровно столько, сколько путей отказа нашей стороны; появится новая —
+    её надо осознанно внести в список, а не выставить мимоходом.
+    """
+    for _, reason in reason_calls():
+        assert reason in KNOWN_REASONS
+
+
+def test_successful_playback_clears_the_reason():
+    """Неудача озвучки перестаёт быть причиной, как только фраза прозвучала.
+
+    Иначе один сорвавшийся синтез в середине разговора увёл бы в ПЦК звонок,
+    в котором клиент всё-таки получил ответ.
+    """
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert "clear_failure_reason()" in source
+
+
+def test_reason_is_published_to_the_channel_variable():
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert "set_var(FAILURE_REASON_VAR, reason)" in source

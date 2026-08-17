@@ -75,6 +75,26 @@ EVENT_EQUIPMENT = "AiAssistantEquipment"
 EVENT_TRANSFER = "AiAssistantTransfer"
 EVENT_UNKNOWN = "AiAssistantUnknown"
 
+# Причина, по которой клиент остался без ответа по НАШЕЙ вине (UL-18797).
+# Только за неё положен обратный звонок: клиент, который сам передумал и бросил
+# трубку, догонять себя звонком не просил, а перезванивай мы за любой сброс —
+# достаточно насбрасывать сотню звонков, чтобы получить сотню обращений и сотню
+# исходящих от операторов. Нашу вину снаружи не подделать, спамить сбросами
+# бессмысленно.
+#
+# Причину кладём в переменную канала: скрипт последней воли поднимается
+# отдельным процессом и нашей памяти не видит, а при обрыве канала мы умираем
+# мгновенно (SIGHUP, SIG_DFL). Он же передаёт её в ERP ключом `failureReason`,
+# и по заполненному ключу обращение уходит в ПЦК. Пусто — в ПЦК не уводим.
+FAILURE_REASON_VAR = "AiFailureReason"
+
+# Тексты попадают в историю обращения, их читает оператор: коротко и по-русски,
+# без кодов и английских слов.
+REASON_SERVICE_UNAVAILABLE = "отказал речевой сервис"
+REASON_SCRIPT_ERROR = "ошибка в скрипте"
+REASON_CALL_TIMEOUT = "превышена длительность разговора"
+REASON_SPEECH_FAILED = "не удалось озвучить ответ"
+
 CHUNK_SIZE = 8000  # 4000 отсчётов = 0,5 секунды при 8000 Гц
 CALL_TIMEOUT_S = 120
 AUDIO_CACHE_DIR = "/var/lib/asterisk/sounds/ai_bot/cache"
@@ -472,6 +492,19 @@ def _main():  # pragma: no cover - требует живого канала Aste
         except Exception as error:
             log_it("SET VAR {0} ERROR: {1}".format(name, error))
 
+    def set_failure_reason(reason):
+        """Назвать причину, по которой клиент остался без ответа по нашей вине.
+
+        Вызывается только на путях отказа нашей стороны: по заполненной причине
+        обращение уходит в ПЦК и оператор перезванивает. Брошенная клиентом
+        трубка причиной не является — там переменная так и остаётся пустой.
+        """
+        log_it("FAILURE REASON: {0}".format(reason))
+        set_var(FAILURE_REASON_VAR, reason)
+
+    def clear_failure_reason():
+        set_var(FAILURE_REASON_VAR, "")
+
     service_host = get_var("SpeechServiceHost", "10.20.0.10")
     grpc_port = get_var("SpeechServiceGrpcPort", "50051")
     http_port = get_var("SpeechServiceHttpPort", "8080")
@@ -528,6 +561,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
             fetch_audio(answer.text_to_speak, answer.file_to_playback)
         except Exception as error:
             log_it("TTS ERROR: {0}".format(error))
+            # Ответ у бота был, но клиент его не услышал — вместо ответа
+            # тишина, и виноваты в этом мы, а не он.
+            set_failure_reason(REASON_SPEECH_FAILED)
             return
         # Playback блокирует до конца фразы — обязателен перед Goto и Hangup.
         application = "Playback" if blocking else "background"
@@ -535,6 +571,10 @@ def _main():  # pragma: no cover - требует живого канала Aste
         log_it("TIMING playback_start {0:.3f}".format(time.time()))
         with _agi_lock:
             agi.appexec(application, path)
+        # Фраза пошла в трубку — сорвавшийся ранее синтез перестал быть
+        # причиной: иначе один промах в середине разговора увёл бы в ПЦК
+        # звонок, в котором клиент всё-таки получил ответ.
+        clear_failure_reason()
 
     def ask_dialog(text, silence):
         remembered = remember_recognized_text(state["last_text"], state["point"], text)
@@ -675,6 +715,11 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # молчим и не кладём трубку сразу.
         global _redirect_done
         log_it("SERVICE FAILOVER ({0}) -> exten {1}".format(error, SUPPORT_FALLBACK_EXTEN))
+        # Клиента сюда привёл наш отказ, а не его решение: сервис не ответил
+        # или оборвался поток распознавания. Обратный звонок ему положен —
+        # причину выставляем до перевода, потому что дальше клиент в любой
+        # момент может положить трубку и скрипт умрёт мгновенно.
+        set_failure_reason(REASON_SERVICE_UNAVAILABLE)
         # Обращение уже создано, и оператор должен увидеть, что бот довёл
         # звонок до перевода, а не бросил клиента. Направление здесь пустое:
         # речевой сервис лёг, темы разговора мы так и не узнали.
@@ -769,8 +814,12 @@ def _main():  # pragma: no cover - требует живого канала Aste
         func_timeout(timeout=CALL_TIMEOUT_S, func=run, args=())
     except FunctionTimedOut:
         log_it("Завершено по таймауту {0} сек".format(CALL_TIMEOUT_S))
+        # Разговор оборвали мы, а не клиент: он ещё говорил, когда упёрлись в
+        # предел длительности.
+        set_failure_reason(REASON_CALL_TIMEOUT)
     except Exception:
         log_it("FATAL: {0}".format(traceback.format_exc()))
+        set_failure_reason(REASON_SCRIPT_ERROR)
     finally:
         # Блокировку на вежливый отбой берём НЕ безусловно: если её всё ещё
         # держит зависший поток озвучки (например, застрял в блокирующем

@@ -260,6 +260,11 @@ class KnowledgeState:
         self.phrases = None
         self.generated_at = None
         self.received_at = None
+        #: Отпечаток той базы знаний, которая обслуживает звонки прямо сейчас.
+        #: Пустая строка, а не None: обработчик сравнивает его строкой и пустое
+        #: значение считает поводом прислать справочники — то есть до первой
+        #: посылки он их пришлёт, как и должен.
+        self.content_hash = ""
         self.record_count = 0
         self.phrase_count = 0
         #: Голос, которым бот говорит прямо сейчас. Отсюда его берёт ручка /tts:
@@ -285,6 +290,12 @@ class KnowledgeState:
             self.voice = voice
             self.generated_at = feed.generated_at
             self.received_at = datetime.now().isoformat(timespec="seconds")
+            # Отпечаток меняется здесь и только здесь — вместе с самой базой
+            # знаний. Посылка, не прошедшая разбор, до apply() не доходит, так
+            # что прежний отпечаток остаётся, и обработчик пришлёт свою базу
+            # снова. Проставь мы отпечаток раньше применения — он бы решил, что
+            # база принята, и бот молча жил бы на старой.
+            self.content_hash = feed.content_hash
             self.record_count = len(feed.records)
             self.phrase_count = phrase_count
 
@@ -455,9 +466,12 @@ def build_http_app(
         # прежней базой знаний, и по одному "ok" поломки не видно. По той же
         # причине здесь и source: "feed" — звонки обслуживает присланная база,
         # "file" — прежняя из файла.
+        # content_hash здесь читает сам обработчик: совпал с посчитанным —
+        # посылку он не отправляет вовсе, и сервис не пересчитывает эмбеддинги
+        # пятисот формулировок ради базы, которая не менялась.
         knowledge_info = {
             "records": 0, "phrases": 0, "generated_at": None, "received_at": None,
-            "source": "file",
+            "content_hash": "", "source": "file",
         }
         if state is not None:
             knowledge_info = {
@@ -465,6 +479,7 @@ def build_http_app(
                 "phrases": state.phrase_count,
                 "generated_at": state.generated_at,
                 "received_at": state.received_at,
+                "content_hash": state.content_hash,
                 "source": "feed" if state.dialog_engine is not None else "file",
             }
         return {"status": "ok", "knowledge": knowledge_info}

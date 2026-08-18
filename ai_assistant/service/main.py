@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from concurrent import futures
+from dataclasses import replace
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -43,7 +44,9 @@ import speech_pb2_grpc  # noqa: E402
 
 from ai_assistant.service.config import load_config  # noqa: E402
 from ai_assistant.service.dialog import (  # noqa: E402
+    PHRASE_SLOTS,
     DialogEngine,
+    LineProfile,
     Phrases,
     prms_to_dict,
 )
@@ -219,17 +222,33 @@ def build_dialog_factory(
     ERP их нет, а деться записи без своего направления куда-то должны.
 
     Подпись звука считается на каждую посылку заново: голос приезжает в ней же,
-    и имена файлов обязаны меняться вместе с ним.
+    и имена файлов обязаны меняться вместе с ним. У каждой группы линий она
+    своя: одна и та же фраза, произнесённая двумя голосами, обязана получить
+    два разных имени файла, иначе станция сыграет уже скачанное чужим голосом.
     """
 
     def factory(knowledge, feed: ParsedFeed) -> DialogEngine:
         voice = resolve_voice(feed.voice, default_voice)
+        profiles = []
+        for group in feed.line_groups:
+            # Голос группы, потом голос набора по умолчанию, потом голос
+            # настроек запуска: пустое поле справочника — это «оставить как
+            # есть», а не «синтезировать ничем».
+            group_voice = resolve_voice(group.voice, voice)
+            profiles.append(replace(
+                group,
+                voice=group_voice,
+                audio_signature=audio_signature_for(tts_model, group_voice),
+            ))
         return DialogEngine(
             knowledge,
             feed.phrases,
             support_exten=support_exten,
             sales_exten=sales_exten,
             audio_signature=audio_signature_for(tts_model, voice),
+            voice=voice,
+            audio_files=feed.audio_files,
+            line_profiles=profiles,
         )
 
     return factory
@@ -267,6 +286,10 @@ class KnowledgeState:
         self.content_hash = ""
         self.record_count = 0
         self.phrase_count = 0
+        #: Сколько наборов фраз приехало сверх набора по умолчанию. Смена
+        #: настроек группы по самому справочнику не проверяется, а по этой
+        #: цифре в логе сразу видно, доехало ли разделение по группам вообще.
+        self.line_group_count = 0
         #: Голос, которым бот говорит прямо сейчас. Отсюда его берёт ручка /tts:
         #: AGI-скрипт голос не передаёт (контракт с ним не меняем), и решать,
         #: чем синтезировать, приходится самому сервису.
@@ -298,6 +321,7 @@ class KnowledgeState:
             self.content_hash = feed.content_hash
             self.record_count = len(feed.records)
             self.phrase_count = phrase_count
+            self.line_group_count = len(feed.line_groups)
 
     def accept(self, payload) -> ParsedFeed:
         # Порядок важен: сначала разбор и применение, и только потом запись на
@@ -320,23 +344,28 @@ class KnowledgeState:
             return False
 
 
-def collect_speakable_phrases(phrases: Phrases, knowledge) -> List[str]:
-    """Всё, что бот вообще способен произнести.
+def collect_speakable_phrases(
+    phrases: Phrases, knowledge, audio_files: Optional[Dict[str, str]] = None
+) -> List[str]:
+    """Всё, что бот вообще способен синтезировать.
 
     Служебные фразы плюс уточняющие вопросы и ответы при согласии из базы
     знаний. Записи без уточняющего вопроса — это ещё не размеченные
     неопознанные реплики, бот их не произносит и синтезировать их незачем.
+
+    Фразы с заранее записанным аудио сюда не попадают: файл уже лежит на
+    станции, синтезировать его нечем и незачем.
     """
+    recorded = audio_files or {}
     texts = [
-        phrases.greeting,
-        phrases.misrecognition,
-        phrases.transfer,
-        phrases.silence,
-        # Переспрос и «не угадал тему» звучат в самые нервные моменты разговора:
-        # клиент уже решил, что бот сломался. Две секунды холодного синтеза
-        # поверх этого — ровно то, что чинить и пытаемся.
-        phrases.wrong_guess,
-        phrases.confirm_not_heard,
+        getattr(phrases, slot)
+        # Порядок тот же, что и раньше: приветствие, переспрос, перевод,
+        # молчание, «не угадал тему» и переспрос в точке подтверждения. Два
+        # последних звучат в самые нервные моменты разговора — клиент уже
+        # решил, что бот сломался, и две секунды холодного синтеза поверх
+        # этого ровно то, что чинить и пытаемся.
+        for slot in PHRASE_SLOTS
+        if slot not in recorded
     ]
     for record in knowledge.records:
         if not record.clarifying_question:
@@ -353,6 +382,29 @@ def collect_speakable_phrases(phrases: Phrases, knowledge) -> List[str]:
             seen.add(text)
             unique.append(text)
     return unique
+
+
+def collect_prewarm_plan(
+    profiles: List[LineProfile], knowledge
+) -> List[Tuple[str, List[str]]]:
+    """Что и каким голосом греть: пары «голос — фразы».
+
+    У каждой группы линий свой голос, и греть надо каждый: фраза второй
+    группы, синтезированная впервые прямо на звонке, слушается клиентом как
+    двухсекундная тишина. База знаний общая, поэтому её уточняющие вопросы
+    попадают в план по разу на голос — своим голосом каждый.
+
+    Группы с одинаковым голосом сливаются: у них и имена файлов одни и те же,
+    греть их дважды значит впустую потратить минуты запуска.
+    """
+    plan: Dict[str, List[str]] = {}
+    for profile in profiles:
+        texts = collect_speakable_phrases(profile.phrases, knowledge, profile.audio_files)
+        bucket = plan.setdefault(profile.voice, [])
+        for text in texts:
+            if text not in bucket:
+                bucket.append(text)
+    return list(plan.items())
 
 
 def prewarm_tts_cache(tts_cache, voice: str, texts: List[str]) -> Tuple[int, float]:
@@ -454,8 +506,10 @@ def build_http_app(
         # справочника, которую по самому справочнику не проверить, а по логу
         # видно сразу, применилась она или поле приехало пустым.
         log.info(
-            "Принята база знаний: %s записей, %s формулировок, голос %s, собрана %s",
-            state.record_count, state.phrase_count, state.voice, feed.generated_at,
+            "Принята база знаний: %s записей, %s формулировок, %s групп линий, "
+            "голос %s, собрана %s",
+            state.record_count, state.phrase_count, state.line_group_count,
+            state.voice, feed.generated_at,
         )
         return {"records": state.record_count, "phrases": state.phrase_count}
 
@@ -522,15 +576,15 @@ def main() -> None:
         audio_signature=audio_signature,
     )
 
-    def prewarm(source_phrases, source_knowledge, prewarm_voice: str) -> None:
+    def prewarm(plan: List[Tuple[str, List[str]]]) -> None:
         if not cfg.prewarm_tts:
             return
-        speakable = collect_speakable_phrases(source_phrases, source_knowledge)
-        log.info("Прогреваем синтез голосом %s: %s фраз", prewarm_voice, len(speakable))
-        done, elapsed = prewarm_tts_cache(tts_cache, prewarm_voice, speakable)
-        log.info("Синтез прогрет: %s из %s фраз за %.1f с", done, len(speakable), elapsed)
+        for prewarm_voice, speakable in plan:
+            log.info("Прогреваем синтез голосом %s: %s фраз", prewarm_voice, len(speakable))
+            done, elapsed = prewarm_tts_cache(tts_cache, prewarm_voice, speakable)
+            log.info("Синтез прогрет: %s из %s фраз за %.1f с", done, len(speakable), elapsed)
 
-    prewarm(phrases, knowledge, cfg.tts_voice)
+    prewarm([(cfg.tts_voice, collect_speakable_phrases(phrases, knowledge))])
 
     # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
     # без этого /metrics копил бы данные, пока не кончится память.
@@ -580,16 +634,19 @@ def main() -> None:
     )
     if knowledge_state.restore_from_disk():
         log.info(
-            "Поднята копия последней посылки: %s записей, голос %s, собрана %s",
-            knowledge_state.record_count, knowledge_state.voice,
-            knowledge_state.generated_at,
+            "Поднята копия последней посылки: %s записей, %s групп линий, голос %s, собрана %s",
+            knowledge_state.record_count, knowledge_state.line_group_count,
+            knowledge_state.voice, knowledge_state.generated_at,
         )
         # Звонки пойдут по ней же, значит и синтез греть надо по ней: иначе
         # первый после перезапуска клиент слушает тишину холодного синтеза.
-        # Голос берём тот, которым бот и будет говорить — прогрев чужим голосом
-        # не пригодится вовсе. Фразы посылок, пришедших уже во время работы,
-        # синтезируются по ходу разговора — как было и раньше для новых записей.
-        prewarm(knowledge_state.phrases, knowledge_state.knowledge, knowledge_state.voice)
+        # Голоса берём те, которыми бот и будет говорить, — все, сколько их
+        # приехало в группах линий: прогрев чужим голосом не пригодится вовсе.
+        # Фразы посылок, пришедших уже во время работы, синтезируются по ходу
+        # разговора — как было и раньше для новых записей.
+        prewarm(collect_prewarm_plan(
+            knowledge_state.dialog_engine.profiles, knowledge_state.knowledge
+        ))
 
     app = build_http_app(
         dialog_engine,

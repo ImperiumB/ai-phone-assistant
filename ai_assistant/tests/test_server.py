@@ -1182,6 +1182,130 @@ def test_prewarm_includes_the_confirm_retry_phrase():
     assert phrases.wrong_guess in texts
 
 
+# --- Группы линий (UL-17568) --------------------------------------------------
+
+
+def feed_with_a_second_group(**overrides):
+    """Посылка, у которой кроме набора по умолчанию есть своя группа линий."""
+    from ai_assistant.tests.test_knowledge_feed import group
+
+    payload = feed_with_voice("eugene")
+    payload["line_groups"] = [group(**overrides)]
+    return payload
+
+
+def ask_number(client, linked_id, dialed, point="Start"):
+    response = client.post("/dialog", json={"prms": [
+        {"Key": "linkedId", "Value": linked_id},
+        {"Key": "conversationPoint", "Value": point},
+        {"Key": "dialedNumber", "Value": dialed},
+    ]})
+    return {item["Key"]: item["Value"] for item in response.json()}
+
+
+def test_call_to_a_group_number_is_served_by_its_own_set(tmp_path):
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+    client.post("/knowledge", json=feed_with_a_second_group())
+
+    answer = ask_number(client, "call-group-1", "84951468847")
+
+    assert answer["TextToSpeak"] == "Здравствуйте, это частный мастер"
+    assert answer["Voice"] == "kseniya"
+
+
+def test_call_to_an_unknown_number_is_served_by_the_default_set(tmp_path):
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+    client.post("/knowledge", json=feed_with_a_second_group())
+
+    answer = ask_number(client, "call-group-2", "74959999999")
+
+    assert answer["TextToSpeak"] == "Здравствуйте, это справочник"
+    assert answer["Voice"] == "eugene"
+
+
+def test_group_without_its_own_voice_speaks_with_the_default_one(tmp_path):
+    """Пустое поле в справочнике — «оставить как есть», а не «синтезировать ничем»."""
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+    client.post("/knowledge", json=feed_with_a_second_group(voice=""))
+
+    assert ask_number(client, "call-group-3", "74951468847")["Voice"] == "eugene"
+
+
+def test_recorded_file_of_a_group_reaches_the_script(tmp_path):
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+    client.post("/knowledge", json=feed_with_a_second_group(
+        use_recorded_audio=True, greeting_path="VoicesOKK\\voice-a\\2_spich.wav"
+    ))
+
+    answer = ask_number(client, "call-group-4", "74951468847")
+
+    assert answer["FileToPlayback"] == "VoicesOKK\\voice-a\\2_spich.wav"
+    assert answer["FileIsOnStation"] == "True"
+
+
+def test_a_feed_without_line_groups_serves_every_number_alike(tmp_path):
+    """Обработчик прежней сборки массива не присылает — бот обязан работать."""
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+    client.post("/knowledge", json=feed_with_voice("baya"))
+
+    answer = ask_number(client, "call-group-5", "74951468847")
+
+    assert answer["TextToSpeak"] == "Здравствуйте, это справочник"
+    assert answer["Voice"] == "baya"
+
+
+def test_prewarm_plan_covers_every_voice_of_every_group():
+    """Прогрев греет то, чем бот действительно говорит: у второй группы свой
+    голос, и её фразы холодным синтезом клиент слушает как тишину."""
+    from ai_assistant.service.dialog import LineProfile, Phrases
+    from ai_assistant.service.main import collect_prewarm_plan
+
+    default = LineProfile(phrases=_phrases(), voice="eugene")
+    master = LineProfile(
+        phrases=Phrases(greeting="Здравствуйте, это частный мастер", misrecognition="?",
+                        transfer="Соединяю", silence="Алло?"),
+        voice="kseniya",
+    )
+    knowledge = KnowledgeStub([
+        KnowledgeRecord(id=1, question="стиралка", clarifying_question="Речь о стиральной машине?")
+    ])
+
+    plan = dict(collect_prewarm_plan([default, master], knowledge))
+
+    assert set(plan) == {"eugene", "kseniya"}
+    assert "Здравствуйте, чем могу помочь?" in plan["eugene"]
+    assert "Здравствуйте, это частный мастер" in plan["kseniya"]
+    # База знаний общая — уточняющие вопросы греются каждым голосом.
+    assert "Речь о стиральной машине?" in plan["eugene"]
+    assert "Речь о стиральной машине?" in plan["kseniya"]
+
+
+def test_prewarm_plan_merges_groups_that_share_a_voice():
+    from ai_assistant.service.dialog import LineProfile
+    from ai_assistant.service.main import collect_prewarm_plan
+
+    first = LineProfile(phrases=_phrases(), voice="eugene")
+    second = LineProfile(phrases=_phrases(), voice="eugene")
+
+    plan = dict(collect_prewarm_plan([first, second], KnowledgeStub([])))
+
+    assert list(plan) == ["eugene"]
+    assert plan["eugene"].count("Здравствуйте, чем могу помочь?") == 1
+
+
+def test_prewarm_skips_phrases_played_from_a_recorded_file():
+    """Синтезировать то, что и так лежит на станции, незачем."""
+    from ai_assistant.service.main import collect_speakable_phrases
+
+    phrases = _phrases()
+    texts = collect_speakable_phrases(
+        phrases, KnowledgeStub([]), {"greeting": "AsterBotGL\\Actual.wav"}
+    )
+
+    assert phrases.greeting not in texts
+    assert phrases.transfer in texts
+
+
 class RecordingEngine:
     """Запоминает PCM, который до него доехал."""
 

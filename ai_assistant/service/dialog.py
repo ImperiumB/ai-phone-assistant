@@ -115,6 +115,12 @@ class Phrases:
     confirm_not_heard: str = DEFAULT_CONFIRM_NOT_HEARD
 
 
+# Сколько последних цифр номера участвуют в сравнении. Набранный номер
+# приезжает от Астериска то с восьмёркой, то с семёркой, то без кода страны —
+# точное сравнение строк не совпало бы почти никогда. Столько же цифр
+# сравнивает обработчик обращений в ERP, когда ищет линию по набранному номеру.
+PHONE_KEY_DIGITS = 10
+
 # Служебные фразы бота — те, что правятся в справочнике группы линий и только у
 # которых бывает заранее записанный аудиофайл. Порядок и имена совпадают с
 # полями Phrases: по этим именам разложены и пути к записанным файлам.
@@ -153,6 +159,12 @@ class LineProfile:
     #: Номера линий с галочкой. По ним набор и выбирается.
     phones: List[str] = field(default_factory=list)
     line_group_id: int = 0
+
+
+def phone_key(number: str) -> str:
+    """По чему номера сравниваются между собой — последние PHONE_KEY_DIGITS цифр."""
+    digits = "".join(symbol for symbol in str(number or "") if symbol.isdigit())
+    return digits[-PHONE_KEY_DIGITS:]
 
 
 def prms_to_dict(items: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -201,15 +213,44 @@ class DialogEngine:
         sales_exten: str,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         audio_signature: str = "",
+        voice: str = "",
+        audio_files: Optional[Dict[str, str]] = None,
+        line_profiles: Optional[List[LineProfile]] = None,
     ):
         self._knowledge = knowledge
-        self._phrases = phrases
         self._support_exten = support_exten
         self._sales_exten = sales_exten
         self._max_sessions = max_sessions
-        # Модель синтеза и голос: попадают в имя файла, чтобы кэш на станции
-        # обновился сам при их смене.
-        self._audio_signature = audio_signature
+        # Набор по умолчанию. Он же — единственный, пока групп линий нет:
+        # посылка прежней сборки их не присылает, и разговор идёт как раньше.
+        # Модель синтеза и голос в подписи звука попадают в имя файла, чтобы
+        # кэш на станции обновился сам при их смене.
+        self._default_profile = LineProfile(
+            phrases=phrases,
+            voice=voice,
+            audio_signature=audio_signature,
+            audio_files=dict(audio_files or {}),
+        )
+        self._line_profiles = list(line_profiles or [])
+        # Раскладка «номер -> набор» считается один раз при сборке движка:
+        # выбор набора случается на каждой реплике каждого звонка.
+        self._profile_by_phone: Dict[str, LineProfile] = {}
+        for profile in self._line_profiles:
+            for phone in profile.phones:
+                key = phone_key(phone)
+                if not key:
+                    continue
+                claimed = self._profile_by_phone.get(key)
+                if claimed is not None:
+                    # Один номер в двух группах — ошибка в справочнике, и
+                    # молча выбирать из них наугад нельзя: разговор шёл бы
+                    # разными фразами в зависимости от порядка строк в БД.
+                    log.warning(
+                        "Номер %s числится и в группе линий %s, и в %s — оставлен первый",
+                        phone, claimed.line_group_id, profile.line_group_id,
+                    )
+                    continue
+                self._profile_by_phone[key] = profile
         self._sessions: Dict[str, _SessionState] = {}
         # /dialog — обычная функция FastAPI, конкурентные звонки реально
         # выполняют handle() в разных потоках одновременно. Без этой
@@ -222,6 +263,21 @@ class DialogEngine:
         # повторное ревью Task 9). Блокировка — только вокруг операций со
         # словарём, без обращений к базе знаний или вычисления эмбеддингов.
         self._sessions_lock = threading.Lock()
+
+    @property
+    def profiles(self) -> List[LineProfile]:
+        """Все наборы, которыми движок способен говорить. Нужны прогреву синтеза:
+        греть надо каждый голос, а не только голос набора по умолчанию."""
+        return [self._default_profile] + self._line_profiles
+
+    def _profile_for(self, dialed_number: str) -> LineProfile:
+        """Чьими фразами и голосом отвечать на этот звонок.
+
+        Номер не сопоставился ни с одной группой (звонок на номер без галочки,
+        скрипт прежней сборки, не присылающий номер вовсе) — набор по
+        умолчанию: лучше поздороваться чужой фразой, чем молчать в трубку.
+        """
+        return self._profile_by_phone.get(phone_key(dialed_number), self._default_profile)
 
     def _session(self, linked_id: str) -> _SessionState:
         with self._sessions_lock:
@@ -260,15 +316,19 @@ class DialogEngine:
         text = (prms.get("recognizedText") or "").strip().lower()
         silence = str(prms.get("silenceDetected", "")).lower() == "true"
         state = self._session(linked_id)
+        # Набор выбирается на каждой реплике заново, а не запоминается в
+        # сессии: набранный номер приезжает в каждом запросе, и лишнее
+        # состояние тут ничего не даёт.
+        profile = self._profile_for(prms.get("dialedNumber", ""))
 
         if point == POINT_START:
-            result = self._speak(self._phrases.greeting, ACTION_RECOGNIZE, POINT_ASK_QUESTION)
+            result = self._say(profile, "greeting", ACTION_RECOGNIZE, POINT_ASK_QUESTION)
         elif silence:
             state.silence_count += 1
             if state.silence_count >= 2:
-                result = self._transfer(self._support_exten)
+                result = self._transfer(profile, self._support_exten)
             else:
-                result = self._speak(self._phrases.silence, ACTION_RECOGNIZE, point)
+                result = self._say(profile, "silence", ACTION_RECOGNIZE, point)
         elif not text or self._is_scrap_for_search(text, point):
             # Пустой результат распознавания — это не вопрос клиента, а обрывок:
             # щелчок в линии, шорох, кашель, хлопок двери. Отрезок оказался
@@ -306,8 +366,8 @@ class DialogEngine:
                     "Пустой результат распознавания в точке %s подряд %s раз — переспрашиваем",
                     point, state.empty_count,
                 )
-                result = self._speak(
-                    self._phrases.confirm_not_heard, ACTION_RECOGNIZE, POINT_CONFIRM
+                result = self._say(
+                    profile, "confirm_not_heard", ACTION_RECOGNIZE, POINT_CONFIRM
                 )
             else:
                 log.info("Пустой результат распознавания в точке %s — продолжаем слушать", point)
@@ -316,9 +376,9 @@ class DialogEngine:
             state.silence_count = 0
             state.empty_count = 0
             if point == POINT_CONFIRM:
-                result = self._handle_confirmation(state, text)
+                result = self._handle_confirmation(state, text, profile)
             else:
-                result = self._handle_question(state, text)
+                result = self._handle_question(state, text, profile)
 
         # Разговор дошёл до конца (перевод на специалиста или на продажи) —
         # его состояние больше не понадобится, держать его в памяти дальше
@@ -351,7 +411,9 @@ class DialogEngine:
     def _reaches(result: List[Dict[str, str]], point: str) -> bool:
         return any(item.get("Key") == "ConversationPoint" and item.get("Value") == point for item in result)
 
-    def _handle_question(self, state: _SessionState, text: str) -> List[Dict[str, str]]:
+    def _handle_question(
+        self, state: _SessionState, text: str, profile: LineProfile
+    ) -> List[Dict[str, str]]:
         # best_match() кодирует запрос эмбеддером — дорогая операция,
         # которую нельзя звать дважды на одну реплику (Important из
         # повторного ревью: раньше здесь звался search() ПОСЛЕ отдельного
@@ -371,18 +433,20 @@ class DialogEngine:
             # разбирают, промахнулись мы чуть-чуть или не поняли вопрос вовсе.
             # Но только как справку — тип оборудования по нему не проставляется.
             return self._transfer(
-                self._support_exten, match=match, trusted=False, unknown_question=True
+                profile, self._support_exten, match=match, trusted=False, unknown_question=True
             )
 
         record, score = found
         if not record.clarifying_question:
             # Уточнять нечего, переводим сразу и туда же, куда и раньше — но
             # тема разговора известна, и обращение в ERP должно её получить.
-            return self._transfer(self._support_exten, match=found, trusted=True)
+            return self._transfer(profile, self._support_exten, match=found, trusted=True)
 
         state.record = record
         state.score = score
-        return self._speak(record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
+        # Уточняющий вопрос всегда синтезируется: он живёт в базе знаний, а
+        # записанные аудио есть только у служебных фраз группы линий.
+        return self._speak(profile, record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
 
     def _log_similarity(self, text: str, match: Optional[Any]) -> None:
         # Порог близости — главный настроечный параметр прототипа, который
@@ -422,16 +486,25 @@ class DialogEngine:
             return self._sales_exten
         return self._support_exten
 
-    def _handle_confirmation(self, state: _SessionState, text: str) -> List[Dict[str, str]]:
+    def _handle_confirmation(
+        self, state: _SessionState, text: str, profile: LineProfile
+    ) -> List[Dict[str, str]]:
         record = state.record
         if record is None:
-            return self._transfer(self._support_exten)
+            return self._transfer(profile, self._support_exten)
 
-        if self._matches(text, record.positive_answers):
+        # Варианты согласия и отказа правятся в той же группе линий, что и
+        # фразы. Списки записи — то, чем живёт прежняя база из файла: своих
+        # списков у неё нет вовсе.
+        positive = profile.positive_answers or record.positive_answers
+        negative = profile.negative_answers or record.negative_answers
+
+        if self._matches(text, positive):
             exten = self._exten_for(record)
             extra = self._match_extra((record, state.score), trusted=True)
             return self._speak(
-                record.positive_reply, ACTION_REDIRECT, POINT_FINISHED, exten=exten, extra=extra
+                profile, record.positive_reply, ACTION_REDIRECT, POINT_FINISHED,
+                exten=exten, extra=extra,
             )
 
         # Явное «нет» и нераспознанный ответ — разные случаи, и звучать должны
@@ -439,9 +512,9 @@ class DialogEngine:
         # спросить, что нужно клиенту, а не просить его переформулировать.
         # Оба пути возвращают разговор на второй круг, к вопросу клиента.
         state.record = None
-        if self._matches(text, record.negative_answers):
-            return self._speak(self._phrases.wrong_guess, ACTION_RECOGNIZE, POINT_ASK_QUESTION)
-        return self._speak(self._phrases.misrecognition, ACTION_RECOGNIZE, POINT_ASK_QUESTION)
+        if self._matches(text, negative):
+            return self._say(profile, "wrong_guess", ACTION_RECOGNIZE, POINT_ASK_QUESTION)
+        return self._say(profile, "misrecognition", ACTION_RECOGNIZE, POINT_ASK_QUESTION)
 
     @staticmethod
     def _matches(text: str, variants: List[str]) -> bool:
@@ -508,6 +581,7 @@ class DialogEngine:
 
     def _transfer(
         self,
+        profile: LineProfile,
         exten: str,
         match: Optional[Any] = None,
         trusted: bool = False,
@@ -524,8 +598,9 @@ class DialogEngine:
             # техники нет и без всякого промаха.
             extra = dict(extra or {})
             extra["UnknownQuestion"] = "True"
-        return self._speak(
-            self._phrases.transfer,
+        return self._say(
+            profile,
+            "transfer",
             ACTION_REDIRECT,
             POINT_FINISHED,
             exten=exten,
@@ -548,22 +623,55 @@ class DialogEngine:
             {"Key": "RedirectExten", "Value": ""},
         ]
 
-    def _speak(
+    def _say(
         self,
-        text: str,
+        profile: LineProfile,
+        slot: str,
         action: str,
         point: str,
         exten: str = "",
         extra: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, str]]:
+        """Произнести служебную фразу набора — ту, у которой бывает записанный файл."""
+        return self._speak(
+            profile,
+            getattr(profile.phrases, slot),
+            action,
+            point,
+            exten=exten,
+            extra=extra,
+            slot=slot,
+        )
+
+    def _speak(
+        self,
+        profile: LineProfile,
+        text: str,
+        action: str,
+        point: str,
+        exten: str = "",
+        extra: Optional[Dict[str, str]] = None,
+        slot: str = "",
+    ) -> List[Dict[str, str]]:
+        # Заранее записанный файл уже лежит на станции, и скачивать его
+        # неоткуда — в отличие от имени файла кэша, которое скрипт тянет из
+        # /tts. Различить их можно только явным признаком: ответ без него
+        # старый скрипт читает ровно как раньше.
+        station_file = profile.audio_files.get(slot, "") if slot else ""
         payload = {
             "Action": action,
             "TextToSpeak": text,
-            "FileToPlayback": _playback_name(text, self._audio_signature),
+            "FileToPlayback": station_file or _playback_name(text, profile.audio_signature),
             "ConversationPoint": point,
             "ConversationScenario": "AiAssistantPrototype",
             "RedirectExten": exten,
+            # Голос группы: скрипт передаёт его в /tts. Без этого фразу второй
+            # группы синтезировали бы голосом первой, а закэшировалась бы она
+            # на станции под именем со своей подписью — то есть навсегда.
+            "Voice": profile.voice,
         }
+        if station_file:
+            payload["FileIsOnStation"] = "True"
         if extra:
             payload.update(extra)
         return dict_to_prms(payload)

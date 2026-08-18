@@ -14,6 +14,7 @@ from ai_assistant.service.dialog import (
     POINT_FINISHED,
     POINT_START,
     DialogEngine,
+    LineProfile,
     Phrases,
     dict_to_prms,
     prms_to_dict,
@@ -1246,3 +1247,220 @@ def test_scrap_rule_counts_letters_not_characters():
     knowledge = RecordingKnowledge(RECORD)
     answer(engine(knowledge), conversationPoint=POINT_ASK_QUESTION, recognizedText="не то")
     assert knowledge.queries == []
+
+
+# --- Наборы фраз по группам линий (UL-17568) ----------------------------------
+#
+# Галочка «Виртуальный AI помощник» стоит на номерах из разных групп линий, и у
+# каждой группы свои фразы, свой голос и свои записанные аудио. База знаний,
+# порог и логика разговора при этом общие — дробить их заказчик не просил.
+
+MASTER_PHRASES = Phrases(
+    greeting="Здравствуйте, это частный мастер",
+    misrecognition="Повторите, пожалуйста",
+    transfer="Соединяю с мастером",
+    silence="Алло, вы здесь?",
+    wrong_guess="А что тогда вас интересует?",
+    confirm_not_heard="Скажите да или нет, пожалуйста",
+)
+
+
+def master_profile(**overrides):
+    fields = dict(
+        phrases=MASTER_PHRASES,
+        voice="kseniya",
+        audio_signature="v5_ru|kseniya",
+        phones=["74951468847"],
+        line_group_id=9060,
+    )
+    fields.update(overrides)
+    return LineProfile(**fields)
+
+
+def engine_with_groups(*profiles, **kwargs):
+    knowledge = kwargs.pop("knowledge", None) or FakeKnowledge(RECORD)
+    fields = dict(
+        support_exten="489", sales_exten="500",
+        audio_signature="v5_ru|eugene", voice="eugene",
+        line_profiles=list(profiles),
+    )
+    fields.update(kwargs)
+    return DialogEngine(knowledge, PHRASES, **fields)
+
+
+@pytest.mark.parametrize(
+    "dialed", ["74951468847", "84951468847", "4951468847", "+7 (495) 146-88-47"]
+)
+def test_dialed_number_picks_the_phrases_of_its_line_group(dialed):
+    """Номер приезжает от Астериска то с восьмёркой, то с семёркой, то без кода
+    страны — сравниваем по последним десяти цифрам, как и обработчик обращений."""
+    result = answer(
+        engine_with_groups(master_profile()),
+        conversationPoint=POINT_START,
+        dialedNumber=dialed,
+    )
+
+    assert result["TextToSpeak"] == MASTER_PHRASES.greeting
+
+
+def test_unknown_dialed_number_gets_the_default_set():
+    """Лучше поздороваться чужой фразой, чем молчать в трубку."""
+    result = answer(
+        engine_with_groups(master_profile()),
+        conversationPoint=POINT_START,
+        dialedNumber="74959999999",
+    )
+
+    assert result["TextToSpeak"] == PHRASES.greeting
+
+
+def test_call_without_a_dialed_number_gets_the_default_set():
+    """Скрипт прежней сборки набранный номер не присылает вовсе."""
+    result = answer(engine_with_groups(master_profile()), conversationPoint=POINT_START)
+
+    assert result["TextToSpeak"] == PHRASES.greeting
+
+
+def test_engine_without_line_groups_answers_as_before():
+    result = answer(
+        engine(FakeKnowledge(RECORD)),
+        conversationPoint=POINT_START,
+        dialedNumber="74951468847",
+    )
+
+    assert result["TextToSpeak"] == PHRASES.greeting
+
+
+def test_every_service_phrase_comes_from_the_group_of_the_dialed_number():
+    """Не только приветствие: молчание, перевод и «не угадал тему» тоже свои."""
+    dialed = {"dialedNumber": "74951468847"}
+    engine_obj = engine_with_groups(master_profile())
+
+    silence = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                     silenceDetected="True", **dialed)
+    assert silence["TextToSpeak"] == MASTER_PHRASES.silence
+
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+           recognizedText="стиралка не крутит", **dialed)
+    wrong = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет", **dialed)
+    assert wrong["TextToSpeak"] == MASTER_PHRASES.wrong_guess
+
+    lost = engine_with_groups(master_profile(), knowledge=FakeKnowledge(None))
+    transfer = answer(lost, conversationPoint=POINT_ASK_QUESTION,
+                      recognizedText="во сколько вы открываетесь", **dialed)
+    assert transfer["TextToSpeak"] == MASTER_PHRASES.transfer
+
+
+def test_each_group_speaks_with_its_own_voice():
+    """Голос уходит в ответ: скрипт передаёт его в /tts, иначе фразу второй
+    группы синтезировали бы голосом первой и закэшировали на станции навсегда."""
+    engine_obj = engine_with_groups(master_profile())
+
+    theirs = answer(engine_obj, conversationPoint=POINT_START, dialedNumber="74951468847")
+    default = answer(engine_obj, conversationPoint=POINT_START, dialedNumber="74959999999")
+
+    assert theirs["Voice"] == "kseniya"
+    assert default["Voice"] == "eugene"
+
+
+def test_the_same_phrase_of_two_groups_gets_different_file_names():
+    """Имя файла кэшируется на самой станции: без своей подписи звука вторая
+    группа заиграла бы уже скачанным файлом первой, чужим голосом."""
+    twin = master_profile(phrases=PHRASES)
+    engine_obj = engine_with_groups(twin)
+
+    theirs = answer(engine_obj, conversationPoint=POINT_START, dialedNumber="74951468847")
+    default = answer(engine_obj, conversationPoint=POINT_START, dialedNumber="74959999999")
+
+    assert theirs["TextToSpeak"] == default["TextToSpeak"]
+    assert theirs["FileToPlayback"] != default["FileToPlayback"]
+
+
+def test_group_answer_variants_win_over_the_ones_of_the_record():
+    dialed = {"dialedNumber": "74951468847"}
+    engine_obj = engine_with_groups(master_profile(positive_answers=["именно"]))
+
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+           recognizedText="стиралка не крутит", **dialed)
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="именно", **dialed)
+
+    assert result["Action"] == ACTION_REDIRECT
+
+
+def test_record_answer_variants_are_used_while_the_group_has_none():
+    """Прежний движок на базе из файла: своих списков у него нет вовсе."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="верно")
+
+    assert result["Action"] == ACTION_REDIRECT
+
+
+# --- Заранее записанные аудио (UL-17568) --------------------------------------
+#
+# Записанный файл уже лежит на станции, скачивать его неоткуда: скрипт обязан
+# отличить его от имени файла кэша, который он тянет из /tts.
+
+
+def test_recorded_file_is_played_instead_of_synthesis():
+    engine_obj = engine_with_groups(master_profile(
+        audio_files={"greeting": "VoicesOKK\\voice-a\\2_spich.wav"}
+    ))
+
+    result = answer(engine_obj, conversationPoint=POINT_START, dialedNumber="74951468847")
+
+    assert result["FileToPlayback"] == "VoicesOKK\\voice-a\\2_spich.wav"
+    assert result["FileIsOnStation"] == "True"
+    # Текст остаётся: он уходит в лог станции и подсказывает, что именно
+    # прозвучало, даже когда синтеза не было.
+    assert result["TextToSpeak"] == MASTER_PHRASES.greeting
+
+
+def test_phrase_without_a_recorded_file_is_still_synthesized():
+    """Галочка включена, а путь у фразы не заполнен — это не поломка."""
+    engine_obj = engine_with_groups(master_profile(
+        audio_files={"greeting": "VoicesOKK\\voice-a\\2_spich.wav"}
+    ))
+
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                    silenceDetected="True", dialedNumber="74951468847")
+
+    assert result["TextToSpeak"] == MASTER_PHRASES.silence
+    assert result["FileToPlayback"].startswith("aia_")
+    assert result.get("FileIsOnStation", "") == ""
+
+
+def test_recorded_files_of_one_group_do_not_leak_into_another():
+    engine_obj = engine_with_groups(master_profile(
+        audio_files={"greeting": "VoicesOKK\\voice-a\\2_spich.wav"}
+    ))
+
+    result = answer(engine_obj, conversationPoint=POINT_START, dialedNumber="74959999999")
+
+    assert result["FileToPlayback"].startswith("aia_")
+    assert result.get("FileIsOnStation", "") == ""
+
+
+def test_knowledge_phrases_are_never_played_from_a_file():
+    """Записанные аудио есть только у служебных фраз: уточняющих вопросов в
+    справочнике группы линий нет вовсе."""
+    from ai_assistant.service.dialog import PHRASE_SLOTS
+
+    engine_obj = engine_with_groups(master_profile(
+        audio_files={slot: "AsterBotGL\\Actual.wav" for slot in PHRASE_SLOTS}
+    ))
+
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                    recognizedText="стиралка не крутит", dialedNumber="74951468847")
+
+    assert result["TextToSpeak"] == RECORD.clarifying_question
+    assert result["FileToPlayback"].startswith("aia_")
+    assert result.get("FileIsOnStation", "") == ""
+
+
+def test_answer_of_a_service_without_recorded_audio_has_no_such_key():
+    """Признак появляется только там, где он что-то значит: ответ без него
+    старый скрипт читает ровно как раньше."""
+    result = answer(engine(FakeKnowledge(RECORD)), conversationPoint=POINT_START)
+
+    assert "FileIsOnStation" not in result

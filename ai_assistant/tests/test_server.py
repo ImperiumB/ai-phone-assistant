@@ -1082,3 +1082,17 @@ def test_a_call_started_on_the_file_base_survives_the_first_feed(tmp_path):
     answer = ask(client, "call-7", "Confirm", "да")
     assert answer["Action"] == "Redirect"
     assert answer["RedirectExten"] == "500"  # номер записи из файла, а не общее сопровождение
+
+
+def test_prewarm_includes_the_confirm_retry_phrase():
+    """Переспрос обязан попасть в прогрев синтеза.
+
+    Он звучит ровно в тот момент, когда клиент уже решил, что бот сломался, —
+    добавить туда ещё две секунды холодного синтеза значит не починить ничего.
+    """
+    from ai_assistant.service.main import collect_speakable_phrases
+
+    phrases = _phrases()
+    texts = collect_speakable_phrases(phrases, KnowledgeStub([]))
+    assert phrases.confirm_not_heard in texts
+    assert phrases.wrong_guess in texts

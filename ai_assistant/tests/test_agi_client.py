@@ -27,8 +27,11 @@ from ai_assistant.agi.ai_assistant import (
     erp_url,
     parse_dialog_response,
     parse_erp_response,
+    plays_from_station,
     remember_recognized_text,
     send_to_erp,
+    station_playback_path,
+    tts_params,
     should_send_equipment,
     should_send_unknown_question,
 )
@@ -689,3 +692,114 @@ def test_reason_is_published_to_the_channel_variable():
     source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
     source = source_path.read_text(encoding="utf-8")
     assert "set_var(FAILURE_REASON_VAR, reason)" in source
+
+
+# --- Набранный номер и записанные аудио (UL-17568) ----------------------------
+#
+# Галочка «Виртуальный AI помощник» стоит на номерах разных групп линий, и набор
+# фраз сервис выбирает по набранному номеру. У части фраз вместо синтеза стоит
+# заранее записанный файл: он уже лежит на станции, скачивать его неоткуда.
+
+
+def dialog_pairs(request):
+    return {item["Key"]: item["Value"] for item in request["prms"]}
+
+
+def test_dialog_request_carries_the_dialed_number():
+    """По нему сервис выбирает фразы и голос — тем же ключом, что и события ERP."""
+    request = build_dialog_request("call-1", "AskQuestion", "привет", False, "74951468847")
+
+    assert dialog_pairs(request)["dialedNumber"] == "74951468847"
+
+
+def test_dialog_request_without_a_dialed_number_still_works():
+    """Сервис без номера отвечает набором по умолчанию, а не падает."""
+    assert dialog_pairs(build_dialog_request("call-1", "Start", "", False))["dialedNumber"] == ""
+
+
+def test_dialog_answer_carries_the_recorded_file_flag():
+    answer = parse_dialog_response([
+        {"Key": "Action", "Value": "Recognize"},
+        {"Key": "FileToPlayback", "Value": "VoicesOKK\\voice-a\\2_spich.wav"},
+        {"Key": "FileIsOnStation", "Value": "True"},
+        {"Key": "Voice", "Value": "kseniya"},
+    ])
+
+    assert answer.file_is_on_station is True
+    assert answer.voice == "kseniya"
+
+
+def test_old_answer_without_the_recorded_file_flag_still_parses():
+    """Новый скрипт со старым сервисом обязан вести себя как раньше: признака
+    нет — файл скачивается из /tts, как и всегда."""
+    answer = parse_dialog_response([
+        {"Key": "Action", "Value": "Recognize"},
+        {"Key": "FileToPlayback", "Value": "aia_abc"},
+    ])
+
+    assert answer.file_is_on_station is False
+    assert answer.voice == ""
+    assert plays_from_station(answer) is False
+
+
+def test_recorded_file_is_played_without_downloading_anything():
+    answer = DialogAnswer(
+        action="Recognize", text_to_speak="Здравствуйте",
+        file_to_playback="VoicesOKK\\voice-a\\2_spich.wav",
+        conversation_point="AskQuestion", redirect_exten="", file_is_on_station=True,
+    )
+
+    assert plays_from_station(answer) is True
+
+
+def test_flag_without_a_file_is_not_a_recorded_file():
+    """Путь пустой, а флаг включён — синтезируем, как обычно."""
+    answer = DialogAnswer(
+        action="Recognize", text_to_speak="Здравствуйте", file_to_playback="",
+        conversation_point="AskQuestion", redirect_exten="", file_is_on_station=True,
+    )
+
+    assert plays_from_station(answer) is False
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("VoicesOKK\\voice-a\\2_spich.wav", "VoicesOKK/voice-a/2_spich"),
+    ("AsterBotGL\\Actual.wav", "AsterBotGL/Actual"),
+    ("AsterBotGL/Actual.WAV", "AsterBotGL/Actual"),
+    ("AsterBotGL/Actual", "AsterBotGL/Actual"),
+    ("  AsterBotGL\\Actual.wav  ", "AsterBotGL/Actual"),
+])
+def test_station_path_is_given_to_asterisk_the_way_it_expects_it(raw, expected):
+    """Путь относительный, как у боевого бота: разделители прямые, расширение
+    Астериск подставляет сам — с ним он ищет файл «Actual.wav.wav»."""
+    assert station_playback_path(raw) == expected
+
+
+def test_tts_asks_for_the_voice_of_the_group():
+    """Иначе фразу второй группы синтезировали бы голосом первой, а имя файла
+    станция запомнила бы со своей подписью — то есть навсегда."""
+    assert tts_params("здравствуйте", "kseniya") == {
+        "text": "здравствуйте", "voice_name": "kseniya"
+    }
+
+
+def test_tts_without_a_voice_asks_the_service_to_decide():
+    """Старый сервис голоса не присылает — синтез идёт тем, что настроено у него."""
+    assert tts_params("здравствуйте", "") == {"text": "здравствуйте"}
+
+
+def test_the_script_sends_the_dialed_number_to_the_dialog():
+    """`_main()` требует живого канала Asterisk, поэтому проверяем по исходнику:
+    без этого аргумента сервис не отличит группы линий друг от друга."""
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+
+    assert 'build_dialog_request(linked_id, state["point"], text, silence, dialed_number)' in source
+
+
+def test_the_script_plays_the_recorded_file_instead_of_downloading_it():
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "if plays_from_station(answer):" in source
+    assert "station_playback_path(answer.file_to_playback)" in source

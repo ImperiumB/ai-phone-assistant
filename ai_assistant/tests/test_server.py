@@ -918,6 +918,155 @@ def test_feed_dialog_factory_keeps_the_extensions_of_the_service():
     assert result["RedirectExten"] == "489"
 
 
+class VoiceRecordingTtsCache(FakeTtsCache):
+    """Тот же поддельный кэш, но помнит, каким голосом просили синтез."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path)
+        self.voices = []
+
+    def get(self, text, voice):
+        self.voices.append(voice)
+        return super().get(text, voice)
+
+
+def voice_serving_app(tmp_path, default_voice="eugene", tts_model="v5_ru"):
+    """Сервис, собранный ровно как в main(): голос запуска плюс приём справочников."""
+    from ai_assistant.service.main import KnowledgeState, build_dialog_factory
+
+    cache = VoiceRecordingTtsCache(tmp_path)
+    fallback = file_dialog_engine()
+    state = KnowledgeState(
+        cache_path=str(tmp_path / "feed.json"),
+        embedder=FakeEmbedderForFeed(),
+        dialog_factory=build_dialog_factory("489", "500", tts_model, default_voice),
+        fallback_engine=fallback,
+        default_voice=default_voice,
+    )
+    app = build_http_app(fallback, cache, voice=default_voice, state=state)
+    return state, cache, TestClient(app)
+
+
+def feed_with_voice(voice):
+    payload = feed_with_its_own_wording()
+    payload["settings"]["voice"] = voice
+    return payload
+
+
+def test_resolve_voice_prefers_the_one_from_the_feed():
+    """Ради этого всё и затевалось: голос правят в группе линий, а не в .bat."""
+    from ai_assistant.service.main import resolve_voice
+
+    assert resolve_voice("baya", "eugene") == "baya"
+
+
+@pytest.mark.parametrize("empty", ["", "   ", None])
+def test_resolve_voice_falls_back_to_the_launch_setting(empty):
+    """Незаполненный голос — это «оставить как есть», а не «синтезировать
+    ничем»: новая группа линий с пустым полем не должна ломать синтез."""
+    from ai_assistant.service.main import resolve_voice
+
+    assert resolve_voice(empty, "eugene") == "eugene"
+
+
+def test_audio_signature_changes_with_the_voice():
+    from ai_assistant.service.main import audio_signature_for
+
+    assert audio_signature_for("v5_ru", "baya") != audio_signature_for("v5_ru", "eugene")
+    assert audio_signature_for("v5_ru", "baya") != audio_signature_for("v4_ru", "baya")
+
+
+def test_voice_from_the_feed_is_used_for_synthesis(tmp_path):
+    """Голос из справочника обязан доехать до синтеза, а не осесть в ParsedFeed."""
+    _, cache, client = voice_serving_app(tmp_path, default_voice="eugene")
+
+    client.post("/knowledge", json=feed_with_voice("baya"))
+    client.get("/tts", params={"text": "здравствуйте"})
+
+    assert cache.voices == ["baya"]
+
+
+def test_empty_voice_in_the_feed_keeps_the_launch_setting(tmp_path):
+    _, cache, client = voice_serving_app(tmp_path, default_voice="eugene")
+
+    client.post("/knowledge", json=feed_with_voice(""))
+    client.get("/tts", params={"text": "здравствуйте"})
+
+    assert cache.voices == ["eugene"]
+
+
+def test_synthesis_uses_the_launch_voice_until_a_feed_arrives(tmp_path):
+    _, cache, client = voice_serving_app(tmp_path, default_voice="eugene")
+
+    client.get("/tts", params={"text": "здравствуйте"})
+
+    assert cache.voices == ["eugene"]
+
+
+def test_explicit_voice_in_the_request_still_wins(tmp_path):
+    """Ручной параметр /tts — способ послушать голос, не трогая справочник."""
+    _, cache, client = voice_serving_app(tmp_path, default_voice="eugene")
+    client.post("/knowledge", json=feed_with_voice("baya"))
+
+    client.get("/tts", params={"text": "здравствуйте", "voice_name": "xenia"})
+
+    assert cache.voices == ["xenia"]
+
+
+def test_playback_names_change_when_the_feed_voice_changes(tmp_path):
+    """Главная грабля смены голоса: имя файла кэшируется на самой станции.
+
+    Если подпись звука не поменялась вслед за голосом, Астериск продолжит
+    играть уже скачанные файлы прежним голосом, и смена голоса со стороны
+    выглядит несработавшей — ровно так уже вышло при переходе v4_ru -> v5_ru.
+    """
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+
+    client.post("/knowledge", json=feed_with_voice("baya"))
+    with_baya = ask(client, "call-voice-1", "Start")["FileToPlayback"]
+
+    client.post("/knowledge", json=feed_with_voice("xenia"))
+    with_xenia = ask(client, "call-voice-2", "Start")["FileToPlayback"]
+
+    assert with_baya and with_xenia
+    assert with_baya != with_xenia
+
+
+def test_playback_names_keep_the_launch_signature_when_the_feed_voice_is_empty(tmp_path):
+    """Пустой голос ничего не меняет — в том числе и имена файлов: перекачивать
+    станции нечего."""
+    from ai_assistant.service.dialog import _playback_name
+    from ai_assistant.service.main import audio_signature_for
+
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene", tts_model="v5_ru")
+
+    client.post("/knowledge", json=feed_with_voice(""))
+    name = ask(client, "call-voice-3", "Start")["FileToPlayback"]
+
+    expected = _playback_name(
+        "Здравствуйте, это справочник", audio_signature_for("v5_ru", "eugene")
+    )
+    assert name == expected
+
+
+def test_state_exposes_the_voice_that_is_actually_used(tmp_path):
+    """Прогрев синтеза после перезапуска идёт по восстановленной копии — и
+    греть он обязан тот голос, которым бот будет говорить."""
+    from ai_assistant.service.knowledge_feed import save_feed
+    from ai_assistant.service.main import KnowledgeState
+
+    cache_path = str(tmp_path / "feed.json")
+    save_feed(feed_with_voice("kseniya"), cache_path)
+
+    state = KnowledgeState(
+        cache_path=cache_path, embedder=FakeEmbedderForFeed(), default_voice="eugene"
+    )
+    assert state.voice == "eugene"  # до посылки — голос из настроек запуска
+
+    assert state.restore_from_disk() is True
+    assert state.voice == "kseniya"
+
+
 def test_a_call_started_on_the_file_base_survives_the_first_feed(tmp_path):
     """Первая же посылка приходится на чей-нибудь разговор — он тоже должен доиграть.
 

@@ -769,6 +769,90 @@ def test_state_with_an_unusable_copy_starts_empty(tmp_path):
     assert state.knowledge is None
 
 
+def payload_with_hash(content_hash):
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    payload = minimal_payload()
+    payload["content_hash"] = content_hash
+    return payload
+
+
+def test_health_reports_the_content_hash_of_the_applied_feed(tmp_path):
+    """По этому отпечатку обработчик решает, слать ли справочники вообще."""
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    client.post("/knowledge", json=payload_with_hash("0123456789abcdef0123456789abcdef"))
+
+    body = client.get("/health").json()
+    assert body["knowledge"]["content_hash"] == "0123456789abcdef0123456789abcdef"
+
+
+def test_health_reports_an_empty_content_hash_before_the_first_feed(tmp_path):
+    """Пустое значение обработчик читает как «сервис базы не знает» и шлёт её."""
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+
+    assert TestClient(app).get("/health").json()["knowledge"]["content_hash"] == ""
+
+
+def test_feed_without_content_hash_is_applied_and_reports_empty_hash(tmp_path):
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+    from ai_assistant.tests.test_knowledge_feed import minimal_payload
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    client.post("/knowledge", json=minimal_payload())
+
+    body = client.get("/health").json()
+    assert body["knowledge"]["records"] == 1
+    assert body["knowledge"]["content_hash"] == ""
+
+
+def test_rejected_payload_keeps_the_previous_content_hash(tmp_path):
+    """Отпечаток обязан соответствовать применённому.
+
+    Иначе обработчик решит, что новая база принята, и слать её перестанет —
+    бот молча останется на прежней, и заметить это будет неоткуда.
+    """
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+
+    state = KnowledgeState(cache_path=str(tmp_path / "feed.json"), embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=state)
+    client = TestClient(app)
+
+    client.post("/knowledge", json=payload_with_hash("a" * 32))
+    broken = payload_with_hash("b" * 32)
+    broken["records"] = []
+    assert client.post("/knowledge", json=broken).status_code == 400
+
+    assert client.get("/health").json()["knowledge"]["content_hash"] == "a" * 32
+
+
+def test_content_hash_survives_a_restart_through_the_copy_on_disk(tmp_path):
+    """Иначе после каждого перезапуска обработчик слал бы базу заново —
+    ровно от этого и уходим."""
+    from ai_assistant.service.main import build_http_app, KnowledgeState
+
+    cache = str(tmp_path / "feed.json")
+    first = KnowledgeState(cache_path=cache, embedder=FakeEmbedderForFeed())
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=first)
+    TestClient(app).post("/knowledge", json=payload_with_hash("c" * 32))
+
+    revived = KnowledgeState(cache_path=cache, embedder=FakeEmbedderForFeed())
+    assert revived.restore_from_disk() is True
+
+    app = build_http_app(None, FakeTtsCache(tmp_path), voice="eugene", state=revived)
+    assert TestClient(app).get("/health").json()["knowledge"]["content_hash"] == "c" * 32
+
+
 def file_dialog_engine():
     """Движок на прежней базе из файла — тем и отличается, что здоровается иначе."""
     phrases = Phrases(

@@ -179,6 +179,25 @@ def test_save_creates_missing_directory(tmp_path):
     assert load_feed(target) is not None
 
 
+def test_content_hash_is_parsed_from_the_payload():
+    """Отпечаток содержимого считает ERP; сервис его только хранит и возвращает."""
+    payload = minimal_payload()
+    payload["content_hash"] = "0123456789abcdef0123456789abcdef"
+    feed = parse_feed(payload)
+    assert feed.content_hash == "0123456789abcdef0123456789abcdef"
+
+
+def test_payload_without_content_hash_is_applied():
+    """Обработчик прежней версии отпечаток не присылает.
+
+    Сделать поле обязательным значит отвергнуть первую же посылку от старого
+    обработчика и оставить бота на вчерашней базе знаний.
+    """
+    feed = parse_feed(minimal_payload())
+    assert feed.content_hash == ""
+    assert len(feed.records) == 1
+
+
 def test_confirm_not_heard_comes_from_settings_when_erp_sends_it():
     """Переспрос в точке подтверждения правится там же, где остальные фразы."""
     payload = minimal_payload()

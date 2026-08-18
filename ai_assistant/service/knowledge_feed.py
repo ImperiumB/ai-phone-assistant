@@ -34,6 +34,11 @@ class ParsedFeed:
     phrases: Phrases
     voice: str
     line_group_id: int
+    #: Отпечаток содержимого, посчитанный на стороне ERP. Сервис его не
+    #: пересчитывает: заставить C# и Python сериализовать JSON побайтово
+    #: одинаково ради сравнения — гиблое дело, а сравнивать надо строго то же
+    #: самое, что считал обработчик. Пусто — отпечатка не прислали.
+    content_hash: str = ""
 
 
 def _clean_list(raw: Any) -> List[str]:
@@ -135,6 +140,12 @@ def parse_feed(payload: Dict[str, Any]) -> ParsedFeed:
         phrases=phrases,
         voice=str(settings.get("voice") or "").strip(),
         line_group_id=_optional_int(settings.get("line_group_id"), "line_group_id", "настройки"),
+        # Необязательное: обработчик прежней версии отпечаток не присылает, а
+        # отвергнуть из-за этого целую посылку значит оставить бота на вчерашней
+        # базе знаний. Пустой отпечаток обработчик считает поводом прислать
+        # справочники — то есть худшее, что даёт его отсутствие, это лишняя
+        # посылка, а не потерянное обновление.
+        content_hash=str(payload.get("content_hash") or "").strip(),
     )
 
 

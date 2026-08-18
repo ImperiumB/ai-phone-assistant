@@ -171,22 +171,57 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                 )
 
 
-def build_dialog_factory(support_exten: str, sales_exten: str, audio_signature: str = ""):
+def resolve_voice(feed_voice: Optional[str], default_voice: str) -> str:
+    """Каким голосом бот говорит на самом деле.
+
+    Заполненный голос из справочника побеждает: руководитель колл-центра меняет
+    его в группе линий, не трогая настройки запуска. Пустое поле — это «оставить
+    как есть», а не «синтезировать ничем»: новая группа линий, где голос ещё не
+    выбрали, обязана продолжать говорить голосом из настроек запуска, а не
+    ронять синтез.
+    """
+    return (feed_voice or "").strip() or default_voice
+
+
+def audio_signature_for(tts_model: str, voice: str) -> str:
+    """Подпись звука — модель синтеза плюс действующий голос.
+
+    Она входит в имя файла, который AGI-скрипт скачивает и кэширует на самой
+    станции (dialog._playback_name). Если голос сменился, а подпись осталась
+    прежней, Астериск продолжит играть уже скачанные файлы прежним голосом, и
+    смена голоса со стороны выглядит несработавшей — ровно так уже вышло при
+    переходе v4_ru -> v5_ru, когда в подписи не было модели. Голос сюда
+    передаётся уже действующий (после resolve_voice), а не сырой из посылки:
+    иначе пустое поле справочника обесценило бы кэш станции на ровном месте.
+    """
+    return "{0}|{1}".format(tts_model, voice)
+
+
+def build_dialog_factory(
+    support_exten: str,
+    sales_exten: str,
+    tts_model: str = "",
+    default_voice: str = "",
+):
     """Как из присланной посылки получается движок диалога.
 
     Служебные фразы бота берутся из той же посылки: их правят в той же группе
     линий, что и базу знаний, и разъезд между ними было бы видно только на
     живом звонке. Номера отделов остаются настройкой сервиса — в справочниках
     ERP их нет, а деться записи без своего направления куда-то должны.
+
+    Подпись звука считается на каждую посылку заново: голос приезжает в ней же,
+    и имена файлов обязаны меняться вместе с ним.
     """
 
     def factory(knowledge, feed: ParsedFeed) -> DialogEngine:
+        voice = resolve_voice(feed.voice, default_voice)
         return DialogEngine(
             knowledge,
             feed.phrases,
             support_exten=support_exten,
             sales_exten=sales_exten,
-            audio_signature=audio_signature,
+            audio_signature=audio_signature_for(tts_model, voice),
         )
 
     return factory
@@ -201,7 +236,7 @@ class KnowledgeState:
     """
 
     def __init__(self, cache_path, embedder, threshold=0.64, dialog_factory=None,
-                 fallback_engine=None):
+                 fallback_engine=None, default_voice=""):
         self._cache_path = cache_path
         self._embedder = embedder
         self._threshold = threshold
@@ -209,6 +244,7 @@ class KnowledgeState:
         # Движок на базе из файла — он обслуживает звонки, пока первой посылки
         # не было, и разговоры при первой же подмене надо перенимать у него.
         self._fallback_engine = fallback_engine
+        self._default_voice = default_voice
         self._lock = threading.Lock()
 
         self.knowledge = None
@@ -218,10 +254,15 @@ class KnowledgeState:
         self.received_at = None
         self.record_count = 0
         self.phrase_count = 0
+        #: Голос, которым бот говорит прямо сейчас. Отсюда его берёт ручка /tts:
+        #: AGI-скрипт голос не передаёт (контракт с ним не меняем), и решать,
+        #: чем синтезировать, приходится самому сервису.
+        self.voice = default_voice
 
     def apply(self, feed: ParsedFeed) -> None:
         knowledge = KnowledgeBase(feed.records, self._embedder, self._threshold)
         phrase_count = sum(1 + len(r.question_variants) for r in feed.records)
+        voice = resolve_voice(feed.voice, self._default_voice)
         engine = self._dialog_factory(knowledge, feed) if self._dialog_factory else None
         if engine is not None:
             # Разговоры, идущие прямо сейчас, переезжают на новый движок
@@ -233,6 +274,7 @@ class KnowledgeState:
             self.knowledge = knowledge
             self.dialog_engine = engine
             self.phrases = feed.phrases
+            self.voice = voice
             self.generated_at = feed.generated_at
             self.received_at = datetime.now().isoformat(timespec="seconds")
             self.record_count = len(feed.records)
@@ -313,6 +355,16 @@ def build_http_app(
     app = FastAPI(title="AI Assistant speech service")
     lock = timelines_lock or threading.Lock()
 
+    def current_voice() -> str:
+        """Голос из справочника, пока он там заполнен, иначе из настроек запуска.
+
+        Читается на каждый запрос, а не запоминается при сборке приложения:
+        посылка приезжает из ERP посреди рабочего дня и может сменить голос.
+        """
+        if state is not None and state.voice:
+            return state.voice
+        return voice
+
     @app.post("/dialog")
     def dialog(payload: dict):
         prms = prms_to_dict(payload.get("prms", []))
@@ -353,10 +405,11 @@ def build_http_app(
         # /metrics. Логируем её отдельно — соединить с конкретным звонком
         # человек сможет по временным меткам скачивания в логе станции
         # (ai_assistant/agi/ai_assistant.py, TIMING download_*).
+        effective_voice = voice_name or current_voice()
         start = time.perf_counter()
-        path = tts_cache.get(text, voice_name or voice)
+        path = tts_cache.get(text, effective_voice)
         duration_ms = (time.perf_counter() - start) * 1000.0
-        log.info("TTS %.1f ms | voice=%s | text=%.80r", duration_ms, voice_name or voice, text)
+        log.info("TTS %.1f ms | voice=%s | text=%.80r", duration_ms, effective_voice, text)
         return FileResponse(path, media_type="audio/wav")
 
     @app.post("/knowledge")
@@ -368,9 +421,12 @@ def build_http_app(
         except FeedError as error:
             log.warning("Посылка отвергнута: %s", error)
             raise HTTPException(status_code=400, detail=str(error))
+        # Голос в логе не для красоты: смена голоса — единственная правка
+        # справочника, которую по самому справочнику не проверить, а по логу
+        # видно сразу, применилась она или поле приехало пустым.
         log.info(
-            "Принята база знаний: %s записей, %s формулировок, собрана %s",
-            state.record_count, state.phrase_count, feed.generated_at,
+            "Принята база знаний: %s записей, %s формулировок, голос %s, собрана %s",
+            state.record_count, state.phrase_count, state.voice, feed.generated_at,
         )
         return {"records": state.record_count, "phrases": state.phrase_count}
 
@@ -424,7 +480,7 @@ def main() -> None:
         silence="Вы меня слышите?",
         wrong_guess="Тогда подскажите, пожалуйста, что вас интересует?",
     )
-    audio_signature = "{0}|{1}".format(cfg.tts_model, cfg.tts_voice)
+    audio_signature = audio_signature_for(cfg.tts_model, cfg.tts_voice)
     dialog_engine = DialogEngine(
         knowledge,
         phrases,
@@ -433,15 +489,15 @@ def main() -> None:
         audio_signature=audio_signature,
     )
 
-    def prewarm(source_phrases, source_knowledge) -> None:
+    def prewarm(source_phrases, source_knowledge, prewarm_voice: str) -> None:
         if not cfg.prewarm_tts:
             return
         speakable = collect_speakable_phrases(source_phrases, source_knowledge)
-        log.info("Прогреваем синтез: %s фраз", len(speakable))
-        done, elapsed = prewarm_tts_cache(tts_cache, cfg.tts_voice, speakable)
+        log.info("Прогреваем синтез голосом %s: %s фраз", prewarm_voice, len(speakable))
+        done, elapsed = prewarm_tts_cache(tts_cache, prewarm_voice, speakable)
         log.info("Синтез прогрет: %s из %s фраз за %.1f с", done, len(speakable), elapsed)
 
-    prewarm(phrases, knowledge)
+    prewarm(phrases, knowledge, cfg.tts_voice)
 
     # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
     # без этого /metrics копил бы данные, пока не кончится память.
@@ -483,19 +539,24 @@ def main() -> None:
         cache_path=cfg.feed_cache_path,
         embedder=embedder,
         threshold=cfg.similarity_threshold,
-        dialog_factory=build_dialog_factory(SUPPORT_EXTEN, SALES_EXTEN, audio_signature),
+        dialog_factory=build_dialog_factory(
+            SUPPORT_EXTEN, SALES_EXTEN, cfg.tts_model, cfg.tts_voice
+        ),
         fallback_engine=dialog_engine,
+        default_voice=cfg.tts_voice,
     )
     if knowledge_state.restore_from_disk():
         log.info(
-            "Поднята копия последней посылки: %s записей, собрана %s",
-            knowledge_state.record_count, knowledge_state.generated_at,
+            "Поднята копия последней посылки: %s записей, голос %s, собрана %s",
+            knowledge_state.record_count, knowledge_state.voice,
+            knowledge_state.generated_at,
         )
         # Звонки пойдут по ней же, значит и синтез греть надо по ней: иначе
         # первый после перезапуска клиент слушает тишину холодного синтеза.
-        # Фразы посылок, пришедших уже во время работы, синтезируются по ходу
-        # разговора — как было и раньше для новых записей базы знаний.
-        prewarm(knowledge_state.phrases, knowledge_state.knowledge)
+        # Голос берём тот, которым бот и будет говорить — прогрев чужим голосом
+        # не пригодится вовсе. Фразы посылок, пришедших уже во время работы,
+        # синтезируются по ходу разговора — как было и раньше для новых записей.
+        prewarm(knowledge_state.phrases, knowledge_state.knowledge, knowledge_state.voice)
 
     app = build_http_app(
         dialog_engine,

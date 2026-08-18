@@ -138,6 +138,16 @@ class DialogAnswer:
     #: пуста. Единственное поле ответа не строкой — это признак, а не значение,
     #: и решение по нему принимается прямо здесь, в скрипте.
     unknown_question: bool = False
+    #: Заранее записанный аудиофайл вместо синтеза: `file_to_playback` — это не
+    #: имя файла кэша, а путь к уже лежащему на станции файлу. Скачивать его
+    #: неоткуда, играется как есть. Признака нет — поведение прежнее, поэтому
+    #: новый скрипт работает и со старым сервисом.
+    file_is_on_station: bool = False
+    #: Голос группы линий. Уходит в /tts: у каждой группы он свой, а сервис по
+    #: одному тексту не поймёт, чью фразу у него просят. Пусто — синтезируем
+    #: тем, что настроено на самом сервисе (в том числе со старым сервисом,
+    #: который голос не присылает вовсе).
+    voice: str = ""
 
 
 def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
@@ -158,19 +168,64 @@ def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
         matched_question=pairs.get("MatchedQuestion", ""),
         similarity=pairs.get("Similarity", ""),
         unknown_question=pairs.get("UnknownQuestion", "").strip().lower() in ("true", "1", "yes"),
+        file_is_on_station=pairs.get("FileIsOnStation", "").strip().lower() in ("true", "1", "yes"),
+        voice=pairs.get("Voice", ""),
     )
 
 
-def build_dialog_request(linked_id, point, text, silence):
-    # type: (str, str, str, bool) -> Dict[str, Any]
+def build_dialog_request(linked_id, point, text, silence, dialed_number=""):
+    # type: (str, str, str, bool, str) -> Dict[str, Any]
+    """Запрос к сервису. Набранный номер — тем же ключом, что и в событиях ERP:
+    по нему сервис выбирает фразы, голос и записанные аудио группы линий."""
     return {
         "prms": [
             {"Key": "linkedId", "Value": linked_id},
             {"Key": "conversationPoint", "Value": point},
             {"Key": "recognizedText", "Value": text},
             {"Key": "silenceDetected", "Value": "True" if silence else "False"},
+            {"Key": "dialedNumber", "Value": dialed_number},
         ]
     }
+
+
+def plays_from_station(answer):
+    # type: (DialogAnswer) -> bool
+    """Файл уже лежит на станции и скачивать его не надо.
+
+    Пустой путь при поднятом признаке — не поломка, а ненастроенная фраза:
+    синтезируем её как обычно.
+    """
+    return bool(answer.file_is_on_station and answer.file_to_playback)
+
+
+def station_playback_path(raw):
+    # type: (str) -> str
+    """Путь записанного файла в том виде, в каком его ждёт Астериск.
+
+    Путь относительный (`VoicesOKK\\voice-a\\2_spich.wav`), станция
+    разрешает его сама относительно своей папки звуков. Разделители в
+    справочнике ERP обратные — их надо развернуть; расширение Астериск
+    подставляет сам и с ним искал бы «Actual.wav.wav». Ровно так же поступает
+    боевой бот (ivr_om_yndx_v1.py, voice_text).
+    """
+    path = str(raw or "").strip().replace("\\", "/")
+    if path.lower().endswith(".wav"):
+        path = path[:-4]
+    return path
+
+
+def tts_params(text, voice):
+    # type: (str, str) -> Dict[str, str]
+    """Чем просить сервис синтезировать фразу.
+
+    Голос называем явно: у каждой группы линий он свой, а сервис по одному
+    тексту не поймёт, чью фразу у него просят, и синтезировал бы голосом
+    набора по умолчанию. Пусто — решает сам сервис, как и раньше.
+    """
+    params = {"text": text}
+    if voice:
+        params["voice_name"] = voice
+    return params
 
 
 def decide_next_step(answer: DialogAnswer) -> str:
@@ -510,7 +565,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
     http_port = get_var("SpeechServiceHttpPort", "8080")
     linked_id = agi.env.get("agi_uniqueid", "")
     # Набранный номер: по нему ERP ищет телефон линии, поэтому без него
-    # обращение не создастся вовсе.
+    # обращение не создастся вовсе. По нему же речевой сервис выбирает фразы,
+    # голос и записанные аудио — галочка «Виртуальный AI помощник» стоит на
+    # номерах из разных групп линий, и у каждой группы они свои.
     dialed_number = agi.env.get("agi_extension", "")
     caller_phone = agi.env.get("agi_callerid", "")
     aster2_address = get_var("Aster2ServiceAddress", DEFAULT_ASTER2_SERVICE_ADDRESS)
@@ -531,7 +588,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
         "asked_silence": False,
     }
 
-    def fetch_audio(text, file_name):
+    def fetch_audio(text, file_name, voice=""):
         target = os.path.join(AUDIO_CACHE_DIR, file_name + ".wav")
         if os.path.exists(target):
             return target
@@ -543,7 +600,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # сложит итог из этих меток и лога сервиса вручную.
         download_start = time.time()
         log_it("TIMING download_start {0:.3f}".format(download_start))
-        response = requests.get(http_base + "/tts", params={"text": text}, timeout=30)
+        response = requests.get(
+            http_base + "/tts", params=tts_params(text, voice), timeout=30
+        )
         response.raise_for_status()
         _atomic_write(target, response.content)
         download_done = time.time()
@@ -555,19 +614,25 @@ def _main():  # pragma: no cover - требует живого канала Aste
         return target
 
     def speak(answer, blocking):
-        if not answer.text_to_speak:
+        # Записанный файл озвучивается и без текста: текст к нему приезжает
+        # только ради лога станции.
+        if not answer.text_to_speak and not plays_from_station(answer):
             return
-        try:
-            fetch_audio(answer.text_to_speak, answer.file_to_playback)
-        except Exception as error:
-            log_it("TTS ERROR: {0}".format(error))
-            # Ответ у бота был, но клиент его не услышал — вместо ответа
-            # тишина, и виноваты в этом мы, а не он.
-            set_failure_reason(REASON_SPEECH_FAILED)
-            return
+        if plays_from_station(answer):
+            # Файл уже лежит на станции — скачивать его неоткуда и незачем.
+            path = station_playback_path(answer.file_to_playback)
+        else:
+            try:
+                fetch_audio(answer.text_to_speak, answer.file_to_playback, answer.voice)
+            except Exception as error:
+                log_it("TTS ERROR: {0}".format(error))
+                # Ответ у бота был, но клиент его не услышал — вместо ответа
+                # тишина, и виноваты в этом мы, а не он.
+                set_failure_reason(REASON_SPEECH_FAILED)
+                return
+            path = os.path.join(AUDIO_CACHE_DIR, answer.file_to_playback)
         # Playback блокирует до конца фразы — обязателен перед Goto и Hangup.
         application = "Playback" if blocking else "background"
-        path = os.path.join(AUDIO_CACHE_DIR, answer.file_to_playback)
         log_it("TIMING playback_start {0:.3f}".format(time.time()))
         with _agi_lock:
             agi.appexec(application, path)
@@ -586,7 +651,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
         state["asked_point"] = state["point"]
         state["asked_text"] = text
         state["asked_silence"] = silence
-        payload = build_dialog_request(linked_id, state["point"], text, silence)
+        payload = build_dialog_request(linked_id, state["point"], text, silence, dialed_number)
         response = requests.post(http_base + "/dialog", json=payload, timeout=15)
         response.raise_for_status()
         answer = parse_dialog_response(response.json())

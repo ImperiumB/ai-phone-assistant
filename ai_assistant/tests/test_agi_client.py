@@ -763,16 +763,32 @@ def test_flag_without_a_file_is_not_a_recorded_file():
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("VoicesOKK\\voice-a\\2_spich.wav", "VoicesOKK/voice-a/2_spich"),
-    ("AsterBotGL\\Actual.wav", "AsterBotGL/Actual"),
-    ("AsterBotGL/Actual.WAV", "AsterBotGL/Actual"),
-    ("AsterBotGL/Actual", "AsterBotGL/Actual"),
-    ("  AsterBotGL\\Actual.wav  ", "AsterBotGL/Actual"),
+    ("VoicesOKK\\voice-a\\2_spich.wav",
+     "/var/lib/asterisk/sounds/audioivr20/VoicesOKK/voice-a/2_spich"),
+    ("AsterBotGL\\Actual.wav", "/var/lib/asterisk/sounds/audioivr20/AsterBotGL/Actual"),
+    ("AsterBotGL/Actual.WAV", "/var/lib/asterisk/sounds/audioivr20/AsterBotGL/Actual"),
+    ("AsterBotGL/Actual", "/var/lib/asterisk/sounds/audioivr20/AsterBotGL/Actual"),
+    ("  AsterBotGL\\Actual.wav  ", "/var/lib/asterisk/sounds/audioivr20/AsterBotGL/Actual"),
 ])
 def test_station_path_is_given_to_asterisk_the_way_it_expects_it(raw, expected):
-    """Путь относительный, как у боевого бота: разделители прямые, расширение
-    Астериск подставляет сам — с ним он ищет файл «Actual.wav.wav»."""
+    """Путь из справочника относительный, и папку к нему приклеивает скрипт —
+    так же делает боевой бот (recosintsite_V2.py, audio_path_rec). Разделители
+    прямые, расширение Астериск подставляет сам: с ним он искал бы файл
+    «Actual.wav.wav» и не нашёл бы, промолчав вместо приветствия."""
     assert station_playback_path(raw) == expected
+
+
+def test_absolute_station_path_is_left_alone():
+    """Абсолютный путь задан осознанно — приклеивать к нему папку значит
+    гарантированно его сломать."""
+    assert station_playback_path("/var/lib/asterisk/sounds/asterbot/Hello.wav") == \
+        "/var/lib/asterisk/sounds/asterbot/Hello"
+
+
+def test_empty_station_path_stays_empty():
+    """Пустой путь не должен превращаться в саму папку: Астериск попытался бы
+    её проиграть."""
+    assert station_playback_path("") == ""
 
 
 def test_tts_asks_for_the_voice_of_the_group():

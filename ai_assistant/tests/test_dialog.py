@@ -1113,3 +1113,136 @@ def test_confirm_not_heard_phrase_has_no_grammatical_gender():
     assert not [word for word in gendered if word in lowered]
     # Переспрос обязан назвать ожидаемый ответ, иначе он бесполезен.
     assert "да" in lowered and "нет" in lowered
+
+
+# --- Обрывки не должны уходить в поиск по смыслу ---------------------------
+#
+# Живой звонок 18.08.2026: клиент сказал «не» (разговорное «нет», распознано
+# точно), а поиск по смыслу выдал на него близость 0.6523 к теме «нужен ремонт
+# мелкой бытовой техники» — выше порога 0.64. Бот принял междометие за
+# название темы и повёл разговор не туда.
+#
+# Замер на боевой базе (32 темы, 508 формулировок, порог 0.64): выше порога
+# оказались 12 обрывков из 76 — «алло» 0.7446, «хм» 0.6852, «угу» 0.6643,
+# «ага» 0.6592, «алё» 0.6581, «а то» 0.6577, «не то» 0.6576, «не» 0.6523,
+# «эээ» 0.6461, «да нет» 0.6447, «ну да» 0.6411, «ну вот» 0.6402. Липнут к
+# произвольным темам: телевизор, холодильник, керхер, мелкая бытовая техника.
+
+
+class RecordingKnowledge(FakeKnowledge):
+    """Помнит, о чём её спрашивали: обрывок не должен доходить до поиска."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.queries = []
+
+    def best_match(self, text):
+        self.queries.append(text)
+        return super().best_match(text)
+
+
+def test_scrap_never_reaches_the_semantic_search():
+    knowledge = RecordingKnowledge(RECORD)
+    result = answer(engine(knowledge), conversationPoint=POINT_ASK_QUESTION, recognizedText="не")
+
+    assert knowledge.queries == []
+    assert result["TextToSpeak"] == ""
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+    assert result["RedirectExten"] == ""
+
+
+@pytest.mark.parametrize("scrap", ["не", "да", "ага", "угу", "хм", "не то", "ну да", "а то", "эээ", "алё"])
+def test_measured_scraps_are_all_cut_off(scrap):
+    knowledge = RecordingKnowledge(RECORD)
+    answer(engine(knowledge), conversationPoint=POINT_ASK_QUESTION, recognizedText=scrap)
+    assert knowledge.queries == []
+
+
+@pytest.mark.parametrize("topic", ["утюг", "печь", "духовка", "стиралка", "холодильник",
+                                   "не морозит", "не греет", "стиралка не крутит"])
+def test_real_topics_still_reach_the_search(topic):
+    """Правило режет обрывки, а не короткую речь.
+
+    Замер: у всех этих реплик есть слово от четырёх букв, и все они
+    попадали в свою тему выше порога.
+    """
+    knowledge = RecordingKnowledge(RECORD)
+    answer(engine(knowledge), conversationPoint=POINT_ASK_QUESTION, recognizedText=topic)
+    assert knowledge.queries == [topic]
+
+
+def test_scrap_does_not_pollute_the_knowledge_base():
+    """Обрывок не вопрос клиента — в справочник на разметку ему не место."""
+    knowledge = RecordingKnowledge(None)
+    answer(engine(knowledge), conversationPoint=POINT_ASK_QUESTION, recognizedText="не")
+    assert knowledge.added == []
+
+
+def test_short_negative_answer_still_works_at_confirmation():
+    """Одно и то же «не» — в подтверждении отказ, в поиске мусор.
+
+    Различаем по точке разговора, а не по самому слову: заказчик подтвердил,
+    что «не» — законное разговорное «нет», и в список отрицательных ответов
+    оно заводится отдельно.
+    """
+    record = KnowledgeRecord(
+        id=1,
+        question="стиральная машина не отжимает",
+        clarifying_question="Правильно понимаю, что вас интересует ремонт стиральной машины?",
+        positive_answers=["да"],
+        negative_answers=["нет", "не"],
+        positive_reply="Соединяю",
+    )
+    knowledge = RecordingKnowledge(record)
+    engine_obj = engine(knowledge)
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="не")
+
+    assert result["TextToSpeak"] == PHRASES.wrong_guess
+    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+
+
+def test_short_positive_answer_still_works_at_confirmation():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+
+    assert result["Action"] == ACTION_REDIRECT
+
+
+def test_scrap_counts_as_an_unheard_attempt_like_an_empty_result():
+    """Счётчик попыток общий: обрывок — тот же «бот не понял, что сказали».
+
+    Наблюдать его снаружи негде — переспрос живёт только в точке
+    подтверждения, куда обрывок не попадает по построению, — поэтому
+    смотрим прямо в состояние сессии.
+    """
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="")
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="не")
+
+    assert engine_obj._session("call-1").empty_count == 2
+
+
+def test_recognized_topic_resets_the_counter_after_a_scrap():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="не")
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+
+    assert engine_obj._session("call-1").empty_count == 0
+
+
+def test_scrap_rule_counts_letters_not_characters():
+    """Правило считает буквы в слове, а не длину строки целиком.
+
+    «не то» — две частицы по две буквы, строка из пяти знаков: считать длину
+    строки значило бы пропустить её в поиск, где она даёт 0.6576 к теме
+    «телевизор не включается».
+    """
+    from ai_assistant.service.dialog import MIN_SEARCHABLE_WORD_LETTERS
+
+    assert MIN_SEARCHABLE_WORD_LETTERS == 4
+    knowledge = RecordingKnowledge(RECORD)
+    answer(engine(knowledge), conversationPoint=POINT_ASK_QUESTION, recognizedText="не то")
+    assert knowledge.queries == []

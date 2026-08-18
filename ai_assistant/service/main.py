@@ -65,7 +65,11 @@ from ai_assistant.service.metrics import (  # noqa: E402
     STAGE_STT_DONE,
     CallTimeline,
 )
-from ai_assistant.service.stt.base import create_engine, prepare_audio  # noqa: E402
+from ai_assistant.service.stt.base import (  # noqa: E402
+    create_engine,
+    pad_short_utterance,
+    prepare_audio,
+)
 from ai_assistant.service.tts import SileroSynthesizer, TtsCache  # noqa: E402
 from ai_assistant.service.vad import SileroVoiceDetector, UtteranceSegmenter  # noqa: E402
 
@@ -129,7 +133,11 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                     # подставляют собственные, не обязанные его иметь).
                     timeline.mark_with_offset(STAGE_SPEECH_END, getattr(segmenter, "pause_seconds", 0.0))
                 try:
-                    audio = prepare_audio(event.pcm, self._engine.target_sample_rate)
+                    # Тишина подмешивается до ресемплинга и до выбора движка:
+                    # короткие ответы вроде «да»/«нет» без контекста по краям
+                    # распознаются заметно хуже (замер — см. pad_short_utterance).
+                    padded = pad_short_utterance(event.pcm)
+                    audio = prepare_audio(padded, self._engine.target_sample_rate)
                     text = self._engine.transcribe(audio)
                 except Exception:
                     # Один споткнувшийся движок не должен ронять весь поток:

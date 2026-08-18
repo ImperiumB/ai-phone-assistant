@@ -1096,3 +1096,51 @@ def test_prewarm_includes_the_confirm_retry_phrase():
     texts = collect_speakable_phrases(phrases, KnowledgeStub([]))
     assert phrases.confirm_not_heard in texts
     assert phrases.wrong_guess in texts
+
+
+class RecordingEngine:
+    """Запоминает PCM, который до него доехал."""
+
+    target_sample_rate = 8000
+
+    def __init__(self):
+        self.received = []
+
+    def transcribe(self, pcm):
+        self.received.append(pcm)
+        return "да"
+
+
+def test_short_utterance_reaches_the_engine_padded_with_silence():
+    """Живой звонок 18.08.2026: «нет» дважды дало пустое распознавание.
+
+    Замер показал, что короткие отрезки распознаются заметно лучше, если
+    дополнить их тишиной по краям — см. таблицу в test_stt_base.py.
+    """
+    from ai_assistant.service.stt.base import SILENCE_PAD_SECONDS
+
+    engine_obj = RecordingEngine()
+    short = pcm(2000)  # 0.25 с — примерно столько занимает «нет»
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter([[SegmentEvent(kind="utterance", pcm=short)]]),
+        engine_obj,
+        [],
+    )
+    list(servicer.Recognize(FakeRequestIterator("call-1", [b"\x00" * 512]), None))
+
+    pad_bytes = int(8000 * SILENCE_PAD_SECONDS) * 2
+    assert len(engine_obj.received) == 1
+    assert len(engine_obj.received[0]) == len(short) + 2 * pad_bytes
+
+
+def test_long_utterance_reaches_the_engine_untouched():
+    engine_obj = RecordingEngine()
+    long_pcm = pcm(24000)  # 3 с
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter([[SegmentEvent(kind="utterance", pcm=long_pcm)]]),
+        engine_obj,
+        [],
+    )
+    list(servicer.Recognize(FakeRequestIterator("call-1", [b"\x00" * 512]), None))
+
+    assert engine_obj.received == [long_pcm]

@@ -193,3 +193,102 @@ def test_engine_factory_defaults_gigaam_to_third_version(monkeypatch):
 
     create_engine("gigaam")
     assert captured["model_name"] == "v3_rnnt"
+
+
+# --- Подмешивание тишины к коротким отрезкам --------------------------------
+#
+# Замер 18.08.2026 на синтезе пяти голосов, приведённом к телефонному виду
+# (полоса 300-3400 Гц, A-law, шум линии), отрезки 110-250 мс, 320 попыток на
+# каждую величину добавки, два независимых прогона с разными посевами шума:
+#
+#   добавка     0 мс   100 мс   200 мс   300 мс   500 мс   700 мс   1000 мс
+#   прогон 1   89.1%    53.1%    70.9%    87.2%    97.8%        -         -
+#   прогон 2   89.1%        -        -    85.9%    97.2%    98.1%     96.6%
+#
+# Отсюда и величина: 300 мс, с которых начинали, В ОБОИХ прогонах оказались
+# ХУЖЕ, чем совсем без добавки, а 100-200 мс — заметно хуже. Помогает только
+# добавка от 500 мс; 700 мс лучше на десятую долю процента, 1000 мс снова
+# хуже. Проверять на глаз тут нечего: зависимость немонотонная.
+
+
+def test_short_utterance_is_padded_with_silence_on_both_sides():
+    from ai_assistant.service.stt.base import (
+        SILENCE_PAD_SECONDS,
+        pad_short_utterance,
+    )
+
+    source = tone_8k(4000)  # 0.5 с — короткая реплика вроде «да» или «нет»
+    result = pad_short_utterance(source)
+
+    pad_bytes = int(8000 * SILENCE_PAD_SECONDS) * 2
+    assert len(result) == len(source) + 2 * pad_bytes
+    assert result[pad_bytes:pad_bytes + len(source)] == source
+
+
+def test_padding_added_is_actual_silence():
+    from ai_assistant.service.stt.base import (
+        SILENCE_PAD_SECONDS,
+        pad_short_utterance,
+    )
+
+    pad_bytes = int(8000 * SILENCE_PAD_SECONDS) * 2
+    result = pad_short_utterance(tone_8k(4000))
+
+    assert result[:pad_bytes] == b"\x00" * pad_bytes
+    assert result[-pad_bytes:] == b"\x00" * pad_bytes
+
+
+def test_long_utterance_is_left_alone():
+    """Длинная речь и так распознаётся, а добавка стоит ~250 мс на реплику.
+
+    Замер 18.08.2026 на фразах по 3-4 секунды: без добавки медиана 771 мс,
+    с 500 мс тишины — 1015 мс, при одинаковом (полном) результате 10/10.
+    """
+    from ai_assistant.service.stt.base import pad_short_utterance
+
+    source = tone_8k(16000)  # 2 с
+    assert pad_short_utterance(source) is source
+
+
+def test_utterance_exactly_at_the_cutoff_is_left_alone():
+    from ai_assistant.service.stt.base import PAD_BELOW_SECONDS, pad_short_utterance
+
+    source = tone_8k(int(8000 * PAD_BELOW_SECONDS))
+    assert pad_short_utterance(source) is source
+
+
+def test_degenerate_scrap_is_not_padded():
+    """Обрывок короче порога распознавания дополнять незачем.
+
+    GigaamEngine.transcribe() отвергает такое до обращения к модели и стоит
+    0.0 мс (замер 18.08.2026), а дополненный до секунды щелчок дошёл бы до
+    модели и стоил бы ~450 мс на каждый посторонний звук в линии.
+    """
+    from ai_assistant.service.stt.base import pad_short_utterance
+
+    scrap = tone_8k(400)  # 0.05 с
+    assert pad_short_utterance(scrap) is scrap
+    assert pad_short_utterance(b"") is not None
+    assert pad_short_utterance(b"") == b""
+
+
+def test_padding_keeps_16bit_alignment():
+    from ai_assistant.service.stt.base import pad_short_utterance
+
+    assert len(pad_short_utterance(tone_8k(2000))) % 2 == 0
+
+
+def test_padding_is_shared_by_every_engine():
+    """Правка общая для обоих движков, а не особенность GigaAM.
+
+    Она живёт в base.py рядом с prepare_audio() и применяется в единственном
+    месте, где вызывается transcribe(), — до выбора движка.
+    """
+    import inspect
+
+    from ai_assistant.service.stt import base
+
+    assert callable(base.pad_short_utterance)
+    source = inspect.getsource(base.pad_short_utterance)
+    assert "gigaam" not in source.lower()
+    assert "vosk" not in source.lower()

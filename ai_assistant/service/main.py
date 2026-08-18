@@ -308,7 +308,17 @@ def collect_speakable_phrases(phrases: Phrases, knowledge) -> List[str]:
     знаний. Записи без уточняющего вопроса — это ещё не размеченные
     неопознанные реплики, бот их не произносит и синтезировать их незачем.
     """
-    texts = [phrases.greeting, phrases.misrecognition, phrases.transfer, phrases.silence]
+    texts = [
+        phrases.greeting,
+        phrases.misrecognition,
+        phrases.transfer,
+        phrases.silence,
+        # Переспрос и «не угадал тему» звучат в самые нервные моменты разговора:
+        # клиент уже решил, что бот сломался. Две секунды холодного синтеза
+        # поверх этого — ровно то, что чинить и пытаемся.
+        phrases.wrong_guess,
+        phrases.confirm_not_heard,
+    ]
     for record in knowledge.records:
         if not record.clarifying_question:
             continue

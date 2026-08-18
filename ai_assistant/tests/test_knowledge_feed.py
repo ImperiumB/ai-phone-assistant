@@ -206,6 +206,145 @@ def test_confirm_not_heard_comes_from_settings_when_erp_sends_it():
     assert feed.phrases.confirm_not_heard == "Повторите, пожалуйста: да или нет"
 
 
+# --- Группы линий (UL-17568) --------------------------------------------------
+#
+# Галочка «Виртуальный AI помощник» может стоять на номерах разных групп линий,
+# а у каждой группы свои фразы, свой голос и свои записанные аудио. База знаний
+# при этом общая — это решение заказчика: темы про ремонт техники не зависят от
+# того, на какой номер позвонили.
+
+
+def group(**overrides):
+    payload = {
+        "line_group_id": 9060,
+        "phones": ["74951468847"],
+        "voice": "kseniya",
+        "greeting": "Здравствуйте, это частный мастер",
+        "misrecognition": "Повторите, пожалуйста",
+        "transfer": "Соединяю с мастером",
+        "silence": "Алло, вы здесь?",
+        "wrong_guess": "А что тогда вас интересует?",
+        "confirm_not_heard": "Скажите да или нет, пожалуйста",
+        "positive_answers": ["да", "ага"],
+        "negative_answers": ["нет"],
+        "use_recorded_audio": False,
+        "greeting_path": "",
+        "misrecognition_path": "",
+        "transfer_path": "",
+        "silence_path": "",
+        "wrong_guess_path": "",
+        "confirm_not_heard_path": "",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def payload_with_groups(*groups):
+    payload = minimal_payload()
+    payload["line_groups"] = list(groups)
+    return payload
+
+
+def test_line_groups_are_parsed_with_their_phones_and_phrases():
+    feed = parse_feed(payload_with_groups(group()))
+
+    assert len(feed.line_groups) == 1
+    parsed = feed.line_groups[0]
+    assert parsed.line_group_id == 9060
+    assert parsed.phones == ["74951468847"]
+    assert parsed.voice == "kseniya"
+    assert parsed.phrases.greeting == "Здравствуйте, это частный мастер"
+    assert parsed.phrases.confirm_not_heard == "Скажите да или нет, пожалуйста"
+    assert parsed.positive_answers == ["да", "ага"]
+
+
+def test_payload_without_line_groups_is_applied_as_before():
+    """Рассинхрон версий не должен оставлять бота без базы знаний.
+
+    Обработчик прежней сборки массива не присылает вовсе — посылка обязана
+    примениться на одном наборе, как до разделения по группам.
+    """
+    feed = parse_feed(minimal_payload())
+
+    assert feed.line_groups == []
+    assert len(feed.records) == 1
+    assert feed.phrases.greeting == "Здравствуйте, чем могу помочь?"
+
+
+def test_unfilled_phrase_of_a_group_falls_back_to_the_default_set():
+    """Ненастроенная фраза одной группы не должна отвергать посылку целиком.
+
+    Лучше поздороваться чужой фразой, чем молчать в трубку, — то же правило,
+    по которому неопознанный номер получает набор по умолчанию.
+    """
+    feed = parse_feed(payload_with_groups(group(greeting="", positive_answers=[])))
+
+    parsed = feed.line_groups[0]
+    assert parsed.phrases.greeting == "Здравствуйте, чем могу помочь?"
+    assert parsed.positive_answers == ["да", "так"]
+    assert parsed.phrases.transfer == "Соединяю с мастером"  # своё не затирается
+
+
+def test_group_without_phones_is_dropped():
+    """По набранному номеру такую группу всё равно не найти — она только
+    заставила бы прогрев синтеза молоть лишний голос."""
+    feed = parse_feed(payload_with_groups(group(phones=[])))
+
+    assert feed.line_groups == []
+
+
+def test_recorded_audio_paths_are_ignored_while_the_flag_is_off():
+    """Пути в справочнике могут быть заполнены заранее, до включения галочки."""
+    feed = parse_feed(payload_with_groups(group(
+        use_recorded_audio=False, greeting_path="VoicesOKK\\voice-a\\2_spich.wav"
+    )))
+
+    assert feed.line_groups[0].audio_files == {}
+
+
+def test_recorded_audio_paths_are_kept_when_the_flag_is_on():
+    feed = parse_feed(payload_with_groups(group(
+        use_recorded_audio=True,
+        greeting_path="VoicesOKK\\voice-a\\2_spich.wav",
+        transfer_path="AsterBotGL\\Actual.wav",
+    )))
+
+    assert feed.line_groups[0].audio_files == {
+        "greeting": "VoicesOKK\\voice-a\\2_spich.wav",
+        "transfer": "AsterBotGL\\Actual.wav",
+    }
+
+
+def test_empty_path_with_the_flag_on_is_not_a_recorded_file():
+    """Ненастроенная фраза — это не поломка: её просто синтезируют, как обычно."""
+    feed = parse_feed(payload_with_groups(group(use_recorded_audio=True, greeting_path="   ")))
+
+    assert feed.line_groups[0].audio_files == {}
+
+
+def test_the_default_set_has_its_own_recorded_audio_too():
+    """`settings` — это первая группа, и записанные аудио у неё такие же свои."""
+    payload = minimal_payload()
+    payload["settings"]["use_recorded_audio"] = True
+    payload["settings"]["silence_path"] = "AsterBotGL\\Alo.wav"
+
+    feed = parse_feed(payload)
+
+    assert feed.audio_files == {"silence": "AsterBotGL\\Alo.wav"}
+
+
+def test_old_payload_without_recorded_audio_fields_has_none():
+    assert parse_feed(minimal_payload()).audio_files == {}
+
+
+def test_broken_line_groups_section_is_rejected():
+    """Мусор вместо массива — повод отвергнуть посылку, а не гадать."""
+    payload = minimal_payload()
+    payload["line_groups"] = "9060"
+    with pytest.raises(FeedError):
+        parse_feed(payload)
+
+
 def test_confirm_not_heard_falls_back_to_the_service_default():
     """Поля в справочнике ERP пока нет, и посылка без него обязана применяться.
 

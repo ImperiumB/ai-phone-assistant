@@ -10,12 +10,14 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ai_assistant.service.dialog import (
     DEFAULT_CONFIRM_NOT_HEARD,
+    PHRASE_SLOTS,
     SCENARIO_DIRECTION,
+    LineProfile,
     Phrases,
 )
 from ai_assistant.service.knowledge import KnowledgeRecord
@@ -39,6 +41,11 @@ class ParsedFeed:
     #: одинаково ради сравнения — гиблое дело, а сравнивать надо строго то же
     #: самое, что считал обработчик. Пусто — отпечатка не прислали.
     content_hash: str = ""
+    #: Заранее записанные аудио набора по умолчанию, по именам фраз.
+    audio_files: Dict[str, str] = field(default_factory=dict)
+    #: Наборы остальных групп линий. Пусто — обработчик прежней сборки массива
+    #: не присылает вовсе, и весь бот живёт на одном наборе, как раньше.
+    line_groups: List[LineProfile] = field(default_factory=list)
 
 
 def _clean_list(raw: Any) -> List[str]:
@@ -66,6 +73,102 @@ def _optional_int(raw: Any, key: str, where: str) -> int:
         return int(raw)
     except (TypeError, ValueError):
         raise FeedError("{0}: поле {1!r} должно быть числом, получено {2!r}".format(where, key, raw))
+
+
+def _parse_phrases(
+    source: Dict[str, Any], where: str, defaults: Optional[Phrases] = None
+) -> Phrases:
+    """Служебные фразы одного набора.
+
+    `defaults` передаётся для группы линий: незаполненная там фраза берётся из
+    набора по умолчанию, а не отвергает посылку целиком. Одна ненастроенная
+    фраза в третьей по счёту группе иначе оставила бы без базы знаний весь
+    бот — то же правило, по которому неопознанный номер получает чужой набор:
+    лучше поздороваться чужой фразой, чем молчать в трубку.
+    """
+
+    def required(key: str) -> str:
+        value = str(source.get(key) or "").strip()
+        if value:
+            return value
+        if defaults is not None:
+            return getattr(defaults, key)
+        return _required_text(source, key, where)
+
+    return Phrases(
+        greeting=required("greeting"),
+        misrecognition=required("misrecognition"),
+        transfer=required("transfer"),
+        silence=required("silence"),
+        wrong_guess=required("wrong_guess"),
+        # Необязательное, в отличие от остальных: своего поля в справочнике
+        # группы линий у переспроса пока нет, и обработчик его не присылает.
+        # Сделать его обязательным значит отвергнуть целиком первую же
+        # посылку от прежнего обработчика — сервис останется с устаревшей
+        # базой знаний из-за одной ненастроенной фразы. Когда поле в ERP
+        # заведут, оно подхватится здесь само, без правки сервиса.
+        confirm_not_heard=(
+            str(source.get("confirm_not_heard") or "").strip()
+            or (defaults.confirm_not_heard if defaults is not None else DEFAULT_CONFIRM_NOT_HEARD)
+        ),
+    )
+
+
+def _parse_audio_files(source: Dict[str, Any]) -> Dict[str, str]:
+    """Заранее записанные аудио набора: имя фразы -> путь на станции.
+
+    Пути живут в справочнике и при выключенной галочке: их заполняют заранее.
+    Пустой путь при включённой галочке — тоже не поломка, а просто
+    ненастроенная фраза, её синтезируют как обычно. И в том, и в другом случае
+    в словарь она не попадает, а всё, что в нём есть, играется файлом.
+    """
+    if not source.get("use_recorded_audio"):
+        return {}
+    files = {}
+    for slot in PHRASE_SLOTS:
+        path = str(source.get(slot + "_path") or "").strip()
+        if path:
+            files[slot] = path
+    return files
+
+
+def _parse_line_groups(
+    payload: Dict[str, Any], defaults: Phrases, default_answers: Dict[str, List[str]]
+) -> List[LineProfile]:
+    raw = payload.get("line_groups")
+    if raw is None:
+        # Обработчик прежней сборки массива не присылает вовсе. Требовать его
+        # значит при рассинхроне версий оставить бота без базы знаний совсем —
+        # а это хуже, чем один набор фраз на все группы.
+        return []
+    if not isinstance(raw, list):
+        raise FeedError("Раздел line_groups должен быть массивом")
+
+    groups = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise FeedError("Группа линий должна быть объектом")
+        where = "группа линий {0}".format(item.get("line_group_id", "без кода"))
+        phones = _clean_list(item.get("phones"))
+        if not phones:
+            # По набранному номеру такую группу не найти никогда, а прогрев
+            # синтеза из-за неё молол бы лишний голос.
+            log.warning("%s: нет ни одного номера, набор пропущен", where)
+            continue
+        groups.append(LineProfile(
+            phrases=_parse_phrases(item, where, defaults),
+            voice=str(item.get("voice") or "").strip(),
+            audio_files=_parse_audio_files(item),
+            positive_answers=(
+                _clean_list(item.get("positive_answers")) or list(default_answers["positive"])
+            ),
+            negative_answers=(
+                _clean_list(item.get("negative_answers")) or list(default_answers["negative"])
+            ),
+            phones=phones,
+            line_group_id=_optional_int(item.get("line_group_id"), "line_group_id", where),
+        ))
+    return groups
 
 
 def _parse_record(raw: Dict[str, Any], answers: Dict[str, List[str]]) -> KnowledgeRecord:
@@ -107,23 +210,7 @@ def parse_feed(payload: Dict[str, Any]) -> ParsedFeed:
     if not isinstance(raw_records, list) or not raw_records:
         raise FeedError("В посылке нет ни одной записи базы знаний")
 
-    phrases = Phrases(
-        greeting=_required_text(settings, "greeting", "настройки"),
-        misrecognition=_required_text(settings, "misrecognition", "настройки"),
-        transfer=_required_text(settings, "transfer", "настройки"),
-        silence=_required_text(settings, "silence", "настройки"),
-        wrong_guess=_required_text(settings, "wrong_guess", "настройки"),
-        # Необязательное, в отличие от остальных: своего поля в справочнике
-        # группы линий у переспроса пока нет, и обработчик его не присылает.
-        # Сделать его обязательным значит отвергнуть целиком первую же
-        # посылку от прежнего обработчика — сервис останется с устаревшей
-        # базой знаний из-за одной ненастроенной фразы. Когда поле в ERP
-        # заведут, оно подхватится здесь само, без правки сервиса.
-        confirm_not_heard=(
-            str(settings.get("confirm_not_heard") or "").strip()
-            or DEFAULT_CONFIRM_NOT_HEARD
-        ),
-    )
+    phrases = _parse_phrases(settings, "настройки")
 
     answers = {
         "positive": _clean_list(settings.get("positive_answers")),
@@ -146,6 +233,8 @@ def parse_feed(payload: Dict[str, Any]) -> ParsedFeed:
         # справочники — то есть худшее, что даёт его отсутствие, это лишняя
         # посылка, а не потерянное обновление.
         content_hash=str(payload.get("content_hash") or "").strip(),
+        audio_files=_parse_audio_files(settings),
+        line_groups=_parse_line_groups(payload, phrases, answers),
     )
 
 

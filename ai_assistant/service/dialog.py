@@ -8,7 +8,7 @@ import hashlib
 import logging
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("aia.dialog")
@@ -113,6 +113,46 @@ class Phrases:
     #: вернуло пустоту. Значение по умолчанию — на то время, пока в справочнике
     #: группы линий нет своего поля: посылка без него применяется как обычно.
     confirm_not_heard: str = DEFAULT_CONFIRM_NOT_HEARD
+
+
+# Служебные фразы бота — те, что правятся в справочнике группы линий и только у
+# которых бывает заранее записанный аудиофайл. Порядок и имена совпадают с
+# полями Phrases: по этим именам разложены и пути к записанным файлам.
+PHRASE_SLOTS = (
+    "greeting",
+    "misrecognition",
+    "transfer",
+    "silence",
+    "wrong_guess",
+    "confirm_not_heard",
+)
+
+
+@dataclass
+class LineProfile:
+    """Как бот звучит на номерах одной группы линий.
+
+    Галочка «Виртуальный AI помощник» стоит на номерах из разных групп, и у
+    каждой группы свои фразы, свой голос и свои записанные аудио. База знаний
+    при этом общая — темы про ремонт техники не зависят от того, на какой номер
+    позвонили.
+    """
+
+    phrases: Phrases
+    voice: str = ""
+    #: Модель синтеза плюс голос: входит в имя файла кэша станции, поэтому у
+    #: каждой группы оно своё и одна и та же фраза не звучит чужим голосом.
+    audio_signature: str = ""
+    #: Заранее записанные файлы по именам фраз (PHRASE_SLOTS). Пусто, пока
+    #: галочка «использовать записанные аудиофайлы» в группе выключена.
+    audio_files: Dict[str, str] = field(default_factory=dict)
+    #: Свои варианты согласия и отказа. Пусто — берутся из записи базы знаний,
+    #: как было до разделения по группам.
+    positive_answers: List[str] = field(default_factory=list)
+    negative_answers: List[str] = field(default_factory=list)
+    #: Номера линий с галочкой. По ним набор и выбирается.
+    phones: List[str] = field(default_factory=list)
+    line_group_id: int = 0
 
 
 def prms_to_dict(items: List[Dict[str, Any]]) -> Dict[str, str]:

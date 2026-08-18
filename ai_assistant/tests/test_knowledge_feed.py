@@ -177,3 +177,24 @@ def test_save_creates_missing_directory(tmp_path):
     target = str(tmp_path / "глубже" / "feed.json")
     save_feed(minimal_payload(), target)
     assert load_feed(target) is not None
+
+
+def test_confirm_not_heard_comes_from_settings_when_erp_sends_it():
+    """Переспрос в точке подтверждения правится там же, где остальные фразы."""
+    payload = minimal_payload()
+    payload["settings"]["confirm_not_heard"] = "Повторите, пожалуйста: да или нет"
+    feed = parse_feed(payload)
+    assert feed.phrases.confirm_not_heard == "Повторите, пожалуйста: да или нет"
+
+
+def test_confirm_not_heard_falls_back_to_the_service_default():
+    """Поля в справочнике ERP пока нет, и посылка без него обязана применяться.
+
+    Обязательным это поле делать нельзя: тогда первая же посылка от прежнего
+    обработчика отвергается целиком, и сервис остаётся с устаревшей базой
+    знаний из-за одной ненастроенной фразы.
+    """
+    from ai_assistant.service.dialog import DEFAULT_CONFIRM_NOT_HEARD
+
+    feed = parse_feed(minimal_payload())
+    assert feed.phrases.confirm_not_heard == DEFAULT_CONFIRM_NOT_HEARD

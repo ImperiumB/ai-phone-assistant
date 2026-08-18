@@ -1006,3 +1006,110 @@ def test_wrong_guess_is_not_reported_as_an_unrecognized_question_yet():
 
     assert result["Action"] == ACTION_RECOGNIZE
     assert "UnknownQuestion" not in result
+
+
+# --- Переспрос в точке подтверждения (живой звонок 18.08.2026) -------------
+#
+# Клиент дважды ответил «нет» на уточняющий вопрос, распознавание оба раза
+# вернуло пустую строку, бот промолчал — клиент решил, что бот сломался, и
+# положил трубку. Молчать на пустой результат правильно в открытом вопросе
+# (щелчок громкой связи легко принять за речь), но не там, где бот только что
+# спросил «да или нет».
+
+
+def test_first_empty_confirmation_stays_silent():
+    """Первая пустая попытка по-прежнему проглатывается молча — это щелчки."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+
+    assert result["TextToSpeak"] == ""
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["ConversationPoint"] == POINT_CONFIRM
+
+
+def test_second_empty_confirmation_asks_again():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+
+    assert result["TextToSpeak"] == PHRASES.confirm_not_heard
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["ConversationPoint"] == POINT_CONFIRM
+    assert result["RedirectExten"] == ""
+    assert result["FileToPlayback"]
+
+
+def test_empty_counter_resets_after_something_was_recognized():
+    """Распозналось — счётчик пустых попыток обнуляется.
+
+    Полный круг: пустая попытка в подтверждении, затем внятный ответ, затем
+    разговор снова доходит до подтверждения. Первая пустая попытка на втором
+    круге обязана снова быть молчаливой, а не сразу переспрашивать.
+    """
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="ну как сказать")
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+
+    assert result["TextToSpeak"] == ""
+
+
+def test_open_question_keeps_silent_on_every_empty_recognition():
+    """В открытом вопросе поведение прежнее: молчим сколько угодно раз.
+
+    Там пустой результат — это шум в линии, а не потерянный ответ клиента:
+    переспрашивать на каждый щелчок значит вернуть ровно ту поломку, ради
+    которой молчание и вводили.
+    """
+    engine_obj = engine(FakeKnowledge(RECORD))
+    for _ in range(3):
+        result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="")
+        assert result["TextToSpeak"] == ""
+        assert result["ConversationPoint"] == POINT_ASK_QUESTION
+
+
+def test_empty_confirmation_does_not_lose_the_found_record():
+    """Переспрос не должен стирать найденную тему: клиент отвечает «да» после
+    переспроса, и перевод обязан уйти по своей записи, а не на общий номер."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["EquipmentType"] == "Стиральные машины"
+
+
+def test_empty_confirmation_does_not_pollute_the_knowledge_base():
+    knowledge = FakeKnowledge(RECORD)
+    engine_obj = engine(knowledge)
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="")
+
+    assert knowledge.added == []
+
+
+def test_confirm_not_heard_phrase_has_no_grammatical_gender():
+    """Отдельное требование заказчика: от рода в репликах уходим совсем.
+
+    Голос выбирается в справочнике группы линий и может быть мужским
+    (eugene, aidar) или женским (kseniya, baya, xenia) — одна и та же фраза
+    звучит обоими, поэтому «не расслышала» и «не расслышал» одинаково не
+    годятся.
+    """
+    from ai_assistant.service.dialog import DEFAULT_CONFIRM_NOT_HEARD
+
+    gendered = (
+        "расслышал", "расслышала", "поняла", "понял", "услышал", "услышала",
+        "слышал", "слышала", "готова", "готов", "сказала", "сказал",
+    )
+    lowered = DEFAULT_CONFIRM_NOT_HEARD.lower()
+    assert not [word for word in gendered if word in lowered]
+    # Переспрос обязан назвать ожидаемый ответ, иначе он бесполезен.
+    assert "да" in lowered and "нет" in lowered

@@ -13,7 +13,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ai_assistant.service.dialog import SCENARIO_DIRECTION, Phrases
+from ai_assistant.service.dialog import (
+    DEFAULT_CONFIRM_NOT_HEARD,
+    SCENARIO_DIRECTION,
+    Phrases,
+)
 from ai_assistant.service.knowledge import KnowledgeRecord
 
 log = logging.getLogger("aia.feed")
@@ -104,6 +108,16 @@ def parse_feed(payload: Dict[str, Any]) -> ParsedFeed:
         transfer=_required_text(settings, "transfer", "настройки"),
         silence=_required_text(settings, "silence", "настройки"),
         wrong_guess=_required_text(settings, "wrong_guess", "настройки"),
+        # Необязательное, в отличие от остальных: своего поля в справочнике
+        # группы линий у переспроса пока нет, и обработчик его не присылает.
+        # Сделать его обязательным значит отвергнуть целиком первую же
+        # посылку от прежнего обработчика — сервис останется с устаревшей
+        # базой знаний из-за одной ненастроенной фразы. Когда поле в ERP
+        # заведут, оно подхватится здесь само, без правки сервиса.
+        confirm_not_heard=(
+            str(settings.get("confirm_not_heard") or "").strip()
+            or DEFAULT_CONFIRM_NOT_HEARD
+        ),
     )
 
     answers = {

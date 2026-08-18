@@ -5,3 +5,6 @@ __pycache__/
 Входящее от заказчик/
 /tmp_audio/
 ai_assistant/knowledge_feed_cache.json
+# Образцы голосов пересобираются скриптом tools/generate_voice_samples.py:
+# полмегабайта на голос, в гите им делать нечего.
+/voice_samples/

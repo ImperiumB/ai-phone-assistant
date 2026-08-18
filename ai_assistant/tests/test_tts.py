@@ -210,6 +210,26 @@ def test_synthesize_asks_model_for_48k_and_downsamples_exactly_sixfold():
     assert len(pcm) == expected_samples * 2  # 16 бит = 2 байта на отсчёт
 
 
+def test_studio_synthesis_keeps_the_model_rate_untouched():
+    """Образцы голосов для формы ERP слушает человек через колонки, а не через
+    телефонную линию: понижать частоту там нечего и незачем. Боевой путь
+    (synthesize) от этого не меняется — он по-прежнему ресемплит в 8000 Гц,
+    см. тест выше."""
+    from ai_assistant.service.tts import MODEL_SAMPLE_RATE_HZ, SileroSynthesizer
+
+    num_samples_48k = 48000
+    fake_model = _RecordingHighRateModel(num_samples_48k)
+    synth = SileroSynthesizer.__new__(SileroSynthesizer)
+    synth._model = fake_model
+
+    audio = synth.synthesize_at_model_rate("здравствуйте", "eugene")
+
+    assert fake_model.calls == [
+        {"text": "здравствуйте", "speaker": "eugene", "sample_rate": MODEL_SAMPLE_RATE_HZ}
+    ]
+    assert len(audio) == num_samples_48k  # ни одного отсчёта не потеряно
+
+
 class VersionedSynthesizer(FakeSynthesizer):
     """Подставной синтезатор, у которого есть модель — как у боевого."""
 

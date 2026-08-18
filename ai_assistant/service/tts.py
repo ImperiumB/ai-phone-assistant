@@ -119,13 +119,24 @@ class SileroSynthesizer:
         #: Читается кэшем: при смене модели старые файлы обязаны стать недействительными.
         self.model_id = model_id
 
+    def synthesize_at_model_rate(self, text: str, voice: str):
+        """Звук прямо с модели, на её собственной частоте, без понижения.
+
+        Телефонии это не нужно (Asterisk играет только 8000 Гц), но нужно
+        генератору образцов голосов: там звук слушает человек через колонки, а
+        не через телефонную линию. Отдельный метод — чтобы генератор не лез в
+        приватную модель и не повторял загрузку через torch.hub со всей
+        вознёй вокруг сертификатов.
+        """
+        return self._model.apply_tts(
+            text=text, speaker=voice, sample_rate=MODEL_SAMPLE_RATE_HZ
+        )
+
     def synthesize(self, text: str, voice: str) -> bytes:
         import numpy as np
         from scipy.signal import resample_poly
 
-        audio_48k = self._model.apply_tts(
-            text=text, speaker=voice, sample_rate=MODEL_SAMPLE_RATE_HZ
-        )
+        audio_48k = self.synthesize_at_model_rate(text, voice)
         audio_8k = resample_poly(audio_48k.numpy(), up=1, down=_DOWNSAMPLE_FACTOR)
         # Обрезаем по краям диапазона после понижения частоты, а не до: у
         # полифазного фильтра есть небольшой выброс за пределы [-1, 1],

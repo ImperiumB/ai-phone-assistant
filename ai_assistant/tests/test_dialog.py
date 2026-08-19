@@ -1,6 +1,7 @@
 import logging
 import sys
 import threading
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from ai_assistant.service.dialog import (
     POINT_CONFIRM,
     POINT_FINISHED,
     POINT_START,
+    SCENARIO_DIRECTION,
     DialogEngine,
     LineProfile,
     Phrases,
@@ -1464,3 +1466,107 @@ def test_answer_of_a_service_without_recorded_audio_has_no_such_key():
     result = answer(engine(FakeKnowledge(RECORD)), conversationPoint=POINT_START)
 
     assert "FileIsOnStation" not in result
+
+
+# --- Куда переводить: частные мастера (UL-18819) ------------------------------
+#
+# У телефонного направления два номера приёма: обычный и для частных мастеров.
+# Боевой обработчик 13161 (GoTo_OperatorRedirect) выбирает между ними по
+# признаку линии, на которую позвонили, а не по теме разговора — база знаний
+# общая. Замер по данным: у направления «ТВ» обычный номер 7048, номер для ЧМ
+# 7040, и ровно 7040 — обычный номер направления «ЧМ_ТВ». То есть одна и та же
+# тема ведёт частного мастера в его собственный отдел.
+#
+# Пустой номер — сопровождение, и подстановки обычного номера вместо пустого
+# ЧМ-номера быть не должно: она увела бы клиента частного мастера в чужой отдел.
+
+TV_RECORD = KnowledgeRecord(
+    id=7,
+    question="телевизор не включается",
+    clarifying_question="Речь о телевизоре?",
+    positive_answers=["да"],
+    negative_answers=["нет"],
+    positive_reply="Соединяю",
+    scenario=SCENARIO_DIRECTION,
+    redirect_exten="7048",     # направление «ТВ»
+    redirect_exten_pm="7040",  # оно же для частного мастера, оно же «ЧМ_ТВ»
+)
+
+GROUP_LINE = "74951468847"     # номер группы линий master_profile()
+UNKNOWN_LINE = "74959999999"   # ни в одной группе не числится — набор по умолчанию
+SUPPORT_LINE = "7082"          # ТН 17 «Сопровождение»
+
+
+def tv_engine(record=TV_RECORD, **profile_fields):
+    return engine_with_groups(
+        master_profile(**profile_fields),
+        knowledge=FakeKnowledge(record),
+        support_exten=SUPPORT_LINE,
+    )
+
+
+def redirect_of(engine_obj, dialed):
+    """Довести разговор до перевода и вернуть номер, на который он ушёл."""
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+           recognizedText="телевизор не работает", dialedNumber=dialed)
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM,
+                    recognizedText="да", dialedNumber=dialed)
+    assert result["Action"] == ACTION_REDIRECT
+    return result["RedirectExten"]
+
+
+def test_regular_line_gets_the_regular_number_of_the_direction():
+    assert redirect_of(tv_engine(is_private_master=False), GROUP_LINE) == "7048"
+
+
+def test_private_master_line_gets_the_number_of_its_own_department():
+    assert redirect_of(tv_engine(is_private_master=True), GROUP_LINE) == "7040"
+
+
+def test_private_master_line_without_a_number_goes_to_support():
+    """Именно на сопровождение, а не на обычный номер направления: подстановка
+    увела бы клиента частного мастера в чужой отдел."""
+    record = replace(TV_RECORD, redirect_exten_pm="")
+
+    exten = redirect_of(tv_engine(record, is_private_master=True), GROUP_LINE)
+
+    assert exten == SUPPORT_LINE
+    assert exten != "7048"
+
+
+def test_empty_regular_number_goes_to_support():
+    record = replace(TV_RECORD, redirect_exten="")
+
+    assert redirect_of(tv_engine(record), GROUP_LINE) == SUPPORT_LINE
+
+
+def test_the_private_master_flag_belongs_to_the_line_not_to_the_topic():
+    """Одна и та же запись базы знаний ведёт звонок в разные отделы — решает
+    номер, на который позвонили."""
+    engine_obj = tv_engine(is_private_master=True)
+
+    assert redirect_of(engine_obj, GROUP_LINE) == "7040"
+    assert redirect_of(engine_obj, UNKNOWN_LINE) == "7048"
+
+
+def test_the_default_set_can_be_a_private_master_group_too():
+    """Набор по умолчанию — это тоже группа линий из справочника, и она может
+    оказаться группой частных мастеров."""
+    engine_obj = DialogEngine(
+        FakeKnowledge(TV_RECORD), PHRASES,
+        support_exten=SUPPORT_LINE, sales_exten="500", is_private_master=True,
+    )
+
+    assert redirect_of(engine_obj, UNKNOWN_LINE) == "7040"
+
+
+def test_support_exten_of_the_engine_serves_the_unknown_topic():
+    """Тема не определилась — перевод на сопровождение тем номером, который
+    приехал в посылке, а не зашитым в сервис."""
+    engine_obj = tv_engine(None)  # база знаний ничего не нашла
+
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                    recognizedText="во сколько вы открываетесь", dialedNumber=GROUP_LINE)
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["RedirectExten"] == SUPPORT_LINE

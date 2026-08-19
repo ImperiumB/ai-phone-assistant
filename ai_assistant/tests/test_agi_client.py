@@ -927,3 +927,30 @@ def test_the_name_is_remembered_when_the_case_is_created():
     source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
     source = source_path.read_text(encoding="utf-8")
     assert 'state["caller_id_name"] = erp_answer.caller_id_name' in source
+
+
+def test_forced_redirect_wins_over_the_topic_number():
+    """Отладочный переключатель уводит все переводы на один внутренний номер:
+    живые отделы дёргать незачем, за оператора садится сам заказчик."""
+    import ai_assistant.agi.ai_assistant as agi_module
+
+    original = agi_module.FORCED_REDIRECT_EXTEN
+    try:
+        agi_module.FORCED_REDIRECT_EXTEN = "7217"
+        assert agi_module.effective_redirect_exten("7021") == "7217"
+        assert agi_module.effective_redirect_exten("") == "7217"
+    finally:
+        agi_module.FORCED_REDIRECT_EXTEN = original
+
+
+def test_without_forced_redirect_the_topic_number_is_used():
+    """Пустой переключатель — обычное поведение: номер берётся из темы."""
+    import ai_assistant.agi.ai_assistant as agi_module
+
+    original = agi_module.FORCED_REDIRECT_EXTEN
+    try:
+        agi_module.FORCED_REDIRECT_EXTEN = ""
+        assert agi_module.effective_redirect_exten("7021") == "7021"
+        assert agi_module.effective_redirect_exten(None) == ""
+    finally:
+        agi_module.FORCED_REDIRECT_EXTEN = original

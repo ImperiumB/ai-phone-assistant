@@ -286,6 +286,11 @@ class ErpAnswer:
     result: str
     document_id: str
     message: str
+    #: Готовое имя звонящего для канала — по нему у оператора открывается
+    #: карточка обращения (UL-18819). Собирает его ERP целиком, вместе с
+    #: константой подмены; здесь оно только хранится. Значение по умолчанию
+    #: обязательно: ответ обработчика старой сборки этого ключа не содержит.
+    caller_id_name: str = ""
 
     @property
     def ok(self):
@@ -385,7 +390,27 @@ def parse_erp_response(items):
         result=pairs.get("Result", ""),
         document_id=document_id,
         message=pairs.get("Message", ""),
+        caller_id_name=pairs.get("callerIdName", ""),
     )
+
+
+def caller_id_name_command(caller_id_name):
+    # type: (Any) -> str
+    """Аргумент команды Set, подставляющей имя звонящего в канал (UL-18819).
+
+    Имя — единственное, по чему у оператора открывается карточка обращения:
+    клиент оператора (AsterModule, WorkForm) вырезает из полученного имени
+    константу «Текстовая подмена звонка» и берёт остаток вида DOC<код> за код
+    обращения. Поэтому имя не чистим и не досуживаем — что прислала ERP, то и
+    ставим: любое искажение (лишний strip, свои пробелы вместо табов) карточку
+    не откроет.
+
+    Имени нет — команды нет: перевод важнее карточки, и звонок в этом случае
+    уходит оператору ровно так же, как уходил раньше.
+    """
+    if not caller_id_name or not str(caller_id_name).strip():
+        return ""
+    return "CALLERID(name)={0}".format(caller_id_name)
 
 
 def remember_recognized_text(previous, point, text):
@@ -596,6 +621,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
         "point": "Start",
         # Код созданного обращения и то, что уже успели про него сообщить.
         "document_id": "",
+        # Готовое имя звонящего от ERP: по нему у оператора открывается
+        # карточка обращения, ставится в канал перед переводом (UL-18819).
+        "caller_id_name": "",
         "equipment_sent": False,
         "last_text": "",
         # Точка, реплика и признак молчания того шага, ответ на который сейчас
@@ -695,6 +723,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
                 erp_answer.message if erp_answer else "нет ответа"))
             return
         state["document_id"] = erp_answer.document_id
+        state["caller_id_name"] = erp_answer.caller_id_name
         # Тем же способом код обращения достаётся скрипту последней воли:
         # своей памяти основного скрипта он не видит, а при обрыве канала
         # основной скрипт умирает мгновенно и сообщить ничего не успевает.
@@ -751,6 +780,28 @@ def _main():  # pragma: no cover - требует живого канала Aste
             log=log_it,
         )
 
+    def push_caller_id_name():
+        """Подставить в канал имя звонящего, по которому откроется карточка.
+
+        Вызывать только внутри уже взятого `_agi_lock` и непосредственно перед
+        Goto: имя должно уехать вместе с самим переводом, а после Goto нас в
+        канале уже нет. Ровно так же устроен боевой recosintsite_V2 — Set и
+        Goto в одном захвате блокировки.
+
+        Номер звонящего (`CALLERID(num)`) при этом не трогаем: боевой бот его
+        подменяет, потому что у него звонок исходящий, а у нас входящий — там
+        лежит настоящий телефон клиента, и он оператору нужен.
+        """
+        command = caller_id_name_command(state["caller_id_name"])
+        if not command:
+            return
+        try:
+            agi.appexec("Set", command)
+        except Exception as error:
+            # Карточка — удобство, перевод — обязанность: сорвавшаяся
+            # подстановка имени не имеет права отменить сам перевод.
+            log_it("CALLERID NAME ERROR: {0}".format(error))
+
     def apply(answer):
         global _redirect_done
         step = decide_next_step(answer)
@@ -771,6 +822,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
             if REAL_REDIRECT:
                 log_it("REDIRECT -> {0}".format(answer.redirect_exten))
                 with _agi_lock:
+                    push_caller_id_name()
                     agi.appexec("Goto", "pstn-out,{0},1".format(answer.redirect_exten))
                     agi.set_variable("ScriptFinished", True)
                 _redirect_done = True
@@ -817,6 +869,10 @@ def _main():  # pragma: no cover - требует живого канала Aste
         if REAL_REDIRECT:
             try:
                 with _agi_lock:
+                    # Обращение к этому моменту создано, и оператору аварийного
+                    # перевода карточка нужна не меньше: он единственный, кто
+                    # узнает, о чём был звонок.
+                    push_caller_id_name()
                     agi.appexec("Goto", "pstn-out,{0},1".format(SUPPORT_FALLBACK_EXTEN))
                     agi.set_variable("ScriptFinished", True)
                 _redirect_done = True

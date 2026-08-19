@@ -476,11 +476,17 @@ def render_body(plan: Plan) -> list[str]:
     add("DECLARE")
     add("  v_dups NUMBER;")
     add("BEGIN")
+    # В списке выборки намеренно константа, а не то же выражение, что в
+    # GROUP BY. Считаем мы строки, само значение не нужно, а повтор выражения
+    # хоть и допустим, но подводит: SQL Developer на нём падает с ORA-00979,
+    # тогда как SQL*Plus тот же текст исполняет без вопросов. Разбираться,
+    # чем именно клиент искажает запрос, дороже, чем убрать повтор.
     add("  SELECT COUNT(*) INTO v_dups FROM (")
-    add("    SELECT " + SQL_NORMALIZE.format("QUESTION"))
+    add("    SELECT 1")
     add("      FROM ULTIMA.AI_KNOWLEDGE_BASE")
     add("     GROUP BY " + SQL_NORMALIZE.format("QUESTION"))
-    add("    HAVING COUNT(*) > 1);")
+    add("    HAVING COUNT(*) > 1")
+    add("  );")
     add("  IF v_dups > 0 THEN")
     add("    RAISE_APPLICATION_ERROR(-20002,")
     add("      'В ULTIMA.AI_KNOWLEDGE_BASE есть повторяющиеся вопросы (' || v_dups ||")

@@ -451,6 +451,21 @@ def render_sql(plan: Plan, generated_on: date | None = None) -> str:
             add("--   " + text)
 
     add("-- " + "=" * 70)
+    out.extend(render_body(plan))
+    return "\n".join(out)
+
+
+def render_body(plan: Plan) -> list[str]:
+    """Всё после шапки: преамбула, вставки, COMMIT, проверка.
+
+    Вынесено из render_sql, чтобы следующие досылки (sql/12 и дальше) писали
+    свою шапку, но не переписывали заново сами INSERT'ы. Экранирование и
+    защита от дублей — самая рискованная часть скрипта, у неё должно быть
+    одно место и одни тесты.
+    """
+    out: list[str] = []
+    add = out.append
+
     add("")
     add("SET DEFINE OFF")
     add("WHENEVER SQLERROR EXIT FAILURE ROLLBACK")
@@ -579,7 +594,7 @@ def render_sql(plan: Plan, generated_on: date | None = None) -> str:
     add("  FROM DUAL;")
     add("")
 
-    return "\n".join(out)
+    return out
 
 
 # --------------------------------------------------------------------------

@@ -21,6 +21,7 @@ from ai_assistant.agi.ai_assistant import (
     build_equipment_request,
     build_transfer_request,
     build_unknown_request,
+    caller_id_name_command,
     decide_failure_step,
     decide_next_step,
     direction_name_of,
@@ -825,3 +826,104 @@ def test_the_script_plays_the_recorded_file_instead_of_downloading_it():
 
     assert "if plays_from_station(answer):" in source
     assert "station_playback_path(answer.file_to_playback)" in source
+
+
+# --- Карточка обращения у оператора (UL-18819) --------------------------------
+#
+# Карточка открывается не по номеру звонящего и не по коду обращения в
+# переменной канала, а по ИМЕНИ звонящего: клиент оператора вырезает из имени
+# константу «Текстовая подмена звонка» и берёт остаток вида DOC<код> за код
+# обращения. Имя обязано стоять в канале ДО перевода — после Goto скрипта уже
+# нет. Строку целиком собирает ERP (обработчик 15422, ключ callerIdName),
+# скрипт её только подставляет.
+
+
+def test_erp_answer_carries_the_ready_caller_id_name():
+    answer = parse_erp_response([
+        {"Key": "Result", "Value": "OK"},
+        {"Key": "documentId", "Value": "1204567"},
+        {"Key": "callerIdName", "Value": "BX 3BOHOK \t\tDOC1204567"},
+    ])
+    assert answer.caller_id_name == "BX 3BOHOK \t\tDOC1204567"
+
+
+def test_old_erp_answer_without_the_caller_id_name_still_parses():
+    """Старая сборка обработчика ключа не присылает — звонок это ломать не должно."""
+    answer = parse_erp_response([
+        {"Key": "Result", "Value": "OK"},
+        {"Key": "documentId", "Value": "1204567"},
+    ])
+    assert answer.caller_id_name == ""
+
+
+def test_caller_id_command_is_built_for_asterisk():
+    assert caller_id_name_command("BX 3BOHOK \t\tDOC1204567") == (
+        "CALLERID(name)=BX 3BOHOK \t\tDOC1204567"
+    )
+
+
+def test_no_command_without_a_name():
+    """ERP не ответила, обращение не создалось, обработчик старый — переводим молча."""
+    assert caller_id_name_command("") == ""
+    assert caller_id_name_command(None) == ""
+    assert caller_id_name_command("   ") == ""
+
+
+def test_tabs_and_spaces_inside_the_name_survive_untouched():
+    """Клиент оператора вырезает константу дословно: искажённое имя карточку не откроет."""
+    name = "  BX 3BOHOK \t\t DOC42  "
+    assert caller_id_name_command(name) == "CALLERID(name)=" + name
+
+
+def caller_id_pushes_before_every_goto():
+    """Для каждого Goto — стояла ли подстановка имени в том же захвате _agi_lock."""
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    def is_goto(call):
+        return (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "appexec"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and call.args[0].value == "Goto"
+        )
+
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        if not any(getattr(item.context_expr, "id", "") == "_agi_lock" for item in node.items):
+            continue
+        pushed = False
+        for statement in node.body:
+            calls = [child for child in ast.walk(statement) if isinstance(child, ast.Call)]
+            if any(getattr(call.func, "id", "") == "push_caller_id_name" for call in calls):
+                pushed = True
+            if any(is_goto(call) for call in calls):
+                found.append(pushed)
+    return found
+
+
+def test_the_name_is_set_in_the_same_lock_before_every_goto():
+    """Порядок и общий захват — как у боевого recosintsite_V2: Set, потом Goto."""
+    pushes = caller_id_pushes_before_every_goto()
+    assert len(pushes) == 2  # обычный перевод и аварийный на сопровождение
+    assert all(pushes)
+
+
+def test_the_caller_number_is_left_alone():
+    """У боевого бота звонок исходящий, у нас входящий: в CALLERID(num) лежит
+    настоящий телефон клиента, и он оператору нужен."""
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+    # Именно форма присваивания: упоминание в комментарии — это объяснение,
+    # почему номер не трогаем, а не подмена.
+    assert "CALLERID(num)=" not in source
+
+
+def test_the_name_is_remembered_when_the_case_is_created():
+    """`_main()` требует живого канала Asterisk, поэтому проверяем по исходнику."""
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert 'state["caller_id_name"] = erp_answer.caller_id_name' in source

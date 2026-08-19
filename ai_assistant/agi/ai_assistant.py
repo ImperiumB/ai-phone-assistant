@@ -115,6 +115,15 @@ SERVICE_UNAVAILABLE_SOUND = "/var/lib/asterisk/sounds/ai_bot/service_unavailable
 # 17 в справочнике поменяют, править придётся оба места.
 SUPPORT_FALLBACK_EXTEN = "7082"
 
+# ВРЕМЕННО (UL-18819, 19.08.2026): все переводы уходят на этот внутренний
+# номер, минуя телефонное направление темы. Нужно, чтобы отлаживать открытие
+# карточки у оператора, не дёргая живые отделы: за оператора садится сам
+# заказчик. Пустая строка — обычное поведение, номер берётся из темы.
+#
+# Это отладочный костыль, а не настройка: убрать сразу после проверки,
+# иначе бот будет уводить на один номер вообще все звонки.
+FORCED_REDIRECT_EXTEN = "7217"
+
 # Сколько ждать agi-блокировку на вежливый отбой при завершении процесса.
 # Если не получилось за это время — канал занят зависшим потоком озвучки,
 # и вежливый hangup пропускается в пользу немедленного os._exit.
@@ -392,6 +401,20 @@ def parse_erp_response(items):
         message=pairs.get("Message", ""),
         caller_id_name=pairs.get("callerIdName", ""),
     )
+
+
+def effective_redirect_exten(exten):
+    # type: (Any) -> str
+    """Куда переводить на самом деле.
+
+    Обычно — туда, куда указала тема. Но пока идёт отладка карточки, все
+    переводы принудительно уходят на один внутренний номер: живые отделы
+    дёргать незачем, а за оператора садится сам заказчик. Возврат к обычному
+    поведению — очистить FORCED_REDIRECT_EXTEN.
+    """
+    if FORCED_REDIRECT_EXTEN:
+        return FORCED_REDIRECT_EXTEN
+    return str(exten or "")
 
 
 def caller_id_name_command(caller_id_name):
@@ -827,12 +850,16 @@ def _main():  # pragma: no cover - требует живого канала Aste
         if step == "listen":
             return True
         if step == "redirect":
+            # В обращение пишем настоящий номер темы, а переводим туда, куда
+            # велит отладочный переключатель: иначе в истории обращения будет
+            # враньё, и разбирать потом эти звонки станет нечем.
             report_transfer(answer.redirect_exten, direction_name_of(answer))
+            redirect_exten = effective_redirect_exten(answer.redirect_exten)
             if REAL_REDIRECT:
-                log_it("REDIRECT -> {0}".format(answer.redirect_exten))
+                log_it("REDIRECT -> {0}".format(redirect_exten))
                 with _agi_lock:
                     push_caller_id_name()
-                    agi.appexec("Goto", "pstn-out,{0},1".format(answer.redirect_exten))
+                    agi.appexec("Goto", "pstn-out,{0},1".format(redirect_exten))
                     agi.set_variable("ScriptFinished", True)
                 _redirect_done = True
             else:
@@ -882,7 +909,8 @@ def _main():  # pragma: no cover - требует живого канала Aste
                     # перевода карточка нужна не меньше: он единственный, кто
                     # узнает, о чём был звонок.
                     push_caller_id_name()
-                    agi.appexec("Goto", "pstn-out,{0},1".format(SUPPORT_FALLBACK_EXTEN))
+                    agi.appexec("Goto", "pstn-out,{0},1".format(
+                        effective_redirect_exten(SUPPORT_FALLBACK_EXTEN)))
                     agi.set_variable("ScriptFinished", True)
                 _redirect_done = True
             except Exception as redirect_error:

@@ -46,6 +46,15 @@ class ParsedFeed:
     #: Наборы остальных групп линий. Пусто — обработчик прежней сборки массива
     #: не присылает вовсе, и весь бот живёт на одном наборе, как раньше.
     line_groups: List[LineProfile] = field(default_factory=list)
+    #: Номер приёма ТН 17 «Сопровождение» — куда уезжает звонок во всех
+    #: непонятных ситуациях. Приезжает в посылке, а не зашит в сервис: правят
+    #: его в справочнике направлений. Пусто — номер у ТН 17 не заполнен либо
+    #: обработчик прежней сборки поля не присылает; тогда остаётся прежний
+    #: номер из настроек сервиса.
+    support_exten: str = ""
+    #: Раздел settings — такая же группа линий, и она тоже может оказаться
+    #: группой частных мастеров.
+    is_private_master: bool = False
 
 
 def _clean_list(raw: Any) -> List[str]:
@@ -167,6 +176,7 @@ def _parse_line_groups(
             ),
             phones=phones,
             line_group_id=_optional_int(item.get("line_group_id"), "line_group_id", where),
+            is_private_master=bool(item.get("is_private_master")),
         ))
     return groups
 
@@ -195,6 +205,10 @@ def _parse_record(raw: Dict[str, Any], answers: Dict[str, List[str]]) -> Knowled
             raw.get("telephone_direction_id"), "telephone_direction_id", where
         ),
         redirect_exten=str(raw.get("redirect_exten") or "").strip(),
+        # Второй номер того же направления — для звонков с линий частных
+        # мастеров. Необязателен: отдела частных мастеров у направления может
+        # не быть вовсе, и тогда такой звонок уходит на сопровождение.
+        redirect_exten_pm=str(raw.get("redirect_exten_pm") or "").strip(),
     )
 
 
@@ -221,6 +235,17 @@ def parse_feed(payload: Dict[str, Any]) -> ParsedFeed:
 
     records = [_parse_record(raw, answers) for raw in raw_records]
 
+    support_exten = str(payload.get("support_exten") or "").strip()
+    if not support_exten:
+        # Отвергать посылку из-за незаполненного номера нельзя: бот остался бы
+        # с устаревшей базой знаний. Но и молчать нельзя — без этой строки
+        # непонятно, почему непонятые звонки уезжают на прежний номер сервиса,
+        # а не на ТН 17.
+        log.warning(
+            "В посылке нет номера сопровождения (support_exten): непонятные "
+            "звонки продолжат уезжать на прежний номер из настроек сервиса"
+        )
+
     return ParsedFeed(
         generated_at=str(payload.get("generated_at") or ""),
         records=records,
@@ -235,6 +260,8 @@ def parse_feed(payload: Dict[str, Any]) -> ParsedFeed:
         content_hash=str(payload.get("content_hash") or "").strip(),
         audio_files=_parse_audio_files(settings),
         line_groups=_parse_line_groups(payload, phrases, answers),
+        support_exten=support_exten,
+        is_private_master=bool(settings.get("is_private_master")),
     )
 
 

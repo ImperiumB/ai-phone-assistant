@@ -258,10 +258,11 @@ DECLARE
   v_dups NUMBER;
 BEGIN
   SELECT COUNT(*) INTO v_dups FROM (
-    SELECT LOWER(TRIM(REGEXP_REPLACE(QUESTION, '[[:space:]]+', ' ')))
+    SELECT 1
       FROM ULTIMA.AI_KNOWLEDGE_BASE
      GROUP BY LOWER(TRIM(REGEXP_REPLACE(QUESTION, '[[:space:]]+', ' ')))
-    HAVING COUNT(*) > 1);
+    HAVING COUNT(*) > 1
+  );
   IF v_dups > 0 THEN
     RAISE_APPLICATION_ERROR(-20002,
       'В ULTIMA.AI_KNOWLEDGE_BASE есть повторяющиеся вопросы (' || v_dups ||

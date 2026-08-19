@@ -159,6 +159,11 @@ class LineProfile:
     #: Номера линий с галочкой. По ним набор и выбирается.
     phones: List[str] = field(default_factory=list)
     line_group_id: int = 0
+    #: Группа линий частных мастеров. Признак принадлежит линии, а не теме:
+    #: база знаний общая, а куда уйдёт звонок — зависит от того, на какой номер
+    #: позвонили. Звонок с такой линии уходит на второй номер того же
+    #: направления, в отдел частных мастеров (см. redirect_exten_pm записи).
+    is_private_master: bool = False
 
 
 def phone_key(number: str) -> str:
@@ -216,6 +221,7 @@ class DialogEngine:
         voice: str = "",
         audio_files: Optional[Dict[str, str]] = None,
         line_profiles: Optional[List[LineProfile]] = None,
+        is_private_master: bool = False,
     ):
         self._knowledge = knowledge
         self._support_exten = support_exten
@@ -230,6 +236,10 @@ class DialogEngine:
             voice=voice,
             audio_signature=audio_signature,
             audio_files=dict(audio_files or {}),
+            # Набор по умолчанию — это раздел settings посылки, то есть такая же
+            # группа линий из справочника, и она тоже может оказаться группой
+            # частных мастеров.
+            is_private_master=is_private_master,
         )
         self._line_profiles = list(line_profiles or [])
         # Раскладка «номер -> набор» считается один раз при сборке движка:
@@ -471,15 +481,24 @@ class DialogEngine:
             score, threshold, verdict, text, record.question,
         )
 
-    def _exten_for(self, record) -> str:
+    def _exten_for(self, record, profile: LineProfile) -> str:
         """Куда переводить звонок по этой записи базы знаний.
 
-        Основной путь — номер приёма самого телефонного направления. Два
-        старых сценария (продажи/сопровождение) оставлены ради обратной
+        Основной путь — номер приёма самого телефонного направления. Их у
+        направления два, и выбор между ними делает линия, а не тема: звонок с
+        линии частного мастера уходит на номер для ЧМ, в отдел частных
+        мастеров. Так же поступает боевой обработчик 13161
+        (GoTo_OperatorRedirect): PMRForSingleMaster против PWR.
+
+        Пустой номер для ЧМ — сопровождение, а не обычный номер направления.
+        Подстановка увела бы клиента частного мастера в чужой отдел, и 13161
+        её тоже не делает.
+
+        Два старых сценария (продажи/сопровождение) оставлены ради обратной
         совместимости: на них написаны прежние записи и тесты.
         """
-        if record.scenario == SCENARIO_DIRECTION and record.redirect_exten:
-            return record.redirect_exten
+        if profile.is_private_master:
+            return record.redirect_exten_pm or self._support_exten
         if record.redirect_exten:
             return record.redirect_exten
         if record.scenario == SCENARIO_SALES:
@@ -500,7 +519,7 @@ class DialogEngine:
         negative = profile.negative_answers or record.negative_answers
 
         if self._matches(text, positive):
-            exten = self._exten_for(record)
+            exten = self._exten_for(record, profile)
             extra = self._match_extra((record, state.score), trusted=True)
             return self._speak(
                 profile, record.positive_reply, ACTION_REDIRECT, POINT_FINISHED,

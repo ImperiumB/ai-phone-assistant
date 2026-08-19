@@ -243,12 +243,17 @@ def build_dialog_factory(
         return DialogEngine(
             knowledge,
             feed.phrases,
-            support_exten=support_exten,
+            # Номер ТН 17 «Сопровождение» приезжает в посылке: правят его в
+            # справочнике направлений, а не в настройках запуска сервиса.
+            # Пустой — номер у ТН 17 не заполнен либо посылка от прежнего
+            # обработчика; поведение остаётся прежним, а не выдуманным.
+            support_exten=feed.support_exten or support_exten,
             sales_exten=sales_exten,
             audio_signature=audio_signature_for(tts_model, voice),
             voice=voice,
             audio_files=feed.audio_files,
             line_profiles=profiles,
+            is_private_master=feed.is_private_master,
         )
 
     return factory

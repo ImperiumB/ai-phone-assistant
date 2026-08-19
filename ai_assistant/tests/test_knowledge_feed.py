@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from ai_assistant.service.knowledge_feed import FeedError, parse_feed
@@ -356,3 +358,63 @@ def test_confirm_not_heard_falls_back_to_the_service_default():
 
     feed = parse_feed(minimal_payload())
     assert feed.phrases.confirm_not_heard == DEFAULT_CONFIRM_NOT_HEARD
+
+
+# --- Сопровождение и частные мастера (UL-18819) -------------------------------
+#
+# Во всех непонятных ситуациях звонок уезжает на ТН 17 «Сопровождение» — то же
+# правило, что и в боевом обработчике 13161. Номер приезжает в посылке, а не
+# зашит в сервис: правят его в справочнике направлений.
+#
+# Линия частного мастера — отдельный случай: у направления два номера приёма, и
+# звонок с такой линии уходит на второй из них, в отдел частных мастеров.
+# Признак принадлежит линии, а не теме: база знаний общая.
+
+
+def test_support_exten_is_parsed_from_the_payload():
+    payload = minimal_payload()
+    payload["support_exten"] = "7082"
+
+    assert parse_feed(payload).support_exten == "7082"
+
+
+def test_payload_without_support_exten_is_applied_and_logged(caplog):
+    """У ТН 17 может быть не заполнен номер, а обработчик прежней сборки поля не
+    присылает вовсе. Отвергать из-за этого посылку нельзя — но и молчать тоже:
+    иначе непонятно, почему непонятые звонки уезжают не туда."""
+    with caplog.at_level(logging.WARNING, logger="aia.feed"):
+        feed = parse_feed(minimal_payload())
+
+    assert feed.support_exten == ""
+    assert "support_exten" in caplog.text
+
+
+def test_private_master_number_of_a_record_is_parsed():
+    payload = minimal_payload()
+    payload["records"][0]["redirect_exten_pm"] = "7040"
+
+    assert parse_feed(payload).records[0].redirect_exten_pm == "7040"
+
+
+def test_record_without_a_private_master_number_is_allowed():
+    """Отдела частных мастеров у направления может не быть вовсе."""
+    assert parse_feed(minimal_payload()).records[0].redirect_exten_pm == ""
+
+
+def test_line_group_is_marked_as_a_private_master_one():
+    feed = parse_feed(payload_with_groups(group(is_private_master=True)))
+
+    assert feed.line_groups[0].is_private_master is True
+
+
+def test_line_group_without_the_flag_is_a_regular_one():
+    assert parse_feed(payload_with_groups(group())).line_groups[0].is_private_master is False
+
+
+def test_the_default_set_carries_the_private_master_flag_too():
+    """`settings` — такая же группа линий, и она тоже может оказаться группой
+    частных мастеров."""
+    payload = minimal_payload()
+    payload["settings"]["is_private_master"] = True
+
+    assert parse_feed(payload).is_private_master is True

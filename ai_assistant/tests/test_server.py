@@ -1293,6 +1293,100 @@ def test_prewarm_plan_merges_groups_that_share_a_voice():
     assert plan["eugene"].count("Здравствуйте, чем могу помочь?") == 1
 
 
+# --- Сопровождение и частные мастера (UL-18819) -------------------------------
+
+
+def ask_line(client, linked_id, dialed, point, text=""):
+    response = client.post("/dialog", json={"prms": [
+        {"Key": "linkedId", "Value": linked_id},
+        {"Key": "conversationPoint", "Value": point},
+        {"Key": "recognizedText", "Value": text},
+        {"Key": "silenceDetected", "Value": "False"},
+        {"Key": "dialedNumber", "Value": dialed},
+    ]})
+    return {item["Key"]: item["Value"] for item in response.json()}
+
+
+def transferred_after_two_silences(client, linked_id):
+    ask(client, linked_id, "AskQuestion", silence=True)  # на первое молчание переспрашиваем
+    return ask(client, linked_id, "AskQuestion", silence=True)
+
+
+def test_support_exten_of_the_feed_serves_unclear_calls(tmp_path):
+    """Номер ТН 17 «Сопровождение» приезжает в посылке, а не зашит в сервис."""
+    _, client = feed_serving_app(tmp_path)
+    payload = feed_with_its_own_wording()
+    payload["support_exten"] = "7082"
+    client.post("/knowledge", json=payload)
+
+    assert transferred_after_two_silences(client, "call-support-1")["RedirectExten"] == "7082"
+
+
+def test_feed_without_support_exten_keeps_the_setting_of_the_service(tmp_path):
+    """У ТН 17 не заполнили номер (или посылка от прежнего обработчика) —
+    поведение остаётся прежним, а не выдуманным."""
+    _, client = feed_serving_app(tmp_path)
+    client.post("/knowledge", json=feed_with_its_own_wording())
+
+    assert transferred_after_two_silences(client, "call-support-2")["RedirectExten"] == "489"
+
+
+def feed_with_two_numbers(**group_overrides):
+    """Посылка про направление «ТВ»: обычный номер 7048, для частных мастеров
+    7040 (он же обычный номер направления «ЧМ_ТВ»)."""
+    payload = feed_with_a_second_group(**group_overrides)
+    payload["support_exten"] = "7082"
+    payload["records"][0]["redirect_exten"] = "7048"
+    payload["records"][0]["redirect_exten_pm"] = "7040"
+    return payload
+
+
+def test_call_from_a_private_master_line_goes_to_the_private_master_number(tmp_path):
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+    client.post("/knowledge", json=feed_with_two_numbers(is_private_master=True))
+
+    ask_line(client, "call-pm-1", "74951468847", "AskQuestion", "телевизор не работает")
+    answer = ask_line(client, "call-pm-1", "74951468847", "Confirm", "да")
+
+    assert answer["RedirectExten"] == "7040"
+
+
+def test_call_from_a_regular_line_goes_to_the_regular_number(tmp_path):
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+    client.post("/knowledge", json=feed_with_two_numbers(is_private_master=False))
+
+    ask_line(client, "call-pm-2", "74951468847", "AskQuestion", "телевизор не работает")
+    answer = ask_line(client, "call-pm-2", "74951468847", "Confirm", "да")
+
+    assert answer["RedirectExten"] == "7048"
+
+
+def test_private_master_line_without_a_number_goes_to_support(tmp_path):
+    """Не на 7048: обычный номер увёл бы клиента частного мастера в чужой отдел."""
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+    payload = feed_with_two_numbers(is_private_master=True)
+    del payload["records"][0]["redirect_exten_pm"]
+    client.post("/knowledge", json=payload)
+
+    ask_line(client, "call-pm-3", "74951468847", "AskQuestion", "телевизор не работает")
+    answer = ask_line(client, "call-pm-3", "74951468847", "Confirm", "да")
+
+    assert answer["RedirectExten"] == "7082"
+
+
+def test_feed_without_the_new_fields_is_accepted_as_before(tmp_path):
+    """Обработчик прежней сборки ни номера сопровождения, ни номера для частных
+    мастеров не присылает — посылка обязана примениться и разговор работать."""
+    _, _, client = voice_serving_app(tmp_path, default_voice="eugene")
+
+    response = client.post("/knowledge", json=feed_with_a_second_group())
+
+    assert response.status_code == 200
+    ask_line(client, "call-pm-4", "74951468847", "AskQuestion", "стиралка сломалась")
+    answer = ask_line(client, "call-pm-4", "74951468847", "Confirm", "да")
+    assert answer["RedirectExten"] == "7105"  # номер из самой записи, как и раньше
+
+
 def test_prewarm_skips_phrases_played_from_a_recorded_file():
     """Синтезировать то, что и так лежит на станции, незачем."""
     from ai_assistant.service.main import collect_speakable_phrases

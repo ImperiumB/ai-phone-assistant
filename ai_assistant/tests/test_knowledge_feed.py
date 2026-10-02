@@ -109,12 +109,20 @@ def test_record_without_question_is_rejected():
         parse_feed(payload)
 
 
-def test_record_without_clarifying_question_is_rejected():
-    """Такие записи фильтрует обработчик — до сервиса они доходить не должны."""
+def test_record_without_clarifying_question_is_no_longer_rejected():
+    """Правило изменилось 17.09.2026 (UL-19020).
+
+    Раньше пустой уточняющий вопрос считался браком: такие записи —
+    неразобранные реплики, их отсекал обработчик. Но у пустого поля появился
+    второй смысл — тема, которую уточнять не надо («соедините с оператором»).
+    Отличает их обработчик 15424 по IS_FROM_BOT, а сервис принимает обе.
+    """
     payload = minimal_payload()
     payload["records"][0]["clarifying_question"] = ""
-    with pytest.raises(FeedError):
-        parse_feed(payload)
+
+    feed = parse_feed(payload)
+
+    assert feed.records[0].clarifying_question == ""
 
 
 def test_missing_greeting_is_rejected():
@@ -418,3 +426,25 @@ def test_the_default_set_carries_the_private_master_flag_too():
     payload["settings"]["is_private_master"] = True
 
     assert parse_feed(payload).is_private_master is True
+
+
+def test_record_without_clarifying_question_is_accepted():
+    """Пустой уточняющий вопрос — это тема «соединить с оператором», а не брак.
+
+    UL-19020: клиент прямым текстом просит человека, переспрашивать его не
+    надо. Движок диалога такую запись переводит сразу (dialog.py, ветка
+    «уточнять нечего»), а до 17.09.2026 посылка с ней отвергалась целиком.
+    """
+    payload = minimal_payload()
+    payload["records"].append({
+        "id": 47,
+        "question": "переключить на оператора",
+        "clarifying_question": None,
+        "equipment_type": "",
+    })
+
+    feed = parse_feed(payload)
+
+    operator = [r for r in feed.records if r.id == 47]
+    assert len(operator) == 1
+    assert operator[0].clarifying_question == ""

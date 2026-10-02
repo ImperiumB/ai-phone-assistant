@@ -7,8 +7,10 @@ import pytest
 import requests
 
 from ai_assistant.agi.ai_assistant import (
+    ECHO_GUARD_S,
     ERP_INTEGRATION,
     ERP_TIMEOUT_S,
+    MAX_PLAYBACK_GUESS_S,
     REAL_REDIRECT,
     REASON_CALL_TIMEOUT,
     REASON_SCRIPT_ERROR,
@@ -21,11 +23,15 @@ from ai_assistant.agi.ai_assistant import (
     build_equipment_request,
     build_transfer_request,
     build_unknown_request,
+    block_listening_until,
     caller_id_name_command,
     decide_failure_step,
     decide_next_step,
     direction_name_of,
     erp_url,
+    listening_blocked,
+    playback_duration_s,
+    reset_listening_block,
     parse_dialog_response,
     parse_erp_response,
     plays_from_station,
@@ -310,6 +316,31 @@ def test_failed_erp_answer_is_not_ok():
     assert answer.ok is False
     # Нулевой код — это отсутствие обращения, запоминать его нельзя.
     assert answer.document_id == ""
+
+
+def test_erp_answer_tells_to_skip_the_bot_after_a_drop():
+    # Повторный звонок после сброса на боте: ERP велит не включать бота и
+    # называет, куда переводить (разбор 3-й волны 01.10.2026).
+    answer = parse_erp_response([
+        {"Key": "Result", "Value": "OK"},
+        {"Key": "documentId", "Value": "269061515"},
+        {"Key": "skipBot", "Value": "1"},
+        {"Key": "redirectExten", "Value": "7082"},
+        {"Key": "directionName", "Value": "Сопровождение (redirect)"},
+    ])
+    assert answer.skip_bot is True
+    assert answer.redirect_exten == "7082"
+    assert answer.direction_name == "Сопровождение (redirect)"
+
+
+def test_erp_answer_without_skip_keys_keeps_the_bot_on():
+    # Обработчик старой сборки ключей не шлёт — бот работает как раньше.
+    answer = parse_erp_response([
+        {"Key": "Result", "Value": "OK"},
+        {"Key": "documentId", "Value": "1204567"},
+    ])
+    assert answer.skip_bot is False
+    assert answer.redirect_exten == ""
 
 
 def test_erp_answer_of_unexpected_shape_does_not_explode():
@@ -908,7 +939,8 @@ def caller_id_pushes_before_every_goto():
 def test_the_name_is_set_in_the_same_lock_before_every_goto():
     """Порядок и общий захват — как у боевого recosintsite_V2: Set, потом Goto."""
     pushes = caller_id_pushes_before_every_goto()
-    assert len(pushes) == 2  # обычный перевод и аварийный на сопровождение
+    # Обычный перевод, аварийный на сопровождение и обход бота после сброса.
+    assert len(pushes) == 3
     assert all(pushes)
 
 
@@ -954,3 +986,102 @@ def test_without_forced_redirect_the_topic_number_is_used():
         assert agi_module.effective_redirect_exten(None) == ""
     finally:
         agi_module.FORCED_REDIRECT_EXTEN = original
+
+
+# --- Пока бот говорит, линию не слушаем ------------------------------------
+#
+# Живой звонок 20.08.2026: клиент ответил «нет», а распозналось «да», и бот
+# увёл его в отдел по чужой теме. Уточняющий вопрос кончается словами
+# «...ответьте, пожалуйста, да или нет», длится 5.80 с и играется приложением
+# `background` — то есть управление возвращается скрипту мгновенно, и всё
+# время фразы её собственное эхо из трубки шло в распознавание. Распознанный
+# отрезок закончился через 0.3 секунды после конца фразы бота.
+
+
+@pytest.fixture(autouse=True)
+def _clean_listening_block():
+    reset_listening_block()
+    yield
+    reset_listening_block()
+
+
+def wav_file(tmp_path, name, seconds, rate=8000):
+    import wave
+
+    path = tmp_path / name
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"\x00\x00" * int(rate * seconds))
+    return path
+
+
+def test_playback_duration_is_read_from_the_file(tmp_path):
+    wav_file(tmp_path, "phrase.wav", seconds=5.8)
+    assert playback_duration_s(str(tmp_path / "phrase.wav"), "") == pytest.approx(5.8, abs=0.01)
+
+
+def test_playback_duration_finds_the_file_without_extension(tmp_path):
+    """Астериску имя передаётся без расширения — искать надо оба варианта."""
+    wav_file(tmp_path, "phrase.wav", seconds=2.0)
+    assert playback_duration_s(str(tmp_path / "phrase"), "") == pytest.approx(2.0, abs=0.01)
+
+
+def test_playback_duration_falls_back_to_the_text_length(tmp_path):
+    """Записанные фразы лежат в шаре станции, прочитать их скрипт не может.
+    Грубая оценка лучше, чем совсем не глохнуть на время своей фразы."""
+    guess = playback_duration_s(str(tmp_path / "нет-такого-файла"), "а" * 140)
+    assert guess == pytest.approx(10.0, abs=0.01)
+
+
+def test_playback_duration_guess_is_capped(tmp_path):
+    assert playback_duration_s("", "а" * 100000) == MAX_PLAYBACK_GUESS_S
+
+
+def test_listening_is_blocked_while_the_bot_speaks():
+    now = 1000.0
+    block_listening_until(now + 5.8 + ECHO_GUARD_S)
+
+    assert listening_blocked(now)
+    assert listening_blocked(now + 5.8)          # фраза ещё звучит
+    assert listening_blocked(now + 6.0)          # эхо хвоста ещё идёт
+    assert not listening_blocked(now + 6.2)      # запас кончился, слушаем
+
+
+def test_listening_block_only_extends():
+    """Две фразы подряд не должны укорачивать друг другу глухоту."""
+    now = 1000.0
+    block_listening_until(now + 10.0)
+    block_listening_until(now + 2.0)
+
+    assert listening_blocked(now + 9.0)
+
+
+def test_listening_is_open_by_default():
+    assert not listening_blocked()
+
+
+def test_service_named_question_is_sent_even_from_the_confirm_point():
+    """Сервис назвал реплику явно (бот угадал не то, клиент сказал «нет») —
+    событие уходит и из точки подтверждения, и после молчания."""
+    answer = parse_dialog_response([
+        {"Key": "Action", "Value": "Redirect"},
+        {"Key": "UnknownQuestion", "Value": "True"},
+        {"Key": "UnknownQuestionText", "Value": "здравствуйте это ремонт"},
+        {"Key": "WrongGuess", "Value": "нужна уборка квартиры"},
+    ])
+
+    assert answer.unknown_question_text == "здравствуйте это ремонт"
+    assert answer.wrong_guess == "нужна уборка квартиры"
+    assert should_send_unknown_question(answer, "Confirm", "да", False)
+    assert should_send_unknown_question(answer, "AskQuestion", "", True)
+
+
+def test_unknown_request_carries_the_wrong_guess_only_when_given():
+    with_guess = build_unknown_request("12345", "здравствуйте это ремонт", "нужна уборка квартиры")
+    plain = build_unknown_request("12345", "во сколько вы открываетесь")
+
+    pairs = {item["Key"]: item["Value"] for item in with_guess["prms"]} if "prms" in with_guess else None
+    assert "wrongGuess" in str(with_guess) and "нужна уборка квартиры" in str(with_guess)
+    assert "wrongGuess" not in str(plain)

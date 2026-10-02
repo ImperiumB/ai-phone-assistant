@@ -335,3 +335,185 @@ def test_real_knowledge_base_has_variants_for_every_record():
             "у записи %s всего %s синонимов — живая речь так не покрывается"
             % (record["id"], len(variants))
         )
+
+
+def test_record_with_scenario_but_no_clarifying_question_is_searchable():
+    """«Соедините с оператором» приезжает из ERP без уточняющего вопроса и с
+    готовым сценарием — искаться обязана (UL-19020). Реплика, записанная
+    add() на разметку, сценария не имеет и в индекс по-прежнему не попадает."""
+    from ai_assistant.service.knowledge import KnowledgeBase, KnowledgeRecord
+
+    operator = KnowledgeRecord(id=47, question="переключить на оператора",
+                               clarifying_question="", scenario="direction")
+    raw = KnowledgeRecord(id=99, question="заказать пиццу", clarifying_question="")
+    embedder = FakeEmbedder({"переключить на оператора": [1.0, 0.0, 0.0]})
+    kb = KnowledgeBase([operator, raw], embedder, threshold=0.5)
+
+    found = kb.best_match("переключить на оператора")
+
+    assert found is not None and found[0].id == 47
+    assert all(r.id != 99 for r in kb._searchable_records)
+
+
+# --- корпус живых реплик как второе мнение (corpus_knn.py) ---------------------
+
+def _unit(*coords):
+    v = np.array(coords, dtype=np.float32)
+    return v / np.linalg.norm(v)
+
+
+def _corpus_base(corpus_threshold=0.6):
+    from ai_assistant.service.corpus_knn import CorpusIndex
+
+    washer = KnowledgeRecord(id=1, question="стиральная машина не отжимает",
+                             clarifying_question="Ремонт стиральной машины?", telephone_direction_id=53)
+    dryer = KnowledgeRecord(id=37, question="сушильная машина не сушит",
+                            clarifying_question="Ремонт сушильной машины?", telephone_direction_id=53)
+    complaint = KnowledgeRecord(id=28, question="мастер приезжал но техника снова не работает",
+                                clarifying_question="У вас жалоба на ремонт?", telephone_direction_id=17)
+    operator = KnowledgeRecord(id=63, question="соедините с оператором", clarifying_question="",
+                               scenario="Соединить с оператором", telephone_direction_id=17)
+    # Четыре оси: X — стиралки, Y — сопровождение, Z — сушилка, W — «что-то
+    # ещё» (им реплика клиента отдаляется от формулировок, не меняя соседей).
+    embedder = FakeEmbedder({
+        "стиральная машина не отжимает": [1.0, 0.0, 0.0, 0.0],
+        "сушильная машина не сушит": [0.9, 0.0, 0.44, 0.0],
+        "мастер приезжал но техника снова не работает": [0.0, 1.0, 0.0, 0.0],
+        "соедините с оператором": [0.0, 0.7, 0.0, 0.7],
+        # реплики клиента
+        "машинка чё-то того": [0.6, 0.0, 0.0, 0.8],       # к стиралке всего 0.6 — ниже порога 0.75
+        "сушилка не сушит совсем": [0.85, 0.0, 0.5, 0.0],
+        "мне мастер звонил": [0.0, 0.95, 0.3, 0.0],
+        "не знаю что-то сломалось": [0.72, 0.69, 0.0, 0.0],  # ровно между стиралкой и сопровождением
+    })
+    # Корпус: три соседа про стиралки (ТН 53) у оси X, три про оператора (ТН 17) у оси Y.
+    corpus = CorpusIndex(
+        [_unit(1, 0.1, 0, 0), _unit(1, -0.1, 0, 0), _unit(1, 0, 0.1, 0),
+         _unit(0, 1, 0.1, 0), _unit(0.1, 1, 0, 0), _unit(0, 1, 0, 0)],
+        [53, 53, 53, 17, 17, 17],
+        ["стиралка не крутит", "машинка течёт", "не отжимает", "жду мастера", "мастер звонил", "по заявке"],
+        k=3, threshold=corpus_threshold)
+    return KnowledgeBase([washer, dryer, complaint, operator], embedder, threshold=0.75, corpus=corpus)
+
+
+def test_confident_corpus_vote_is_trusted_even_below_phrase_threshold():
+    base = _corpus_base()
+
+    found = base.resolve("машинка чё-то того")
+
+    assert found.trusted and found.source == "corpus"
+    assert found.record.id == 1
+    assert found.score == pytest.approx(0.6, abs=0.01)
+    assert found.vote.direction_id == 53 and found.vote.confidence > 0.9
+
+
+def test_corpus_picks_the_closest_record_of_the_direction():
+    """У одного направления две записи — берётся та, чья формулировка ближе."""
+    base = _corpus_base()
+
+    found = base.resolve("сушилка не сушит совсем")
+
+    assert found.source == "corpus" and found.record.id == 37
+
+
+def test_operator_direction_prefers_record_without_clarifying_question():
+    """Повторное обращение уходит на оператора сразу, а не через вопрос про жалобу,
+    хотя формулировка жалобы к реплике ближе."""
+    base = _corpus_base()
+
+    found = base.resolve("мне мастер звонил")
+
+    assert found.trusted and found.source == "corpus"
+    assert found.record.id == 63 and not found.record.clarifying_question
+
+
+def test_unsure_corpus_leaves_the_decision_to_phrases():
+    """Соседи разделились — корпус не дотягивает до порога уверенности, решает
+    порог по формулировке."""
+    base = _corpus_base(corpus_threshold=0.9)
+
+    found = base.resolve("не знаю что-то сломалось")
+
+    assert found.source == "phrases" and not found.trusted
+    assert found.record.id == 1 and found.vote is not None
+    assert found.vote.confidence < 0.9
+
+
+def test_corpus_direction_without_a_record_falls_back_to_phrases():
+    from ai_assistant.service.corpus_knn import CorpusIndex
+
+    record = KnowledgeRecord(id=1, question="стиральная машина не отжимает",
+                             clarifying_question="Ремонт?", telephone_direction_id=53)
+    embedder = FakeEmbedder({"стиральная машина не отжимает": [1.0, 0.0, 0.0],
+                             "проектор моргает": [0.0, 0.0, 1.0]})
+    corpus = CorpusIndex([_unit(0, 0, 1)], [59], ["проектор не включается"], k=1, threshold=0.5)
+    base = KnowledgeBase([record], embedder, threshold=0.75, corpus=corpus)
+
+    found = base.resolve("проектор моргает")
+
+    assert found.source == "phrases" and not found.trusted
+    assert found.vote.direction_id == 59
+
+
+def test_resolve_without_corpus_matches_best_match():
+    record = KnowledgeRecord(id=1, question="стиральная машина не отжимает", clarifying_question="Ремонт?")
+    embedder = FakeEmbedder({"стиральная машина не отжимает": [1.0, 0.0, 0.0],
+                             "стиралка не отжимает": [0.95, 0.3, 0.0]})
+    base = KnowledgeBase([record], embedder, threshold=0.75)
+
+    found = base.resolve("стиралка не отжимает")
+    match = base.best_match("стиралка не отжимает")
+
+    assert found.record is match[0] and found.score == pytest.approx(match[1])
+    assert found.trusted and found.source == "phrases" and found.vote is None
+    assert base.resolve("   ") is None
+
+
+# --- ограничения на голос корпуса (разбор второго этапа теста, 24.09.2026) ------------
+
+def test_content_words_drop_greetings_and_fillers():
+    from ai_assistant.service.knowledge import content_words
+
+    assert content_words("угу здравствуйте") == []
+    assert content_words("да алло здрасьте") == []
+    assert content_words("Здравствуйте, у нас сломалась духовка") == ["сломалась", "духовка"]
+    assert content_words("вызвать мастера на на дом") == ["вызвать", "мастера", "дом"]
+
+
+def test_corpus_does_not_vote_on_content_free_utterance():
+    """«Угу здравствуйте» уходило на оператора: соседи — такие же пустые начала
+    повторных звонков. Теперь такая реплика корпусу не показывается."""
+    base = _corpus_base()
+
+    found = base.resolve("мне мастер звонил")           # два содержательных слова — голос есть
+    empty = base.resolve_vector(base._embedder.encode(["search_query: мне мастер звонил"])[0], content_words=1)
+
+    assert found.source == "corpus"
+    assert empty.source == "phrases"
+
+
+def test_operator_needs_a_higher_confidence_than_a_subject():
+    from ai_assistant.service.corpus_knn import CorpusIndex
+
+    record = KnowledgeRecord(id=63, question="соедините с оператором", clarifying_question="",
+                             scenario="Соединить с оператором", telephone_direction_id=17)
+    washer = KnowledgeRecord(id=1, question="стиральная машина не отжимает",
+                             clarifying_question="Ремонт?", telephone_direction_id=53)
+    embedder = FakeEmbedder({"соедините с оператором": [0.0, 1.0, 0.0],
+                             "стиральная машина не отжимает": [1.0, 0.0, 0.0],
+                             "вызвать мастера на дом": [0.3, 0.95, 0.0],
+                             "стиралка не крутит": [0.95, 0.3, 0.0]})
+    # Соседи с весом близость^4: при «вызвать мастера» 6 за оператора (вес 1)
+    # и 4 за стиралки (вес ~0.85) — уверенность ~0.64, ниже порога оператора.
+    vectors = [_unit(0.3, 0.95, 0.0)] * 6 + [_unit(0.55, 0.83, 0.0)] * 4
+    corpus = CorpusIndex(vectors, [17] * 6 + [53] * 4, ["x"] * 10, k=10, threshold=0.5, operator_threshold=0.8)
+    base = KnowledgeBase([record, washer], embedder, threshold=0.75, corpus=corpus)
+
+    operator = base.resolve("вызвать мастера на дом")
+    subject = base.resolve("стиралка не крутит")
+
+    # Неуверенный оператор — не к формулировкам, а переспросить: записи нет,
+    # решению не верим, но голос в резолюции остаётся для лога.
+    assert 0.5 <= operator.vote.confidence < 0.8
+    assert operator.source == "corpus-unsure" and operator.record is None and not operator.trusted
+    assert subject.source == "corpus" and subject.record.id == 1

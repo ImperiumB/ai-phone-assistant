@@ -8,3 +8,16 @@ ai_assistant/knowledge_feed_cache.json
 # Образцы голосов пересобираются скриптом tools/generate_voice_samples.py:
 # полмегабайта на голос, в гите им делать нечего.
 /voice_samples/
+# Корпус реплик клиентов (UL-19020): десятки мегабайт машинных данных,
+# пересобирается tools/build_corpus.py. В гите ему делать нечего.
+/dataset/
+# Логи сервиса и отладочные записи звонков: живые разговоры клиентов.
+/logs/
+/debug_audio/
+# Библиотека записанных голосов: голоса реальных операторов, собирается
+# tools/build_voice_library.py из дублей с GPU-сервера.
+/ai_assistant/voices/
+# Индекс корпуса kNN (сотни мегабайт), пересобирается tools/build_corpus_index.py.
+*.npz
+# Страница сравнения голосов с вшитым аудио операторов (15 МБ).
+/docs/voice-candidates.html

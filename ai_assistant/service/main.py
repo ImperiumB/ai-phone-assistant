@@ -1,9 +1,11 @@
 """Сборка сервиса: gRPC-поток распознавания плюс HTTP-ручки диалога и синтеза."""
 import logging
 import os
+import re
 import sys
 import threading
 import time
+import wave
 from collections import deque
 from concurrent import futures
 from dataclasses import replace
@@ -55,6 +57,7 @@ from ai_assistant.service.dialog import (  # noqa: E402
     Phrases,
     prms_to_dict,
 )
+from ai_assistant.service.corpus_knn import CorpusIndex  # noqa: E402
 from ai_assistant.service.knowledge import (  # noqa: E402
     KnowledgeBase,
     SentenceTransformerEmbedder,
@@ -78,10 +81,137 @@ from ai_assistant.service.stt.base import (  # noqa: E402
     pad_short_utterance,
     prepare_audio,
 )
-from ai_assistant.service.tts import SileroSynthesizer, TtsCache  # noqa: E402
+from ai_assistant.service.tts import (  # noqa: E402
+    AUDIO_PIPELINE_VERSION,
+    RecordedSynthesizer,
+    TtsCache,
+    VoiceLibrary,
+    VoskSynthesizer,
+    create_synthesizer,
+)
 from ai_assistant.service.vad import SileroVoiceDetector, UtteranceSegmenter  # noqa: E402
 
 log = logging.getLogger("aia")
+
+
+def load_corpus_index(cfg):
+    """Индекс корпуса живых реплик; None — бот решает только по формулировкам.
+
+    Отсутствие файла — не ошибка, а обычное состояние новой установки: индекс
+    собирается отдельно из записей звонков (tools/build_corpus_index.py) и
+    кладётся рядом с сервисом руками.
+    """
+    path = cfg.corpus_index_path
+    if not path or not os.path.exists(path):
+        log.info("Корпус реплик не подключён (%s нет) — решают только формулировки", path or "путь пуст")
+        return None
+    corpus = CorpusIndex.load(path, k=cfg.corpus_k, threshold=cfg.corpus_threshold,
+                              operator_threshold=cfg.corpus_operator_threshold,
+                              min_words=cfg.corpus_min_words)
+    log.info("Корпус реплик: %d реплик, %d соседей, порог уверенности %.2f, оператор от %.2f, "
+             "содержательных слов от %d (%s)", len(corpus), corpus.k, corpus.threshold,
+             corpus.operator_threshold, corpus.min_words, path)
+    return corpus
+
+
+def prewarm_recognition(engine, knowledge) -> float:
+    """Прогреть распознавание и поиск по смыслу до первого живого звонка.
+
+    Обе модели грузятся лениво, на первом обращении, и платит за это первый
+    позвонивший после каждого перезапуска — тишиной в трубку. Замеры на живых
+    звонках: 20.08.2026 в 15:17 распознавание 5.7 с плюс эмбеддер 3.4 с — девять
+    секунд, клиент не дождался и положил трубку; 21.08.2026 в 13:32 — 5.8 плюс
+    1.5. Следующие реплики в тех же звонках укладывались в 1.5-2.5 с.
+
+    Прогрев не гасится настройкой PREWARM_TTS: та про синтез сотен фраз и
+    вправду бывает лишней, а здесь одна короткая прогонка на старте.
+    Оба отказа проглатываются — на приём звонков прогрев не влияет.
+    """
+    started = time.time()
+    try:
+        # Секунда тишины: распознаётся в пустую строку, но модель поднимает
+        # ровно так же, как настоящая речь.
+        silence = b"\x00\x00" * int(engine.target_sample_rate)
+        engine.transcribe(silence)
+    except Exception:
+        log.exception("Прогрев распознавания не удался, первый звонок будет медленным")
+    try:
+        # База знаний закодирована при загрузке, но кодирование ЗАПРОСА идёт
+        # своим путём (другой префикс, батч из одной строки) и на первом вызове
+        # тоже стоит секунды.
+        knowledge.best_match("прогрев")
+    except Exception:
+        log.exception("Прогрев поиска по смыслу не удался")
+    return time.time() - started
+
+
+def start_keepwarm(engine, knowledge, seconds: int, stop_event=None):
+    """Держать модели горячими, пока никто не звонит.
+
+    Прогрева на старте мало. Замер на живых звонках: сервис работал сутки,
+    вчера через него прошло несколько разговоров, а первая реплика следующего
+    утра (21.08.2026, 13:32) снова считалась 5.8 с вместо обычных 1.5-2.5.
+    Модели давно загружены — но у процесса, который сутки ничего не делал,
+    Windows урезает рабочий набор и выгружает страницы с весами на диск;
+    первое обращение поднимает их обратно, и платит за это позвонивший.
+
+    Лечится тем же, чем и прогрев на старте, только повторяемым: короткая
+    прогонка раз в несколько минут держит страницы в памяти. Стоит она
+    десятки миллисекунд, поэтому на живые звонки не влияет даже если совпадёт
+    с разговором.
+
+    Возвращает поток (или None, если подогрев выключен нулём).
+    """
+    if seconds <= 0:
+        log.info("Периодический подогрев моделей выключен")
+        return None
+
+    stop = stop_event or threading.Event()
+
+    def loop() -> None:
+        # wait() вместо sleep(): выключение сервиса не должно ждать целый цикл.
+        while not stop.wait(seconds):
+            log.debug("Подогрев моделей: %.0f мс", prewarm_recognition(engine, knowledge) * 1000)
+
+    thread = threading.Thread(target=loop, name="keepwarm", daemon=True)
+    thread.start()
+    log.info("Подогрев моделей каждые %s с", seconds)
+    return thread
+
+
+def dump_utterance(directory: str, session_id: str, text: str, pcm: bytes, sample_rate: int) -> str:
+    """Сохранить реплику, как её услышал движок, рядом с тем, что он услышал.
+
+    Нужно для разбора жалоб вида «я сказал нет, а распозналось да»: без записи
+    спорить не с чем — лог показывает только результат, а был ли в этом отрезке
+    голос клиента, голос бота (эхо собственной фразы) или обрывок, по логу не
+    видно. 20.08.2026 такой разбор пришлось вести по длительностям файлов
+    синтеза и арифметике, и он всё равно остался догадкой.
+
+    Пишется только когда задан AIA_DEBUG_AUDIO_DIR: постоянно складывать
+    записи разговоров на диск нельзя.
+    """
+    if not directory:
+        return ""
+    try:
+        os.makedirs(directory, exist_ok=True)
+        # Распознанное — в имя файла: слушать записи проще, когда рядом видно,
+        # что движок из них сделал. Пусто — значит движок не услышал ничего.
+        label = re.sub(r"[^\w\-]+", "_", text.strip(), flags=re.UNICODE)[:60] or "ПУСТО"
+        name = "{0}_{1}_{2}.wav".format(
+            time.strftime("%H%M%S"), re.sub(r"[^\w.\-]+", "_", session_id) or "нет-звонка", label,
+        )
+        path = os.path.join(directory, name)
+        with wave.open(path, "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(sample_rate)
+            writer.writeframes(pcm)
+        return path
+    except Exception:
+        # Отладочная запись не имеет права уронить распознавание живого звонка.
+        log.exception("Не удалось сохранить реплику звонка [%s] в %s", session_id, directory)
+        return ""
 
 
 class SpeechServicer(speech_pb2_grpc.SpeechServicer):
@@ -93,6 +223,7 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
         active_timelines: Optional[Dict[str, Tuple[CallTimeline, dict]]] = None,
         timelines_lock: Optional[threading.Lock] = None,
         max_active_timelines: int = MAX_ACTIVE_TIMELINES,
+        debug_audio_dir: str = "",
     ):
         self._segmenter_factory = segmenter_factory
         self._engine = engine
@@ -106,6 +237,7 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
         self._active_timelines = active_timelines
         self._timelines_lock = timelines_lock or threading.Lock()
         self._max_active_timelines = max_active_timelines
+        self._debug_audio_dir = debug_audio_dir
 
     def Recognize(self, request_iterator, context):
         segmenter = self._segmenter_factory()
@@ -181,6 +313,11 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                             del self._active_timelines[oldest_session_id]
                         self._active_timelines[session_id] = (timeline, snapshot)
                 log.info("STT [%s]: %s | %s", session_id, text, timeline.durations())
+                dumped = dump_utterance(
+                    self._debug_audio_dir, session_id, text, audio, self._engine.target_sample_rate
+                )
+                if dumped:
+                    log.info("Реплика сохранена: %s", dumped)
 
                 yield speech_pb2.StreamResponse(
                     type=speech_pb2.StreamResponse.FINAL, text=text
@@ -199,6 +336,33 @@ def resolve_voice(feed_voice: Optional[str], default_voice: str) -> str:
     return (feed_voice or "").strip() or default_voice
 
 
+def effective_voice(voice: str, texts, library, fallback_voice: str,
+                    label: str = "") -> str:
+    """Голос, которым набор фраз будет звучать на самом деле.
+
+    Библиотечный голос — на весь набор или никак: в одном разговоре клиент не
+    должен услышать два разных голоса (заказчик, 24.09.2026). Не хватает хотя бы
+    одной фразы (аналитик завёл новую тему, а прогон на видеокарте ещё не
+    делали) — набор целиком остаётся на запасном синтезе, а недостающие фразы
+    уходят в лог: по ним и делается следующий прогон.
+    """
+    if library is None or voice not in library.voices:
+        return voice
+    # texts может быть функцией: набор фраз считается только когда он нужен,
+    # без библиотеки фабрика диалога базу знаний не трогает вовсе.
+    if callable(texts):
+        texts = texts()
+    missing = library.missing(voice, texts)
+    if not missing:
+        return voice
+    log.warning(
+        "%sголос %s не включён: в библиотеке нет %d из %d фраз, набор говорит голосом %s. Нет: %s",
+        (label + ": ") if label else "", voice, len(missing), len(texts), fallback_voice,
+        " | ".join(missing[:5]) + (" | …" if len(missing) > 5 else ""),
+    )
+    return fallback_voice
+
+
 def audio_signature_for(tts_model: str, voice: str) -> str:
     """Подпись звука — модель синтеза плюс действующий голос.
 
@@ -209,8 +373,13 @@ def audio_signature_for(tts_model: str, voice: str) -> str:
     переходе v4_ru -> v5_ru, когда в подписи не было модели. Голос сюда
     передаётся уже действующий (после resolve_voice), а не сырой из посылки:
     иначе пустое поле справочника обесценило бы кэш станции на ровном месте.
+
+    Третья часть подписи — версия обработки звука (AUDIO_PIPELINE_VERSION).
+    Модель и голос могут остаться теми же, а звук — измениться: так вышло с
+    нормализацией громкости 31.08.2026. Без этой части правка осталась бы в
+    коде и никогда не доехала бы до трубки.
     """
-    return "{0}|{1}".format(tts_model, voice)
+    return "{0}|{1}|{2}".format(tts_model, voice, AUDIO_PIPELINE_VERSION)
 
 
 def build_dialog_factory(
@@ -218,6 +387,8 @@ def build_dialog_factory(
     sales_exten: str,
     tts_model: str = "",
     default_voice: str = "",
+    library=None,
+    fallback_voice: str = "",
 ):
     """Как из присланной посылки получается движок диалога.
 
@@ -234,12 +405,18 @@ def build_dialog_factory(
 
     def factory(knowledge, feed: ParsedFeed) -> DialogEngine:
         voice = resolve_voice(feed.voice, default_voice)
+        voice = effective_voice(
+            voice, lambda: collect_speakable_phrases(feed.phrases, knowledge, feed.audio_files),
+            library, fallback_voice or default_voice, "набор по умолчанию")
         profiles = []
         for group in feed.line_groups:
             # Голос группы, потом голос набора по умолчанию, потом голос
             # настроек запуска: пустое поле справочника — это «оставить как
             # есть», а не «синтезировать ничем».
             group_voice = resolve_voice(group.voice, voice)
+            group_voice = effective_voice(
+                group_voice, lambda g=group: collect_speakable_phrases(g.phrases, knowledge, g.audio_files),
+                library, fallback_voice or default_voice, "группа линий %s" % group.line_group_id)
             profiles.append(replace(
                 group,
                 voice=group_voice,
@@ -273,10 +450,13 @@ class KnowledgeState:
     """
 
     def __init__(self, cache_path, embedder, threshold=0.64, dialog_factory=None,
-                 fallback_engine=None, default_voice=""):
+                 fallback_engine=None, default_voice="", corpus=None):
         self._cache_path = cache_path
         self._embedder = embedder
         self._threshold = threshold
+        # Корпус живых реплик один на все посылки: он не приезжает из ERP,
+        # а собирается из записей звонков и меняется только с перезапуском.
+        self._corpus = corpus
         self._dialog_factory = dialog_factory
         # Движок на базе из файла — он обслуживает звонки, пока первой посылки
         # не было, и разговоры при первой же подмене надо перенимать у него.
@@ -306,7 +486,7 @@ class KnowledgeState:
         self.voice = default_voice
 
     def apply(self, feed: ParsedFeed) -> None:
-        knowledge = KnowledgeBase(feed.records, self._embedder, self._threshold)
+        knowledge = KnowledgeBase(feed.records, self._embedder, self._threshold, corpus=self._corpus)
         phrase_count = sum(1 + len(r.question_variants) for r in feed.records)
         voice = resolve_voice(feed.voice, self._default_voice)
         engine = self._dialog_factory(knowledge, feed) if self._dialog_factory else None
@@ -551,13 +731,42 @@ def build_http_app(
     return app
 
 
+def setup_logging(log_dir: str) -> None:
+    """Консоль плюс файл с ротацией.
+
+    До 24.09.2026 лог жил только в окне сервиса: разбирать жалобы второго
+    этапа теста («сказал нет — всё равно соединили») пришлось по истории
+    обращений в ERP, без строк SIMILARITY/CORPUS, по которым и видно, кто и
+    почему решил. Файл — logs/aia.log, 10 МБ × 5.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            os.path.join(log_dir, "aia.log"), maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+    except OSError as error:
+        root.warning("Лог в файл не ведётся: %s", error)
+
+
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    setup_logging(os.environ.get("AIA_LOG_DIR", "logs"))
     cfg = load_config()
 
     log.info("Загружаем эмбеддер %s", cfg.embedder_model)
     embedder = SentenceTransformerEmbedder(cfg.embedder_model)
-    knowledge = load_knowledge_base(cfg.knowledge_path, embedder, cfg.similarity_threshold)
+    corpus = load_corpus_index(cfg)
+    knowledge = load_knowledge_base(
+        cfg.knowledge_path, embedder, cfg.similarity_threshold, corpus=corpus
+    )
 
     log.info("Загружаем движок распознавания %s", cfg.stt_engine)
     engine = create_engine(
@@ -566,9 +775,33 @@ def main() -> None:
         model_name=cfg.gigaam_model,
     )
 
-    log.info("Загружаем VAD и синтез")
+    log.info("Загружаем VAD и синтез (%s)", cfg.tts_engine)
     detector = SileroVoiceDetector()
-    tts_cache = TtsCache(SileroSynthesizer(cfg.tts_model), cfg.tts_cache_dir)
+    synthesizer = create_synthesizer(
+        cfg.tts_engine, cfg.tts_model, cfg.vosk_tts_model_path
+    )
+    # Голос, которым говорит набор, если его библиотечный голос неполон.
+    # Это голос движка синтеза, а не библиотеки: cfg.tts_voice может сам
+    # оказаться библиотечным (руководитель выбрал Иванову и по умолчанию).
+    fallback_voice = cfg.tts_voice
+    library = VoiceLibrary(cfg.voice_library_dir)
+    if library.voices:
+        synthesizer = RecordedSynthesizer(library, synthesizer)
+        if fallback_voice in library.voices:
+            fallback_voice = VoskSynthesizer.DEFAULT_VOICE
+        log.info("Библиотека голосов %s: %s",
+                 cfg.voice_library_dir,
+                 ", ".join("%s (%d фраз)" % (v, library.phrase_count(v)) for v in library.voices))
+    else:
+        library = None
+        log.info("Библиотека голосов не подключена (%s пуста или нет) — только синтез", cfg.voice_library_dir)
+    tts_cache = TtsCache(synthesizer, cfg.tts_cache_dir)
+    # Подпись звука берётся у самого синтезатора, а не из cfg.tts_model:
+    # у vosk модель задаётся папкой, и cfg.tts_model при нём вообще не
+    # участвует в синтезе. Возьми мы его — подпись осталась бы прежней при
+    # смене движка, а станция продолжила бы играть скачанные файлы прежним
+    # голосом. Ровно так уже вышло при переходе v4_ru -> v5_ru.
+    tts_model_id = synthesizer.model_id
 
     phrases = Phrases(
         greeting="Здравствуйте, чем могу помочь?",
@@ -577,13 +810,16 @@ def main() -> None:
         silence="Вы меня слышите?",
         wrong_guess="Тогда подскажите, пожалуйста, что вас интересует?",
     )
-    audio_signature = audio_signature_for(cfg.tts_model, cfg.tts_voice)
+    file_voice = effective_voice(
+        cfg.tts_voice, lambda: collect_speakable_phrases(phrases, knowledge), library, fallback_voice, "база из файла")
+    audio_signature = audio_signature_for(tts_model_id, file_voice)
     dialog_engine = DialogEngine(
         knowledge,
         phrases,
         support_exten=SUPPORT_EXTEN,
         sales_exten=SALES_EXTEN,
         audio_signature=audio_signature,
+        voice=file_voice,
     )
 
     def prewarm(plan: List[Tuple[str, List[str]]]) -> None:
@@ -594,7 +830,11 @@ def main() -> None:
             done, elapsed = prewarm_tts_cache(tts_cache, prewarm_voice, speakable)
             log.info("Синтез прогрет: %s из %s фраз за %.1f с", done, len(speakable), elapsed)
 
-    prewarm([(cfg.tts_voice, collect_speakable_phrases(phrases, knowledge))])
+    prewarm([(file_voice, collect_speakable_phrases(phrases, knowledge))])
+
+    log.info("Прогреваем распознавание и поиск по смыслу")
+    log.info("Распознавание и поиск прогреты за %.1f с", prewarm_recognition(engine, knowledge))
+    start_keepwarm(engine, knowledge, cfg.keepwarm_seconds)
 
     # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
     # без этого /metrics копил бы данные, пока не кончится память.
@@ -622,9 +862,14 @@ def main() -> None:
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
     speech_pb2_grpc.add_SpeechServicer_to_server(
-        SpeechServicer(segmenter_factory, engine, timeline_sink, active_timelines, timelines_lock),
+        SpeechServicer(
+            segmenter_factory, engine, timeline_sink, active_timelines, timelines_lock,
+            debug_audio_dir=cfg.debug_audio_dir,
+        ),
         server,
     )
+    if cfg.debug_audio_dir:
+        log.info("Реплики звонков сохраняются в %s", cfg.debug_audio_dir)
     server.add_insecure_port("0.0.0.0:{0}".format(cfg.grpc_port))
     server.start()
     log.info("gRPC слушает порт %s", cfg.grpc_port)
@@ -637,10 +882,12 @@ def main() -> None:
         embedder=embedder,
         threshold=cfg.similarity_threshold,
         dialog_factory=build_dialog_factory(
-            SUPPORT_EXTEN, SALES_EXTEN, cfg.tts_model, cfg.tts_voice
+            SUPPORT_EXTEN, SALES_EXTEN, tts_model_id, cfg.tts_voice,
+            library=library, fallback_voice=fallback_voice,
         ),
         fallback_engine=dialog_engine,
         default_voice=cfg.tts_voice,
+        corpus=corpus,
     )
     if knowledge_state.restore_from_disk():
         log.info(

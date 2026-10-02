@@ -35,3 +35,11 @@ soundfile==0.14.0
 # На машине без установленного ffmpeg это даёт бинарник как запасной вариант —
 # см. _ensure_ffmpeg_on_path() в service/stt/gigaam_engine.py.
 imageio-ffmpeg==0.6.0
+# Vosk-TTS (Alpha Cephei, Apache 2.0) — боевой синтез речи с 04.09.2026.
+# Пришёл на смену Silero: у той модель v5_ru под CC BY-NC, то есть
+# некоммерческая, а бот работает на боевой линии (UL-17568, 03.09.2026).
+# Тянет onnxruntime и tokenizers — версии зафиксированы внутри пакета.
+# Саму модель (vosk-model-tts-ru-0.7-multi, ~236 МБ) pip НЕ ставит:
+# библиотека качает её с GitHub, а со станции GitHub недоступен. Модель
+# кладётся на диск руками, путь задаётся в AIA_VOSK_TTS_MODEL_PATH.
+vosk-tts==0.3.61

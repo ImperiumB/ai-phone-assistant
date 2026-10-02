@@ -187,7 +187,15 @@ def _parse_record(raw: Dict[str, Any], answers: Dict[str, List[str]]) -> Knowled
         id=_optional_int(raw.get("id"), "id", where),
         question=_required_text(raw, "question", where),
         question_variants=_clean_list(raw.get("phrases")),
-        clarifying_question=_required_text(raw, "clarifying_question", where),
+        # Необязателен намеренно. Пустой уточняющий вопрос — это не брак
+        # посылки, а тема, которую уточнять не надо: клиент прямым текстом
+        # просит человека, и переспрашивать его значит злить (UL-19020,
+        # разбор аналитик КЦ 17.09.2026 — четыре таких звонка за день).
+        #
+        # Такую запись движок диалога переводит сразу на сопровождение —
+        # см. ветку «уточнять нечего» в dialog.py. Мусор сюда не попадает:
+        # обработчик 15424 отсекает неразобранные реплики по IS_FROM_BOT.
+        clarifying_question=str(raw.get("clarifying_question") or "").strip(),
         positive_answers=list(answers["positive"]),
         negative_answers=list(answers["negative"]),
         positive_reply=str(raw.get("positive_reply") or "").strip(),

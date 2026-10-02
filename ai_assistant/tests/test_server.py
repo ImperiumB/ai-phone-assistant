@@ -14,7 +14,7 @@ import speech_pb2  # noqa: E402
 import speech_pb2_grpc  # noqa: E402
 
 from ai_assistant.service.dialog import DialogEngine, Phrases
-from ai_assistant.service.knowledge import KnowledgeRecord
+from ai_assistant.service.knowledge import KnowledgeRecord, Resolution
 from ai_assistant.service.main import GRPC_SHUTDOWN_GRACE_SECONDS, SpeechServicer, build_http_app
 from ai_assistant.service.vad import SegmentEvent
 
@@ -63,6 +63,9 @@ class FakeKnowledge:
 
     def best_match(self, text):
         return self._record(), 0.9
+
+    def resolve(self, text):
+        return Resolution(self._record(), 0.9, True, "phrases")
 
     def add(self, question):
         return KnowledgeRecord(id=2, question=question)
@@ -113,6 +116,55 @@ def test_utterance_event_becomes_final_response():
     requests = FakeRequestIterator("call-1", [pcm(400), pcm(400)])
 
     responses = list(servicer.Recognize(requests, context=None))
+    finals = [r for r in responses if r.type == speech_pb2.StreamResponse.FINAL]
+    assert len(finals) == 1
+    assert finals[0].text == "стиральная машина не отжимает"
+
+
+def test_utterance_is_not_saved_to_disk_by_default():
+    """Записи разговоров на диске — отладочный режим, а не поведение по умолчанию."""
+    script = [[SegmentEvent(kind="utterance", pcm=pcm(800))]]
+    servicer = SpeechServicer(lambda: FakeSegmenter(script), FakeEngine(), timeline_sink=[])
+
+    list(servicer.Recognize(FakeRequestIterator("call-1", [pcm(400)]), context=None))
+    # Ничего не упало и никуда не записалось: проверяем сам факт работы без каталога.
+    assert servicer._debug_audio_dir == ""
+
+
+def test_debug_audio_dir_saves_the_utterance_with_its_recognition(tmp_path):
+    """Разбор жалоб «я сказал нет, а распозналось да» без записи невозможен:
+    по логу не отличить голос клиента от эха собственной фразы бота."""
+    script = [[SegmentEvent(kind="utterance", pcm=pcm(800))]]
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter(script), FakeEngine(), timeline_sink=[],
+        debug_audio_dir=str(tmp_path),
+    )
+
+    list(servicer.Recognize(FakeRequestIterator("call-7", [pcm(400)]), context=None))
+
+    saved = list(tmp_path.glob("*.wav"))
+    assert len(saved) == 1
+    name = saved[0].name
+    assert "call-7" in name
+    # Распознанное — в имени файла, иначе записи придётся сопоставлять с логом вручную.
+    assert "отжимает" in name
+    import wave
+    with wave.open(str(saved[0])) as handle:
+        assert handle.getframerate() == FakeEngine.target_sample_rate
+        assert handle.getnframes() > 0
+
+
+def test_broken_debug_audio_dir_does_not_break_recognition(tmp_path):
+    """Отладочная запись не имеет права уронить живой звонок."""
+    busy = tmp_path / "занято"
+    busy.write_text("это файл, а не каталог", encoding="utf-8")
+    script = [[SegmentEvent(kind="utterance", pcm=pcm(800))]]
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter(script), FakeEngine(), timeline_sink=[],
+        debug_audio_dir=str(busy),
+    )
+
+    responses = list(servicer.Recognize(FakeRequestIterator("call-8", [pcm(400)]), context=None))
     finals = [r for r in responses if r.type == speech_pb2.StreamResponse.FINAL]
     assert len(finals) == 1
     assert finals[0].text == "стиральная машина не отжимает"
@@ -1446,3 +1498,124 @@ def test_long_utterance_reaches_the_engine_untouched():
     list(servicer.Recognize(FakeRequestIterator("call-1", [b"\x00" * 512]), None))
 
     assert engine_obj.received == [long_pcm]
+
+
+# --- Прогрев и подогрев моделей --------------------------------------------
+#
+# Первая реплика после долгой паузы считалась 5.7-5.8 с вместо обычных
+# 1.5-2.5 (живые звонки 20.08.2026 15:17 и 21.08.2026 13:32). Во втором
+# случае сервис работал сутки и звонки через него уже проходили, так что
+# дело не в загрузке моделей: у простаивающего процесса система урезает
+# рабочий набор и выгружает страницы с весами на диск.
+
+
+class WarmupSpy:
+    """Считает, сколько раз её прогревали."""
+
+    target_sample_rate = 8000
+
+    def __init__(self):
+        self.transcribed = []
+        self.queried = []
+
+    def transcribe(self, pcm):
+        self.transcribed.append(len(pcm))
+        return ""
+
+    def best_match(self, text):
+        self.queried.append(text)
+        return None
+
+
+def test_prewarm_touches_both_recognition_and_search():
+    from ai_assistant.service.main import prewarm_recognition
+
+    spy = WarmupSpy()
+    prewarm_recognition(spy, spy)
+
+    assert len(spy.transcribed) == 1
+    # Секунда звука по два байта на отсчёт — иначе движок отбросит отрезок как
+    # слишком короткий и модель не поднимется.
+    assert spy.transcribed[0] == WarmupSpy.target_sample_rate * 2
+    assert len(spy.queried) == 1
+
+
+def test_prewarm_survives_a_broken_engine():
+    """Прогрев не имеет права помешать сервису принимать звонки."""
+    from ai_assistant.service.main import prewarm_recognition
+
+    class Broken:
+        target_sample_rate = 8000
+
+        def transcribe(self, pcm):
+            raise RuntimeError("движок не поднялся")
+
+        def best_match(self, text):
+            raise RuntimeError("эмбеддер не поднялся")
+
+    prewarm_recognition(Broken(), Broken())  # не бросает
+
+
+def test_keepwarm_is_off_when_interval_is_zero():
+    from ai_assistant.service.main import start_keepwarm
+
+    spy = WarmupSpy()
+    assert start_keepwarm(spy, spy, 0) is None
+    assert spy.transcribed == []
+
+
+def test_keepwarm_repeats_the_warmup_while_nobody_calls():
+    from ai_assistant.service.main import start_keepwarm
+
+    spy = WarmupSpy()
+    stop = threading.Event()
+    thread = start_keepwarm(spy, spy, 0.01, stop_event=stop)
+    try:
+        deadline = time.time() + 5
+        while len(spy.transcribed) < 3 and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+    assert len(spy.transcribed) >= 3
+    assert len(spy.queried) >= 3
+
+
+def test_keepwarm_stops_promptly_when_asked():
+    """Ждём событие, а не спим циклами: выключение сервиса не должно ждать
+    целый интервал подогрева."""
+    from ai_assistant.service.main import start_keepwarm
+
+    spy = WarmupSpy()
+    stop = threading.Event()
+    thread = start_keepwarm(spy, spy, 30, stop_event=stop)
+    stop.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+
+
+def test_effective_voice_keeps_a_library_voice_only_when_every_phrase_is_recorded(caplog):
+    """В одном разговоре — один голос: библиотечный включается на весь набор
+    или не включается вовсе (заказчик, 24.09.2026)."""
+    import logging
+
+    from ai_assistant.service.main import effective_voice
+
+    class Library:
+        voices = ["voice-a"]
+
+        def missing(self, voice, texts):
+            return [t for t in texts if "новая" in t]
+
+    library = Library()
+    with caplog.at_level(logging.WARNING):
+        full = effective_voice("voice-a", ["Здравствуйте"], library, "s3", "группа 1")
+        partial = effective_voice("voice-a", lambda: ["Здравствуйте", "новая тема"], library, "s3", "группа 2")
+        plain = effective_voice("s4", lambda: (_ for _ in ()).throw(AssertionError("фразы не нужны")), library, "s3")
+
+    assert full == "voice-a"
+    assert partial == "s3"
+    assert plain == "s4"
+    assert "группа 2" in caplog.text and "новая тема" in caplog.text

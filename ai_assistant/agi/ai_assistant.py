@@ -20,6 +20,7 @@ import sys
 import time
 import traceback
 import uuid
+import wave
 from dataclasses import dataclass
 from threading import RLock
 from typing import Any, Dict, List
@@ -129,8 +130,36 @@ FORCED_REDIRECT_EXTEN = ""
 # и вежливый hangup пропускается в пользу немедленного os._exit.
 LOCK_ACQUIRE_TIMEOUT_S = 1.0
 
+# Сколько ещё не слушать линию после того, как бот договорил. Эхо собственной
+# фразы возвращается из трубки с задержкой линии, и без запаса последние слова
+# успевают попасть в распознавание уже после того, как проигрывание кончилось.
+ECHO_GUARD_S = 0.3
+
+# Оценка длительности фразы, когда файл прочитать не удалось. 14 знаков в
+# секунду — темп синтеза Silero на русском (замер по фразам из кэша). Оценка
+# нужна только как страховка: обычно длительность берётся из самого файла.
+SPEECH_CHARS_PER_SECOND = 14.0
+
+# Потолок для этой оценки. Ошибка в большую сторону дороже, чем в меньшую:
+# лишняя секунда глухоты бота — мелкая неприятность, а полминуты — сорванный
+# разговор.
+MAX_PLAYBACK_GUESS_S = 20.0
+
 _agi_lock = RLock()  # AGI — построчный протокол над stdin/stdout, не потокобезопасен
 _redirect_done = False
+
+# До какого момента звук с линии не отдаётся распознаванию. Пока бот говорит,
+# слушать нельзя: подавления эха у нас нет, и собственная фраза бота,
+# вернувшаяся из трубки, распознаётся как реплика клиента. 20.08.2026 на живом
+# звонке ответ «нет» приехал как «да» — уточняющий вопрос кончается словами
+# «...ответьте, пожалуйста, да или нет», и распознанный отрезок закончился
+# через 0.3 секунды после конца этой фразы. В точке подтверждения такая
+# подмена выбирает клиенту не тот отдел.
+#
+# Плата за это — потерянное перебивание: ответ, начатый до конца фразы, не
+# услышат. Перебивание и раньше работало случайно, а не по замыслу: именно
+# оно и ловило эхо.
+_listen_blocked_until = 0.0
 
 
 @dataclass
@@ -157,6 +186,13 @@ class DialogAnswer:
     #: пуста. Единственное поле ответа не строкой — это признак, а не значение,
     #: и решение по нему принимается прямо здесь, в скрипте.
     unknown_question: bool = False
+    #: Какую реплику записать на разметку, если не последнюю услышанную: бот
+    #: угадал тему не так, клиент ответил «нет», и на разметку едет исходный
+    #: вопрос, а не «нет» и не то, что было сказано потом. wrong_guess — какую
+    #: тему бот предлагал; оба поля появились 24.09.2026, старый сервис их не
+    #: шлёт, и тогда всё работает как раньше.
+    unknown_question_text: str = ""
+    wrong_guess: str = ""
     #: Заранее записанный аудиофайл вместо синтеза: `file_to_playback` — это не
     #: имя файла кэша, а путь к уже лежащему на станции файлу. Скачивать его
     #: неоткуда, играется как есть. Признака нет — поведение прежнее, поэтому
@@ -187,6 +223,8 @@ def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
         matched_question=pairs.get("MatchedQuestion", ""),
         similarity=pairs.get("Similarity", ""),
         unknown_question=pairs.get("UnknownQuestion", "").strip().lower() in ("true", "1", "yes"),
+        unknown_question_text=pairs.get("UnknownQuestionText", ""),
+        wrong_guess=pairs.get("WrongGuess", ""),
         file_is_on_station=pairs.get("FileIsOnStation", "").strip().lower() in ("true", "1", "yes"),
         voice=pairs.get("Voice", ""),
     )
@@ -240,6 +278,59 @@ def station_playback_path(raw):
     if path.startswith("/"):
         return path
     return RECORDED_AUDIO_DIR + path.lstrip("/")
+
+
+def playback_duration_s(path, text):
+    # type: (str, str) -> float
+    """Сколько времени будет звучать фраза.
+
+    Нужно, чтобы знать, до какого момента не слушать линию. Дожидаться конца
+    проигрывания нельзя: уточняющий вопрос и приветствие играются приложением
+    `background`, которое возвращает управление сразу, — иначе бот не услышал
+    бы ответ, начатый сразу после вопроса.
+
+    Астериску имя файла передаётся без расширения, поэтому ищем оба варианта.
+    """
+    for candidate in (path, path + ".wav"):
+        if not candidate:
+            continue
+        try:
+            handle = wave.open(candidate, "rb")
+        except Exception:
+            continue
+        try:
+            rate = handle.getframerate() or 8000
+            return handle.getnframes() / float(rate)
+        finally:
+            handle.close()
+    # Файла нет или он не читается (записанная фраза лежит в шаре станции, а
+    # не рядом со скриптом): оцениваем по длине текста. Лучше грубая оценка,
+    # чем совсем не глохнуть на время собственной фразы.
+    return min(MAX_PLAYBACK_GUESS_S, len(text or "") / SPEECH_CHARS_PER_SECOND)
+
+
+def block_listening_until(deadline):
+    # type: (float) -> None
+    """Не отдавать звук распознаванию до указанного момента.
+
+    Только продлевает: две фразы подряд не должны укорачивать друг другу
+    глухоту, а порядок вызовов тут не гарантирован.
+    """
+    global _listen_blocked_until
+    if deadline > _listen_blocked_until:
+        _listen_blocked_until = deadline
+
+
+def listening_blocked(now=None):
+    # type: (float) -> bool
+    return (time.time() if now is None else now) < _listen_blocked_until
+
+
+def reset_listening_block():
+    # type: () -> None
+    """Снять глухоту. Нужно тестам и повторному запуску в одном процессе."""
+    global _listen_blocked_until
+    _listen_blocked_until = 0.0
 
 
 def tts_params(text, voice):
@@ -300,6 +391,15 @@ class ErpAnswer:
     #: константой подмены; здесь оно только хранится. Значение по умолчанию
     #: обязательно: ответ обработчика старой сборки этого ключа не содержит.
     caller_id_name: str = ""
+    #: ERP велит не включать бота: с этого номера сегодня уже бросали трубку
+    #: на боте, и второй раз человек должен сразу попасть к оператору по
+    #: диалплану своей линии (руководитель проекта, разбор 3-й волны 01.10.2026). Номер
+    #: приёма и название направления ERP называет сама — скрипту остаётся
+    #: только Goto. Старая сборка обработчика этих ключей не шлёт, поэтому
+    #: значения по умолчанию обязательны: без них бот работает как раньше.
+    skip_bot: bool = False
+    redirect_exten: str = ""
+    direction_name: str = ""
 
     @property
     def ok(self):
@@ -370,17 +470,24 @@ def build_transfer_request(document_id, redirect_exten, direction_name, recogniz
     ])
 
 
-def build_unknown_request(document_id, recognized_text):
-    # type: (Any, str) -> Dict[str, Any]
+def build_unknown_request(document_id, recognized_text, wrong_guess=""):
+    # type: (Any, str, str) -> Dict[str, Any]
     """Бот не нашёл ответа — вопрос клиента едет в справочник ERP.
 
     Отсекать короткие тексты и точные повторы не нужно: этим занимается сам
     обработчик, и делает это по всей базе, а не по одному звонку.
+
+    wrong_guess — тема, которую бот предложил и получил «нет»: обработчик
+    пишет её в историю обращения. Пустая — параметр не уходит вовсе, старый
+    обработчик его не знает.
     """
-    return build_erp_request(EVENT_UNKNOWN, [
+    pairs = [
         ("documentId", document_id),
         ("recognizedText", recognized_text),
-    ])
+    ]
+    if wrong_guess:
+        pairs.append(("wrongGuess", wrong_guess))
+    return build_erp_request(EVENT_UNKNOWN, pairs)
 
 
 def parse_erp_response(items):
@@ -400,6 +507,9 @@ def parse_erp_response(items):
         document_id=document_id,
         message=pairs.get("Message", ""),
         caller_id_name=pairs.get("callerIdName", ""),
+        skip_bot=pairs.get("skipBot", "").strip().lower() in ("1", "true"),
+        redirect_exten=pairs.get("redirectExten", "").strip(),
+        direction_name=pairs.get("directionName", "").strip(),
     )
 
 
@@ -463,8 +573,24 @@ def direction_name_of(answer):
     27 «БТ-МБТ (ХД/Кофе/УБТ/Пылесосы/Швейки)» и так далее, расхождений нет).
     Когда база знаний переедет в справочники ERP, название направления
     начнёт приходить своим ключом, и менять придётся только эту функцию.
+
+    У темы может не быть типа оборудования вовсе — жалобы, клининг,
+    ветеринар, окна, дезинсекция техники не касаются. Тогда берём название
+    сценария: оно есть у любой записи базы знаний.
+
+    Без этого в истории обращения оставалось голое «Звонок переведён, номер
+    приёма 6023», и куда ушёл звонок, узнать было неоткуда (UL-19020,
+    обращение 268218049 — жалоба на ремонт БТ, ТН 48).
     """
-    return answer.equipment_type
+    if answer.equipment_type:
+        return answer.equipment_type
+    # У записей «соедините с оператором» сценарий — служебная константа
+    # redirect_direction; в истории обращения она читалась как абракадабра
+    # («Направление: redirect_direction», фидбек 24.09.2026). Человеку —
+    # по-русски.
+    if answer.scenario == "redirect_direction":
+        return "оператор"
+    return answer.scenario
 
 
 def should_send_equipment(answer, already_sent):
@@ -503,11 +629,16 @@ def should_send_unknown_question(answer, point, recognized_text, silence):
     """
     if answer is None:
         return False
+    if answer.action != ACTION_REDIRECT:
+        return False
+    # Сервис назвал реплику явно — значит, промах случился раньше (бот
+    # угадал не то, клиент сказал «нет»), и что было сказано на этом шаге —
+    # молчание, «да» другой теме, что угодно — уже неважно.
+    if answer.unknown_question_text.strip():
+        return True
     if silence or not recognized_text.strip():
         return False
     if point == POINT_CONFIRM:
-        return False
-    if answer.action != ACTION_REDIRECT:
         return False
     return bool(answer.unknown_question)
 
@@ -647,6 +778,11 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # Готовое имя звонящего от ERP: по нему у оператора открывается
         # карточка обращения, ставится в канал перед переводом (UL-18819).
         "caller_id_name": "",
+        # Решение ERP «бота не включать» и куда вместо него перевести: см.
+        # ErpAnswer.skip_bot. Заполняется при создании обращения.
+        "skip_bot": False,
+        "skip_exten": "",
+        "skip_direction": "",
         "equipment_sent": False,
         "last_text": "",
         # Точка, реплика и признак молчания того шага, ответ на который сейчас
@@ -704,8 +840,19 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # Playback блокирует до конца фразы — обязателен перед Goto и Hangup.
         application = "Playback" if blocking else "background"
         log_it("TIMING playback_start {0:.3f}".format(time.time()))
+        # Глохнем на время собственной фразы ДО её запуска, а не после: с
+        # `background` управление вернётся мгновенно, и первые же куски звука
+        # с линии уже будут содержать эхо начала фразы.
+        duration = playback_duration_s(path, answer.text_to_speak)
+        block_listening_until(time.time() + duration + ECHO_GUARD_S)
+        log_it("LISTEN OFF: говорит бот, {0:.1f} с".format(duration + ECHO_GUARD_S))
         with _agi_lock:
             agi.appexec(application, path)
+        if blocking:
+            # Playback вернулся ровно в тот момент, когда фраза кончилась, —
+            # это точнее любой оценки по файлу, и продлить глухоту по факту
+            # дешевле, чем ошибиться в меньшую сторону.
+            block_listening_until(time.time() + ECHO_GUARD_S)
         # Фраза пошла в трубку — сорвавшийся ранее синтез перестал быть
         # причиной: иначе один промах в середине разговора увёл бы в ПЦК
         # звонок, в котором клиент всё-таки получил ответ.
@@ -747,6 +894,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
             return
         state["document_id"] = erp_answer.document_id
         state["caller_id_name"] = erp_answer.caller_id_name
+        state["skip_bot"] = erp_answer.skip_bot
+        state["skip_exten"] = erp_answer.redirect_exten
+        state["skip_direction"] = erp_answer.direction_name
         # Имя ставим сразу, а не только перед переводом. У боевого бота оно
         # живёт на канале с первой секунды: там звонок исходящий, и ERP создаёт
         # канал уже с именем. У нас звонок входящий, ERP видит канал с самого
@@ -760,6 +910,18 @@ def _main():  # pragma: no cover - требует живого канала Aste
         # своей памяти основного скрипта он не видит, а при обрыве канала
         # основной скрипт умирает мгновенно и сообщить ничего не успевает.
         set_var("documentId", erp_answer.document_id)
+        # То же самое, но под именем, которое читает ERP. Имена переменных
+        # канала регистрозависимы, и это разные переменные: `documentId` наш
+        # собственный (его забирает скрипт последней воли), а `DocumentID` —
+        # соглашение платформы.
+        #
+        # Клиент ERP берёт его через AMI, когда оператор жмёт «Перевести звонок
+        # в другой КЦ»: `AsterManager.GetChannelDocumentID` это ровно
+        # `GetVariable(channel, "DocumentID")`. Не найдя — показывает
+        # «Неопределён документ текущего звонка!» и перевод не делает.
+        # Соглашение описано у `AsterHelper.CurrentDocumentChannel`: «канал, в
+        # котором проставлен DocumentID; если входящий звонок — канал клиента».
+        set_var("DocumentID", erp_answer.document_id)
         log_it("ERP: обращение {0} создано".format(erp_answer.document_id))
 
     def report_equipment(answer):
@@ -793,11 +955,14 @@ def _main():  # pragma: no cover - требует живого канала Aste
             return
         send_to_erp(
             aster2_address,
-            # Запомненный вопрос, а не сырая реплика этого шага: источник
-            # текста для ERP в скрипте один на все события. В этой точке
-            # разговора они совпадают — в точке подтверждения, где они
-            # расходятся, событие не отправляется вовсе.
-            build_unknown_request(state["document_id"], state["last_text"]),
+            # Реплику называет сервис, если бот угадал тему не так; иначе —
+            # запомненный вопрос, а не сырая реплика этого шага: источник
+            # текста для ERP в скрипте один на все события.
+            build_unknown_request(
+                state["document_id"],
+                answer.unknown_question_text.strip() or state["last_text"],
+                answer.wrong_guess,
+            ),
             log=log_it,
         )
 
@@ -932,12 +1097,51 @@ def _main():  # pragma: no cover - требует живого канала Aste
             except Exception as hangup_error:
                 log_it("FAILOVER HANGUP ERROR: {0}".format(hangup_error))
 
+    def bypass_bot():
+        """Повторный звонок после сброса на боте: сразу к оператору, без
+        приветствия и без диалога.
+
+        Решение и номер приёма приходят от ERP вместе с созданным обращением
+        (15422, AiAssistantCallStart). Историю обращения ERP уже написала, и
+        тема разговора неизвестна по определению — поэтому ни report_transfer,
+        ни report_equipment здесь не нужны. Пустой номер от ERP — страховка
+        на сопровождение: раз решили не мучить человека ботом, молчать и
+        класть трубку нельзя.
+        """
+        global _redirect_done
+        exten = state["skip_exten"] or SUPPORT_FALLBACK_EXTEN
+        log_it("BYPASS BOT: повторный звонок после сброса -> exten {0} ({1})".format(
+            exten, state["skip_direction"] or "направление линии"))
+        if REAL_REDIRECT:
+            with _agi_lock:
+                push_caller_id_name()
+                agi.appexec("Goto", "pstn-out,{0},1".format(effective_redirect_exten(exten)))
+                agi.set_variable("ScriptFinished", True)
+            _redirect_done = True
+            return
+        log_it("BYPASS BOT (dry-run, REAL_REDIRECT=False) -> would go to exten {0}".format(exten))
+        with _agi_lock:
+            agi.set_variable("ScriptFinished", True)
+            agi.hangup()
+        _redirect_done = True
+
     def audio_stream(audio_source):
         yield speech_pb2.StreamRequest(session_id=linked_id)
         while True:
             data = audio_source.read(CHUNK_SIZE)
             if not data:
                 return
+            # Дескриптор читаем всегда, даже когда не слушаем: перестать
+            # читать значит забить буфер станции, и после фразы бота в
+            # распознавание хлынуло бы всё накопившееся разом.
+            #
+            # Ничего здесь не логируем намеренно. log_it берёт AGI-блокировку,
+            # а её на всё время блокирующего Playback держит основной поток —
+            # этот поток встал бы на ней и перестал читать дескриптор, то есть
+            # получилась бы ровно та беда, от которой мы защищаемся строкой
+            # выше. О начале и конце глухоты пишет speak(), из своего потока.
+            if listening_blocked():
+                continue
             yield speech_pb2.StreamRequest(audio_chunk=data)
 
     def run():
@@ -951,6 +1155,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
                 # трубку бросают и на первой секунде, а чтобы обращение ушло в
                 # ПЦК при обрыве, к этому моменту оно должно существовать.
                 open_erp_case()
+                if state["skip_bot"]:
+                    bypass_bot()
+                    return
                 if not apply(ask_dialog("", False)):
                     return
                 stub = speech_pb2_grpc.SpeechStub(channel)

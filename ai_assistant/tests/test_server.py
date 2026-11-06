@@ -142,7 +142,10 @@ def test_debug_audio_dir_saves_the_utterance_with_its_recognition(tmp_path):
 
     list(servicer.Recognize(FakeRequestIterator("call-7", [pcm(400)]), context=None))
 
-    saved = list(tmp_path.glob("*.wav"))
+    # Рядом с репликой лежит и весь поток звонка целиком (…_ПОТОК.wav, 13.10.2026).
+    streams = list(tmp_path.glob("*_ПОТОК.wav"))
+    assert len(streams) == 1
+    saved = [f for f in tmp_path.glob("*.wav") if not f.name.endswith("_ПОТОК.wav")]
     assert len(saved) == 1
     name = saved[0].name
     assert "call-7" in name
@@ -1596,9 +1599,10 @@ def test_keepwarm_stops_promptly_when_asked():
     assert not thread.is_alive()
 
 
-def test_effective_voice_keeps_a_library_voice_only_when_every_phrase_is_recorded(caplog):
-    """В одном разговоре — один голос: библиотечный включается на весь набор
-    или не включается вовсе (заказчик, 24.09.2026)."""
+def test_effective_voice_keeps_the_voice_and_logs_missing_for_per_phrase_fallback(caplog):
+    """Голос сохраняется, даже если записаны не все фразы: недостающие уйдут в
+    запас пофразно (RecordedSynthesizer), а не весь голос целиком в s3 (заказчик,
+    05.11.2026). Недостающие всё равно логируются для следующего прогона синтеза."""
     import logging
 
     from ai_assistant.service.main import effective_voice
@@ -1616,6 +1620,129 @@ def test_effective_voice_keeps_a_library_voice_only_when_every_phrase_is_recorde
         plain = effective_voice("s4", lambda: (_ for _ in ()).throw(AssertionError("фразы не нужны")), library, "s3")
 
     assert full == "voice-a"
-    assert partial == "s3"
+    # Пробел в библиотеке больше не роняет весь голос: группа остаётся на голосе A,
+    # а «новая тема» озвучится запасным движком пофразно.
+    assert partial == "voice-a"
     assert plain == "s4"
+    # Недостающую фразу всё равно логируем, чтобы по ней сделать синтез.
     assert "группа 2" in caplog.text and "новая тема" in caplog.text
+
+
+def test_second_opinion_takes_the_fallback_text_when_the_first_finds_no_topic():
+    """«Верхер не включается» (v3) темы не находит, «керхер не включается» (v2) находит —
+    в ответ уходит второй текст (14.10.2026, 1791976427). Если и второй мимо — первый."""
+    class PrimaryEngine(FakeEngine):
+        def transcribe(self, pcm):
+            return "верхер не включается"
+
+    class FallbackEngine(FakeEngine):
+        calls = 0
+
+        def transcribe(self, pcm):
+            FallbackEngine.calls += 1
+            return "керхер не включается"
+
+    class Knowledge:
+        def resolve(self, text):
+            class R:
+                pass
+            r = R()
+            r.trusted = "керхер" in text
+            # Запись-бренд: по тексту второй модели тема засчитывается строго — здесь по бренду.
+            r.record = KnowledgeRecord(id=7, question="керхер не включается", equipment_type="Karcher") if r.trusted else None
+            r.source = "phrases"
+            return r
+
+    script = [[SegmentEvent(kind="utterance", pcm=pcm(800))]]
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter(script), PrimaryEngine(), timeline_sink=[],
+        fallback_engine=FallbackEngine(), knowledge_lookup=lambda: Knowledge(),
+    )
+    responses = list(servicer.Recognize(FakeRequestIterator("call-9", [pcm(400)]), context=None))
+    finals = [r.text for r in responses if r.type == speech_pb2.StreamResponse.FINAL]
+    assert finals == ["керхер не включается"]
+    assert FallbackEngine.calls == 1
+
+    # Тема по первому тексту нашлась — вторая модель не зовётся.
+    class GoodEngine(FakeEngine):
+        def transcribe(self, pcm):
+            return "керхер сломался"
+    FallbackEngine.calls = 0
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter([[SegmentEvent(kind="utterance", pcm=pcm(800))]]), GoodEngine(), timeline_sink=[],
+        fallback_engine=FallbackEngine(), knowledge_lookup=lambda: Knowledge(),
+    )
+    list(servicer.Recognize(FakeRequestIterator("call-10", [pcm(400)]), context=None))
+    assert FallbackEngine.calls == 0
+
+
+def test_second_opinion_is_rejected_when_its_topic_is_found_only_by_similarity():
+    """270057961 (9-я волна): v3 «мне нужен», v2 «мне нужен сайт» — по близости 0.75
+    нашлась тема интернета, и бот спросил про интернет. Текст второй модели
+    засчитывается только по дословному совпадению, слову-ключу или бренду."""
+    class PrimaryEngine(FakeEngine):
+        def transcribe(self, pcm):
+            return "мне нужен"
+
+    class FallbackEngine(FakeEngine):
+        def transcribe(self, pcm):
+            return "мне нужен сайт"
+
+    class Knowledge:
+        def resolve(self, text):
+            class R:
+                pass
+            r = R()
+            r.trusted = "сайт" in text
+            r.record = KnowledgeRecord(id=30, question="нужен интернет на дачу", equipment_type="Интернет") if r.trusted else None
+            r.source = "phrases"
+            return r
+
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter([[SegmentEvent(kind="utterance", pcm=pcm(800))]]), PrimaryEngine(), timeline_sink=[],
+        fallback_engine=FallbackEngine(), knowledge_lookup=lambda: Knowledge(),
+    )
+    responses = list(servicer.Recognize(FakeRequestIterator("call-11", [pcm(400)]), context=None))
+    finals = [r.text for r in responses if r.type == speech_pb2.StreamResponse.FINAL]
+    assert finals == ["мне нужен"]
+
+    # Слово-ключ или дословная формулировка во втором тексте — принимается.
+    class KeywordKnowledge(Knowledge):
+        def resolve(self, text):
+            r = super().resolve(text)
+            r.source = "keyword"
+            return r
+
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter([[SegmentEvent(kind="utterance", pcm=pcm(800))]]), PrimaryEngine(), timeline_sink=[],
+        fallback_engine=FallbackEngine(), knowledge_lookup=lambda: KeywordKnowledge(),
+    )
+    responses = list(servicer.Recognize(FakeRequestIterator("call-12", [pcm(400)]), context=None))
+    assert [r.text for r in responses if r.type == speech_pb2.StreamResponse.FINAL] == ["мне нужен сайт"]
+
+
+def test_second_opinion_is_not_asked_for_a_short_single_word():
+    """«Але», «да», «угу»: тема по ним не ищется, а вторая модель стоила по 0,3 с
+    на каждом подтверждении и на «але» выдумывала «алло» (270043147)."""
+    class PrimaryEngine(FakeEngine):
+        def transcribe(self, pcm):
+            return "але"
+
+    class FallbackEngine(FakeEngine):
+        calls = 0
+
+        def transcribe(self, pcm):
+            FallbackEngine.calls += 1
+            return "алло"
+
+    class Knowledge:
+        def resolve(self, text):
+            return None
+
+    servicer = SpeechServicer(
+        lambda: FakeSegmenter([[SegmentEvent(kind="utterance", pcm=pcm(800))]]), PrimaryEngine(), timeline_sink=[],
+        fallback_engine=FallbackEngine(), knowledge_lookup=lambda: Knowledge(),
+    )
+    responses = list(servicer.Recognize(FakeRequestIterator("call-13", [pcm(400)]), context=None))
+    assert [r.text for r in responses if r.type == speech_pb2.StreamResponse.FINAL] == ["але"]
+    assert FallbackEngine.calls == 0

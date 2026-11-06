@@ -17,6 +17,11 @@ rem   v3_ctc      - eshche bystree, chut menee tochnaya
 rem   v3_e2e_rnnt - stavit punktuatsiyu i zaglavnye bukvy
 set AIA_GIGAAM_MODEL=v3_rnnt
 
+rem Vtoraya model GigaAM - vtoroe mnenie: esli po tekstu pervoy modeli tema v baze
+rem ne nashlas, replika raspoznaetsya eshche raz (14.10.2026: "verher" -> "kerher").
+rem Cena - +0.5 s tolko na promahah. Pusto - bez vtorogo mneniya.
+set AIA_STT_FALLBACK_MODEL=v2_rnnt
+
 rem Tolko dlya vosk: put k raspakovannoy modeli
 set AIA_VOSK_MODEL_PATH=C:\Users\user\models\vosk-model-small-ru-0.22
 
@@ -47,6 +52,11 @@ rem Menshe - otvechaet zhivee, no perebivaet zadumavshegosya.
 rem Bolshe - razgovor oshchushchaetsya slomannym.
 set AIA_UTTERANCE_PAUSE_MS=1000
 
+rem Porog detektora rechi Silero (0..1). 0.35 - zamer 13.10.2026 na syryh potokah:
+rem vmeste so sbrosom pamyati detektora po razryvu potoka vozvrashchaet korotkie
+rem otvety posle frazy bota ("novyy", "ugu", "da"); 0.5 teryal tri korotkih otveta.
+set AIA_VAD_THRESHOLD=0.35
+
 rem Porog blizosti voprosa k baze znaniy (0..1). 0.66 podobran zamerom 20.08.2026
 rem na boevoy baze iz 40 napravleniy: svoi voprosy 0.675-0.850, postoronnie
 rem 0.472-0.643. Nizhniy kray svoih derzhat korotkie zaprosy remonta:
@@ -62,13 +72,13 @@ rem Kak chasto vholostuyu progonyat raspoznavanie i poisk, chtoby modeli ne
 rem vygruzhalis iz pamyati vo vremya prostoya. U procesa, kotoryy dolgo nichego
 rem ne delal, sistema urezaet rabochiy nabor - i pervaya replika sleduyushchego
 rem zvonka schitaetsya 5.8 s vmesto obychnyh 1.5-2.5. 0 - vyklyuchit.
-set AIA_KEEPWARM_SECONDS=300
+set AIA_KEEPWARM_SECONDS=120
 
 rem Kuda skladyvat zapisi replik, kak ih uslyshal dvizhok raspoznavaniya.
 rem Pusto - ne skladyvat (obychnyy rezhim). Zapolnyat tolko na vremya razbora
 rem sporov vida "ya skazal net, a raspoznalos da": po logu ne otlichit golos
 rem klienta ot eha sobstvennoy frazy bota. Imya fayla - vremya, zvonok i tekst.
-set AIA_DEBUG_AUDIO_DIR=
+set AIA_DEBUG_AUDIO_DIR=debug_audio
 
 rem Sintezirovat vse izvestnye frazy pri starte (1) ili po hodu zvonka (0).
 rem Holodnyy sintez stoit do 2 sekund, i klient slushaet ih kak tishinu.

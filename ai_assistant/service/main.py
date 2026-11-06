@@ -59,6 +59,7 @@ from ai_assistant.service.dialog import (  # noqa: E402
 )
 from ai_assistant.service.corpus_knn import CorpusIndex  # noqa: E402
 from ai_assistant.service.knowledge import (  # noqa: E402
+    brand_gate,
     KnowledgeBase,
     SentenceTransformerEmbedder,
     load_knowledge_base,
@@ -114,7 +115,7 @@ def load_corpus_index(cfg):
     return corpus
 
 
-def prewarm_recognition(engine, knowledge) -> float:
+def prewarm_recognition(engine, knowledge, fallback_engine=None) -> float:
     """Прогреть распознавание и поиск по смыслу до первого живого звонка.
 
     Обе модели грузятся лениво, на первом обращении, и платит за это первый
@@ -135,6 +136,13 @@ def prewarm_recognition(engine, knowledge) -> float:
         engine.transcribe(silence)
     except Exception:
         log.exception("Прогрев распознавания не удался, первый звонок будет медленным")
+    if fallback_engine is not None:
+        # Вторую модель греем так же: 15.10.2026 12:18 (270036506) первый
+        # промах после ночи поднимал её с диска 10 секунд, клиент не дождался.
+        try:
+            fallback_engine.transcribe(b"\x00\x00" * int(fallback_engine.target_sample_rate))
+        except Exception:
+            log.exception("Прогрев второй модели распознавания не удался")
     try:
         # База знаний закодирована при загрузке, но кодирование ЗАПРОСА идёт
         # своим путём (другой префикс, батч из одной строки) и на первом вызове
@@ -145,7 +153,7 @@ def prewarm_recognition(engine, knowledge) -> float:
     return time.time() - started
 
 
-def start_keepwarm(engine, knowledge, seconds: int, stop_event=None):
+def start_keepwarm(engine, knowledge, seconds: int, stop_event=None, fallback_engine=None):
     """Держать модели горячими, пока никто не звонит.
 
     Прогрева на старте мало. Замер на живых звонках: сервис работал сутки,
@@ -171,7 +179,7 @@ def start_keepwarm(engine, knowledge, seconds: int, stop_event=None):
     def loop() -> None:
         # wait() вместо sleep(): выключение сервиса не должно ждать целый цикл.
         while not stop.wait(seconds):
-            log.debug("Подогрев моделей: %.0f мс", prewarm_recognition(engine, knowledge) * 1000)
+            log.debug("Подогрев моделей: %.0f мс", prewarm_recognition(engine, knowledge, fallback_engine) * 1000)
 
     thread = threading.Thread(target=loop, name="keepwarm", daemon=True)
     thread.start()
@@ -224,9 +232,19 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
         timelines_lock: Optional[threading.Lock] = None,
         max_active_timelines: int = MAX_ACTIVE_TIMELINES,
         debug_audio_dir: str = "",
+        fallback_engine=None,
+        knowledge_lookup: Optional[Callable[[], object]] = None,
     ):
         self._segmenter_factory = segmenter_factory
         self._engine = engine
+        # Второе мнение распознавания: если по тексту первой модели тема в базе
+        # не находится, реплика распознаётся ещё раз второй моделью, и берётся
+        # тот текст, по которому тема нашлась. На линии заказчика v3_rnnt писал
+        # «перфер», «кркер», «верхер», «апл» — v2_rnnt на тех же записях
+        # слышал «керхер» и «эпл» (13–14.10.2026). Цена — одно лишнее
+        # распознавание только на промахах.
+        self._fallback_engine = fallback_engine
+        self._knowledge_lookup = knowledge_lookup
         self._timeline_sink = timeline_sink
         # Последний таймлайн по каждому звонку (ключ — session_id, он же
         # linkedId AGI-скрипта): ручка /dialog (build_http_app) достаёт его
@@ -239,13 +257,89 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
         self._max_active_timelines = max_active_timelines
         self._debug_audio_dir = debug_audio_dir
 
+    def _topic_found(self, text: str, strict: bool = False) -> bool:
+        """Нашлась ли по тексту тема в текущей базе знаний (для второго мнения распознавания).
+
+        strict — для текста ВТОРОЙ модели: тема засчитывается только по дословному
+        совпадению, слову-ключу или названному бренду. Близости формулировок мало:
+        v2 слышала «мне нужен сайт» вместо «мне нужен», по близости 0.75 нашлась
+        тема интернета, и бот спросил про интернет (9-я волна, 270057961).
+        """
+        if not text.strip() or self._knowledge_lookup is None:
+            return True  # сравнивать не с чем — первое мнение не оспариваем
+        if DialogEngine._is_generic_only(text):
+            # «Не включается» без техники: бренд мог потеряться в распознавании
+            # («керхер не включается» → «не включается», 14.10.2026) — пусть
+            # вторая модель попробует его расслышать.
+            return False
+        try:
+            knowledge = self._knowledge_lookup()
+            if knowledge is None:
+                return True
+            resolution = knowledge.resolve(text)
+        except Exception:
+            log.exception("Проверка темы для второго мнения упала, оставляем первое распознавание")
+            return True
+        found = bool(resolution is not None and resolution.trusted and resolution.record is not None)
+        if not found or not strict:
+            return found
+        if getattr(resolution, "source", "") in ("exact", "keyword"):
+            return True
+        return brand_gate(resolution.record) is not None  # запись-бренд: бренд в тексте есть, иначе её бы не взяли
+
+    def _second_opinion(self, session_id: str, text: str, audio) -> str:
+        """Перераспознать второй моделью, если по первому тексту тема не нашлась."""
+        if self._fallback_engine is None or not text.strip():
+            return text
+        words = text.split()
+        if len(words) == 1 and len(words[0]) <= 4:
+            # «Да», «нет», «ок», «угу»: тема по ним не ищется, а вторая модель
+            # стоила по 0,3 с на каждом подтверждении (14.10.2026).
+            return text
+        if self._topic_found(text):
+            return text
+        try:
+            alternative = self._fallback_engine.transcribe(audio).strip()
+        except Exception:
+            log.exception("Вторая модель распознавания упала на реплике звонка [%s]", session_id)
+            return text
+        if alternative and alternative != text and self._topic_found(alternative, strict=True):
+            log.info("STT второе мнение [%s]: %r → %r (тема нашлась)", session_id, text, alternative)
+            return alternative
+        return text
+
     def Recognize(self, request_iterator, context):
         segmenter = self._segmenter_factory()
         session_id = ""
+        # Весь поток звонка как пришёл, без нарезки — только при AIA_DEBUG_AUDIO_DIR.
+        # Реплики (dump_utterance) показывают, что детектор отдал распознаванию;
+        # «да», которого детектор не заметил, в них не попадает (13.10.2026,
+        # 1791892399: два «да» из трёх есть в записи станции и нет в репликах).
+        stream = None
+        last_chunk_at = None
 
-        for request in request_iterator:
+        try:
+          for request in request_iterator:
             if request.session_id:
                 session_id = request.session_id
+            if request.audio_chunk:
+                # Разрыв потока — фраза бота: на это время Asterisk звук в AGI
+                # не пишет, куски не приходят. Память детектора речи после
+                # разрыва глушит короткое слово сразу за ним (см.
+                # UtteranceSegmenter.reset_detector) — сбрасываем её по факту.
+                now = time.monotonic()
+                if last_chunk_at is not None and now - last_chunk_at >= STREAM_GAP_RESET_S:
+                    segmenter.reset_detector()
+                    log.info("Разрыв потока [%s] %.1f с — память детектора сброшена", session_id, now - last_chunk_at)
+                last_chunk_at = now
+            if self._debug_audio_dir and request.audio_chunk:
+                if stream is None:
+                    stream = open_stream_dump(self._debug_audio_dir, session_id)
+                if stream is not None:
+                    try:
+                        stream.writeframes(request.audio_chunk)
+                    except Exception:
+                        stream = None
             for event in segmenter.feed(request.audio_chunk):
                 if event.kind == "silence":
                     yield speech_pb2.StreamResponse(
@@ -255,6 +349,7 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                     continue
 
                 timeline = CallTimeline(session_id)
+                remember_forced(session_id, bool(event.forced))
                 if event.forced:
                     # Реплика выдана принудительно по потолку длины
                     # (MAX_UTTERANCE_SECONDS в vad.py) — паузы перед этим не
@@ -279,6 +374,8 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                     padded = pad_short_utterance(event.pcm)
                     audio = prepare_audio(padded, self._engine.target_sample_rate)
                     text = self._engine.transcribe(audio)
+                    # Второе мнение внутри замера: клиент ждёт и его тоже.
+                    text = self._second_opinion(session_id, text, audio)
                 except Exception:
                     # Один споткнувшийся движок не должен ронять весь поток:
                     # gRPC закрыл бы его целиком, и разговор оборвался бы до
@@ -312,7 +409,12 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                             oldest_session_id = next(iter(self._active_timelines))
                             del self._active_timelines[oldest_session_id]
                         self._active_timelines[session_id] = (timeline, snapshot)
-                log.info("STT [%s]: %s | %s", session_id, text, timeline.durations())
+                # Длина реплики и признак принудительного среза — без них по
+                # логу не отличить «клиент сказал два слова» от «детектор
+                # держал реплику 13 секунд» (269469843, 06.10.2026).
+                log.info("STT [%s]: %s | %.1f с%s | %s", session_id, text,
+                         len(event.pcm) / 2 / 8000.0, " ПРИНУДИТЕЛЬНО" if event.forced else "",
+                         timeline.durations())
                 dumped = dump_utterance(
                     self._debug_audio_dir, session_id, text, audio, self._engine.target_sample_rate
                 )
@@ -322,6 +424,57 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
                 yield speech_pb2.StreamResponse(
                     type=speech_pb2.StreamResponse.FINAL, text=text
                 )
+            # Метка ставится после обработки куска, а не при его приходе: пока
+            # идёт распознавание (1–3 с), куски копятся в gRPC и приходят
+            # пачкой сразу после — это не разрыв потока (14.10.2026, звонок
+            # 1791966066: «разрывы» 2.6 и 1.3 с ровно на время распознавания).
+            last_chunk_at = time.monotonic()
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                    log.info("Поток звонка [%s] сохранён целиком", session_id)
+                except Exception:
+                    pass
+
+
+#: Пауза между кусками звука одного звонка, с которой разрыв считается фразой
+#: бота (куски идут каждые 0,5 с; сетевой джиттер — десятки миллисекунд).
+STREAM_GAP_RESET_S = 1.0
+
+#: Звонок → была ли его последняя реплика отдана распознаванию по потолку длины
+#: (клиент ещё говорил). Пишет поток звука (Recognize), читает диалог через
+#: forced_lookup: AGI присылает в /dialog только текст, а решение «это хвост
+#: монолога, а не ответ» нужно именно диалогу. Записи вытесняются вместе с
+#: сессиями диалога — ключ тот же linkedId.
+FORCED_FINALS: Dict[str, bool] = {}
+FORCED_FINALS_MAX = 2000
+
+
+def remember_forced(session_id: str, forced: bool) -> None:
+    if len(FORCED_FINALS) >= FORCED_FINALS_MAX:
+        FORCED_FINALS.clear()
+    FORCED_FINALS[session_id] = forced
+
+
+def was_forced(session_id: str) -> bool:
+    return FORCED_FINALS.get(session_id, False)
+
+
+def open_stream_dump(directory: str, session_id: str):
+    """WAV на весь поток звонка (8 кГц, моно) в папке отладочных записей; None — не вышло."""
+    try:
+        os.makedirs(directory, exist_ok=True)
+        name = "{0}_{1}_ПОТОК.wav".format(
+            time.strftime("%H%M%S"), re.sub(r"[^\w.\-]+", "_", session_id) or "нет-звонка")
+        handle = wave.open(os.path.join(directory, name), "wb")
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        return handle
+    except Exception as error:
+        log.warning("Поток звонка не сохраняется: %s", error)
+        return None
 
 
 def resolve_voice(feed_voice: Optional[str], default_voice: str) -> str:
@@ -338,13 +491,14 @@ def resolve_voice(feed_voice: Optional[str], default_voice: str) -> str:
 
 def effective_voice(voice: str, texts, library, fallback_voice: str,
                     label: str = "") -> str:
-    """Голос, которым набор фраз будет звучать на самом деле.
-
-    Библиотечный голос — на весь набор или никак: в одном разговоре клиент не
-    должен услышать два разных голоса (заказчик, 24.09.2026). Не хватает хотя бы
-    одной фразы (аналитик завёл новую тему, а прогон на видеокарте ещё не
-    делали) — набор целиком остаётся на запасном синтезе, а недостающие фразы
-    уходят в лог: по ним и делается следующий прогон.
+    """Голос набора. Желаемый голос сохраняется, даже если в библиотеке записаны
+    не все фразы: недостающие озвучит запасной движок пофразно (RecordedSynthesizer),
+    а не весь голос целиком уходит в запас (заказчик, 05.11.2026). Раньше любой пробел
+    ронял группу в s3: аналитик завёл одну новую тему в разметке, и весь голос
+    пропадал. Недостающие всё равно пишем в лог: по ним делается следующий прогон
+    синтеза. Залипания запасного звука нет: отпечаток библиотеки входит в ключ кэша
+    и в подпись станции (RecordedSynthesizer.model_id), так что добавленная запись
+    подхватится, а не останется проигрываться запасным движком.
     """
     if library is None or voice not in library.voices:
         return voice
@@ -353,14 +507,13 @@ def effective_voice(voice: str, texts, library, fallback_voice: str,
     if callable(texts):
         texts = texts()
     missing = library.missing(voice, texts)
-    if not missing:
-        return voice
-    log.warning(
-        "%sголос %s не включён: в библиотеке нет %d из %d фраз, набор говорит голосом %s. Нет: %s",
-        (label + ": ") if label else "", voice, len(missing), len(texts), fallback_voice,
-        " | ".join(missing[:5]) + (" | …" if len(missing) > 5 else ""),
-    )
-    return fallback_voice
+    if missing:
+        log.warning(
+            "%sголос %s: в библиотеке нет %d из %d фраз, их озвучит запасной %s пофразно. Нет: %s",
+            (label + ": ") if label else "", voice, len(missing), len(texts), fallback_voice,
+            " | ".join(missing[:5]) + (" | …" if len(missing) > 5 else ""),
+        )
+    return voice
 
 
 def audio_signature_for(tts_model: str, voice: str) -> str:
@@ -436,6 +589,7 @@ def build_dialog_factory(
             audio_files=feed.audio_files,
             line_profiles=profiles,
             is_private_master=feed.is_private_master,
+            forced_lookup=was_forced,
         )
 
     return factory
@@ -775,8 +929,14 @@ def main() -> None:
         model_name=cfg.gigaam_model,
     )
 
+    fallback_engine = None
+    if cfg.stt_engine == "gigaam" and cfg.stt_fallback_model and cfg.stt_fallback_model != cfg.gigaam_model:
+        log.info("Загружаем вторую модель распознавания %s (второе мнение на промахах)", cfg.stt_fallback_model)
+        fallback_engine = create_engine("gigaam", model_path="", model_name=cfg.stt_fallback_model)
+
     log.info("Загружаем VAD и синтез (%s)", cfg.tts_engine)
-    detector = SileroVoiceDetector()
+    detector = SileroVoiceDetector(threshold=cfg.vad_threshold)
+    log.info("Порог детектора речи %.2f", cfg.vad_threshold)
     synthesizer = create_synthesizer(
         cfg.tts_engine, cfg.tts_model, cfg.vosk_tts_model_path
     )
@@ -833,8 +993,8 @@ def main() -> None:
     prewarm([(file_voice, collect_speakable_phrases(phrases, knowledge))])
 
     log.info("Прогреваем распознавание и поиск по смыслу")
-    log.info("Распознавание и поиск прогреты за %.1f с", prewarm_recognition(engine, knowledge))
-    start_keepwarm(engine, knowledge, cfg.keepwarm_seconds)
+    log.info("Распознавание и поиск прогреты за %.1f с", prewarm_recognition(engine, knowledge, fallback_engine))
+    start_keepwarm(engine, knowledge, cfg.keepwarm_seconds, fallback_engine=fallback_engine)
 
     # deque(maxlen=...) сам вытесняет самые старые записи при переполнении —
     # без этого /metrics копил бы данные, пока не кончится память.
@@ -865,6 +1025,9 @@ def main() -> None:
         SpeechServicer(
             segmenter_factory, engine, timeline_sink, active_timelines, timelines_lock,
             debug_audio_dir=cfg.debug_audio_dir,
+            fallback_engine=fallback_engine,
+            # knowledge_state создаётся ниже; к первому звонку она уже есть.
+            knowledge_lookup=lambda: knowledge_state.knowledge,
         ),
         server,
     )

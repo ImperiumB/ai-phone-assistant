@@ -57,7 +57,7 @@ def run(knowledge, vectors, rows, record_scenario, sc, title, strict):
     for r, vec in zip(rows, vectors):
         if strict and r["unsure"]:
             continue
-        res = knowledge.resolve_vector(vec, content_words=len(content_words(r["phrase"])))
+        res = knowledge.resolve_vector(vec, content_words=len(content_words(r["phrase"])), text=r["phrase"])
         trusted = res is not None and res.trusted and res.record is not None
         answer = sc.get(record_scenario.get(res.record.id), {}).get("name") if trusted else None
         verdict = judge(r["intent"], r["scenario"], answer, trusted)

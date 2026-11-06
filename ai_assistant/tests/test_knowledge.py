@@ -517,3 +517,171 @@ def test_operator_needs_a_higher_confidence_than_a_subject():
     assert 0.5 <= operator.vote.confidence < 0.8
     assert operator.source == "corpus-unsure" and operator.record is None and not operator.trusted
     assert subject.source == "corpus" and subject.record.id == 1
+
+
+def test_exact_phrase_match_decides_without_embeddings():
+    """«Оператор» против формулировки «оператор» у эмбеддера даёт лишь 0.67:
+    запрос и документ кодируются с разными префиксами. Дословное совпадение
+    решает без эмбеддера (6-я волна, 269460604 и 269464771, 06.10.2026)."""
+    embedder = FakeEmbedder({"стиральная машина не отжимает": [1.0, 0.0, 0.0]})
+    operator = KnowledgeRecord(
+        id=61, question="с оператором соедините с живым человеком",
+        question_variants=["оператор", "С оператором!"], scenario="Соединить с оператором",
+    )
+    base = KnowledgeBase([make_record(1, "стиральная машина не отжимает"), operator], embedder, threshold=0.75)
+
+    found = base.resolve("Оператор.")
+    assert found.record.id == 61 and found.trusted and found.source == "exact" and found.score == 1.0
+    assert base.resolve("с оператором").record.id == 61
+    assert base.resolve("Стиральная машина не отжимает!").source == "exact"
+    # Не дословно, но со словом-ключом записи без вопроса — перевод по ключу.
+    assert base.resolve("позовите оператора").source == "keyword"
+    # Без ключа — обычный путь по эмбеддингам (у фальшивого эмбеддера чужой текст далёк).
+    assert base.resolve("позовите кого нибудь").source == "phrases"
+
+
+def test_exact_phrase_shared_by_two_records_does_not_decide():
+    embedder = FakeEmbedder({})
+    first = make_record(1, "ремонт")
+    second = make_record(2, "ремонт техники")
+    second.question_variants = ["ремонт"]
+    base = KnowledgeBase([first, second], embedder, threshold=0.75)
+    assert base.exact("ремонт") is None
+    assert base.resolve("ремонт").source == "phrases"
+
+
+def test_brand_record_needs_the_brand_in_the_reply():
+    """«Хотел узнать по ремонту» → Dyson (0.73), «блендер марка браун» → Karcher
+    (8-я волна 12.10.2026): запись-бренд без названного бренда из поиска
+    выбывает, а в своём направлении её место занимает обычная запись."""
+    embedder = FakeEmbedder({
+        "ремонт техники дайсон": [1.0, 0.0, 0.0],
+        "хотел узнать по ремонту": [0.98, 0.2, 0.0],
+        "ремонт техники дайсона": [0.98, 0.2, 0.0],
+        "нужен ремонт мелкой бытовой техники": [0.0, 1.0, 0.0],
+    })
+    dyson = KnowledgeRecord(id=38, question="ремонт техники дайсон", clarifying_question="Dyson?",
+                            scenario="БТ-МБТ", equipment_type="Dyson", telephone_direction_id=27)
+    small = KnowledgeRecord(id=10, question="нужен ремонт мелкой бытовой техники", clarifying_question="МБТ?",
+                            scenario="БТ-МБТ", telephone_direction_id=27)
+    base = KnowledgeBase([dyson, small], embedder, threshold=0.75)
+    found = base.resolve("хотел узнать по ремонту")
+    assert found.record is not small or not found.trusted  # Dyson закрыт, МБТ далёк — не доверяем
+    assert found.record is not dyson
+    assert base.resolve("ремонт техники дайсона").record is dyson
+    # Без текста (замер по векторам) ворота не действуют.
+    query = embedder.encode(["search_query: хотел узнать по ремонту"])[0]
+    assert base.resolve_vector(query, content_words=3).record is dyson
+
+
+def test_direct_record_keyword_inside_a_longer_reply():
+    """«Оператора мне» по близости 0.71 упиралось в порог перевода без вопроса
+    (8-я волна, 13:33). Слово-формулировка записи без вопроса в реплике — перевод."""
+    embedder = FakeEmbedder({})
+    operator = KnowledgeRecord(id=61, question="с оператором соедините с живым человеком",
+                               question_variants=["оператора", "человек"], scenario="Соединить с оператором")
+    base = KnowledgeBase([make_record(1, "стиральная машина не отжимает"), operator], embedder, threshold=0.75)
+    found = base.resolve("оператора мне")
+    assert found.record is operator and found.trusted and found.source == "keyword"
+    # «человек» короче DIRECT_KEYWORD_MIN_LETTERS — не ключ: «человек приходил чинить» не перевод.
+    assert base.direct_by_keyword("человек приходил чинить стиралку") is None
+
+
+def test_direct_keyword_matches_by_stem():
+    """«Оператором», «операторов» — тот же ключ, что «оператора» (14.10.2026, 1791965238)."""
+    operator = KnowledgeRecord(id=61, question="с оператором соедините с живым человеком",
+                               question_variants=["оператора"], scenario="Соединить с оператором")
+    base = KnowledgeBase([make_record(1, "стиральная машина не отжимает"), operator], FakeEmbedder({}), threshold=0.75)
+    assert base.direct_by_keyword("оператором") is operator
+    assert base.direct_by_keyword("операторов позовите") is operator
+    assert base.direct_by_keyword("опера") is None
+
+
+def test_operator_request_in_any_words_is_a_keyword_hit():
+    """«Свяжите меня с мастером… пропылесосик» (270058388, 9-я волна): просьба
+    позвать человека решает до поиска по смыслу, как и слово-ключ. «Мастер нужен
+    по холодильнику» — новый заказ, а не просьба позвать человека."""
+    from ai_assistant.service.knowledge import OPERATOR_REQUEST_RE
+
+    for text in ["свяжите меня с мастером", "соедините с оператором пожалуйста",
+                 "переключите меня на человека", "позовите пожалуйста менеджера",
+                 "можно специалиста позовите", "специалист нужен", "дайте мне девушку"]:
+        assert OPERATOR_REQUEST_RE.search(text), text
+    for text in ["мастер нужен по холодильнику", "стиральная машина не отжимает",
+                 "сотрудник приходил чинить стиралку", "мастера ждём второй день"]:
+        assert not OPERATOR_REQUEST_RE.search(text), text
+
+    embedder = FakeEmbedder({})
+    operator = KnowledgeRecord(id=61, question="с оператором соедините с живым человеком",
+                               question_variants=["оператора"], scenario="Соединить с оператором",
+                               telephone_direction_id=17)
+    base = KnowledgeBase([make_record(1, "стиральная машина не отжимает"), operator], embedder, threshold=0.75)
+    found = base.resolve("свяжите меня с мастером вот это надо а я сейчас как раз пропылесосик")
+    assert found.record is operator and found.trusted and found.source == "keyword"
+    assert base.resolve("мастер нужен по холодильнику").source == "phrases"
+
+
+def test_strong_phrase_does_not_override_a_confident_operator_vote():
+    """Голос корпуса за сопровождение формулировкой не перебиваем: в 270058388
+    формулировка пылесоса (0.77) перебила корпус (17, 0.73), и бот спросил про
+    пылесос у клиента, который просил мастера."""
+    from ai_assistant.service.corpus_knn import CorpusIndex
+
+    operator = KnowledgeRecord(id=63, question="соедините с оператором", clarifying_question="",
+                               scenario="Соединить с оператором", telephone_direction_id=17)
+    vacuum = KnowledgeRecord(id=20, question="пылесос не включается", clarifying_question="Пылесос?",
+                             telephone_direction_id=40)
+    embedder = FakeEmbedder({"соедините с оператором": [0.0, 1.0, 0.0],
+                             "пылесос не включается": [1.0, 0.0, 0.0],
+                             "мастер должен прийти пылесос не включается": [0.97, 0.24, 0.0]})
+    # 8 соседей за сопровождение и 2 за пылесосы при равной близости — уверенность 0.8:
+    # выше порога оператора (0.72) и ниже потолка, с которого формулировку не слушают (0.9).
+    vectors = [_unit(0.97, 0.24, 0.0)] * 10
+    corpus = CorpusIndex(vectors, [17] * 8 + [40] * 2, ["x"] * 10, k=10, threshold=0.5, operator_threshold=0.72)
+    base = KnowledgeBase([operator, vacuum], embedder, threshold=0.75, corpus=corpus)
+
+    found = base.resolve("мастер должен прийти пылесос не включается")
+    assert found.vote.direction_id == 17 and 0.72 <= found.vote.confidence < 0.9
+    assert found.record is operator and found.source == "corpus"
+
+    # Тот же уверенный голос за обычное направление формулировка другой темы перебивает, как и раньше.
+    corpus_subject = CorpusIndex(vectors, [53] * 8 + [40] * 2, ["x"] * 10, k=10, threshold=0.5, operator_threshold=0.72)
+    washer = KnowledgeRecord(id=1, question="стиральная машина не отжимает", clarifying_question="Стиралка?",
+                             telephone_direction_id=53)
+    base = KnowledgeBase([operator, vacuum, washer], embedder, threshold=0.75, corpus=corpus_subject)
+    found = base.resolve("мастер должен прийти пылесос не включается")
+    assert found.record is vacuum and found.source == "phrases"
+
+
+def test_category_gate_pins_rodents_and_pests_over_corpus():
+    """22.10.2026: «крысы завелись» корпус уводил в электрику (сосед «врача на
+    крысу»), «тараканы» — в сопровождение. Замок категории решает до корпуса:
+    однозначные слова (крысы/мыши/тараканы/клопы) → своя запись. Домашняя крыса
+    у ветеринара замок не трогает."""
+    embedder = FakeEmbedder({})
+    rodents = KnowledgeRecord(id=139, question="нужна дератизация от грызунов",
+                              clarifying_question="Правильно понимаю, что вас интересует обработка от грызунов?",
+                              equipment_type_id=320, telephone_direction_id=51, scenario="грызуны")
+    pests = KnowledgeRecord(id=24, question="нужна обработка от тараканов",
+                            clarifying_question="Правильно понимаю, что вас интересует обработка от насекомых?",
+                            equipment_type_id=915, telephone_direction_id=51, scenario="насекомые")
+    vet = KnowledgeRecord(id=26, question="нужен ветеринар на дом",
+                          clarifying_question="Правильно понимаю, что вам нужны ветеринарные услуги?",
+                          equipment_type_id=800, telephone_direction_id=51, scenario="ветеринар")
+    base = KnowledgeBase([rodents, pests, vet, make_record(1, "стиральная машина не отжимает")], embedder, threshold=0.75)
+
+    for text in ["крысы завелись", "у меня крысы", "мыши на кухне", "потравить крыс"]:
+        r = base.resolve(text)
+        assert r.record.id == 139 and r.source == "category", text
+    for text in ["тараканы завелись", "клопы покусали", "блохи от кота", "нужна обработка от насекомых"]:
+        r = base.resolve(text)
+        assert r.record.id == 24 and r.source == "category", text
+
+    # Животные и ветеринарный контекст идут на ветеринарные услуги (вет-замок первым),
+    # в том числе «крыса у ветеринара» (к врачу, а не на дератизацию).
+    for text in ["вылечить собаку", "собака заболела", "котёнок не ест",
+                 "вызвать ветеринара для крысы", "крыса домашняя заболела нужен врач"]:
+        r = base.resolve(text)
+        assert r.record.id == 26 and r.source == "category", text
+    # Без ключевых слов замок не вмешивается.
+    assert base.category_request("ремонт стиральной машины") is None

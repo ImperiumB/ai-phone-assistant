@@ -1,7 +1,8 @@
 """Нарезка потока на реплики. Заменяет EOU-классификатор Яндекса."""
 import math
+from collections import deque
 from dataclasses import dataclass
-from typing import List, Protocol
+from typing import Deque, List, Protocol
 
 FRAME_SAMPLES = 256  # Silero VAD на 8000 Гц работает окном 256 отсчётов
 FRAME_BYTES = FRAME_SAMPLES * 2
@@ -15,7 +16,25 @@ FRAME_BYTES = FRAME_SAMPLES * 2
 # фактического лимита GigaAM (25 с) — запас на округление кадров и на то,
 # что решение "хватит" принимается ПОСЛЕ очередного кадра, а не строго в
 # момент достижения предела.
-MAX_UTTERANCE_SECONDS = 20
+#
+# 20 → 10 с (08.10.2026, 6-я волна, 269469843): клиент сказал «соедините с
+# кем-нибудь оператором», дальше фон и громкое «алло-алло» без паузы в
+# секунду — детектор держал реплику открытой 13 секунд до самого сброса, бот
+# молчал. На записи речь после просьбы кончилась через 2–3 с, остальное шум.
+# В логах за неделю реплик длиннее 10 с нет (самая длинная — ~10 с описания
+# розетки, 269464554), так что потолок режет только такие зависания. Цена:
+# монолог длиннее 10 с уйдёт в разговор двумя кусками.
+MAX_UTTERANCE_SECONDS = 10
+
+# Реплика — это весь звук от начала речи до паузы, а не только кадры, которые
+# детектор признал речью. До 12.10.2026 сегментатор склеивал одни «речевые»
+# кадры: начало слова до срабатывания детектора («с» в «сборка», «ре» в
+# «ремонт») и тихие согласные внутри выбрасывались, и распознавание получало
+# «орка», «от холодильника», «экспек» (тестовые звонки 12.10, 269648881 и
+# 269643565 из 7-й волны). Запас перед речью — сколько тишины до первого
+# речевого кадра отдать вместе с репликой; хвост — сколько тишины после.
+PRE_ROLL_MS = 300
+TAIL_KEEP_MS = 200
 
 
 class VoiceDetector(Protocol):
@@ -141,6 +160,8 @@ class UtteranceSegmenter:
         # в момент начала паузы, а не в момент, когда сегментатор наконец
         # набрал её целиком и отдал событие.
         self.pause_seconds = self._pause_frames * self._frame_ms / 1000.0
+        self._pre_roll_frames = max(1, math.ceil(PRE_ROLL_MS / self._frame_ms))
+        self._tail_keep_frames = max(1, math.ceil(TAIL_KEEP_MS / self._frame_ms))
         self.reset()
 
     def reset(self) -> None:
@@ -148,7 +169,28 @@ class UtteranceSegmenter:
         self._speech = b""
         self._silence_frames = 0
         self._silence_reported = False
+        # Последние кадры тишины перед речью — уходят в реплику её началом.
+        self._pre_roll: Deque[bytes] = deque(maxlen=self._pre_roll_frames)
         self._detector.reset()
+
+    @property
+    def in_utterance(self) -> bool:
+        """Реплика уже началась и ещё не закрыта паузой."""
+        return bool(self._speech)
+
+    def reset_detector(self) -> None:
+        """Сбросить только память детектора, не трогая накопленную реплику и запас.
+
+        Silero VAD держит состояние между кадрами, и после разрыва потока
+        (фраза бота: Asterisk на это время звук в AGI не пишет) короткое слово
+        сразу за разрывом он не замечает: 13.10.2026, звонок 1791894785 —
+        «новый» есть в потоке, распознаётся, свежий детектор даёт 0.85, а
+        детектор с накопленным состоянием — 0 на тех же кадрах. Сброс по
+        факту разрыва (main.py) ставит детектор в то же положение, что и
+        свежий. Внутри реплики не сбрасываем: холодный старт режет начало слова.
+        """
+        if not self._speech:
+            self._detector.reset()
 
     def feed(self, pcm: bytes) -> List[SegmentEvent]:
         events: List[SegmentEvent] = []
@@ -164,7 +206,13 @@ class UtteranceSegmenter:
         return events
 
     def _consume_frame(self, frame: bytes) -> List[SegmentEvent]:
-        if self._detector.is_speech(frame):
+        is_speech = self._detector.is_speech(frame)
+        if is_speech:
+            if not self._speech:
+                # Начало реплики: сначала запас тишины перед первым речевым
+                # кадром — в нём начало слова, которое детектор ещё не признал.
+                self._speech = b"".join(self._pre_roll)
+                self._pre_roll.clear()
             self._speech += frame
             self._silence_frames = 0
             self._silence_reported = False
@@ -185,12 +233,26 @@ class UtteranceSegmenter:
         self._silence_frames += 1
 
         if self._speech:
+            # Тишина внутри реплики — её часть: паузы между словами и тихие
+            # согласные нужны распознаванию не меньше гласных.
+            self._speech += frame
             if self._silence_frames >= self._pause_frames:
-                utterance = SegmentEvent(kind="utterance", pcm=self._speech)
+                # Хвост паузы сверх нужного движку обрезаем: он только
+                # удлиняет распознавание.
+                drop = max(0, self._silence_frames - self._tail_keep_frames) * FRAME_BYTES
+                pcm = self._speech[:len(self._speech) - drop] if drop else self._speech
+                utterance = SegmentEvent(kind="utterance", pcm=pcm)
+                self._speech = b""
+                self._silence_frames = 0
+                return [utterance]
+            if len(self._speech) // FRAME_BYTES >= self._max_speech_frames:
+                utterance = SegmentEvent(kind="utterance", pcm=self._speech, forced=True)
                 self._speech = b""
                 self._silence_frames = 0
                 return [utterance]
             return []
+
+        self._pre_roll.append(frame)
 
         if not self._silence_reported and self._silence_frames >= self._silence_timeout_frames:
             self._silence_reported = True

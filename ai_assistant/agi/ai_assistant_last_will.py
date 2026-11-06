@@ -74,7 +74,7 @@ def call_length_seconds(start_raw, now):
 
 
 def build_hangup_request(document_id, linked_id, recognized_text, script_finished,
-                         call_length=0.0, failure_reason=""):
+                         call_length=0.0, failure_reason="", wrong_guess=""):
     # type: (Any, str, str, Any, float, Any) -> Dict[str, Any]
     """Тело запроса о завершившемся звонке.
 
@@ -98,6 +98,7 @@ def build_hangup_request(document_id, linked_id, recognized_text, script_finishe
         ("recognizedText", recognized_text),
         ("scriptFinished", script_finished),
         ("failureReason", failure_reason),
+        ("wrongGuess", wrong_guess),
         # Точка как разделитель — формат фиксированный, от локали не зависит.
         ("callLengthSeconds", "{0:.2f}".format(call_length)),
     ]
@@ -193,6 +194,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
     document_id = get_var("documentId")
     script_finished = get_var("ScriptFinished")
     recognized_text = get_var("LastRecognizedText")
+    wrong_guess = get_var("LastWrongGuess")
     aster2_address = get_var("Aster2ServiceAddress", DEFAULT_ASTER2_SERVICE_ADDRESS)
     call_length = call_length_seconds(get_var("conversation_start_time"), time.time())
     failure_reason = get_var(FAILURE_REASON_VAR)
@@ -209,7 +211,8 @@ def _main():  # pragma: no cover - требует живого канала Aste
             send_last_will(
                 aster2_address,
                 build_hangup_request(document_id, linked_id, recognized_text,
-                                     script_finished, call_length, failure_reason),
+                                     script_finished, call_length, failure_reason,
+                                     wrong_guess),
                 log=log_it,
             )
         except Exception:

@@ -14,7 +14,7 @@ def test_defaults_are_applied(monkeypatch):
     assert cfg.similarity_threshold == pytest.approx(0.66)
     # Записи разговоров на диск по умолчанию не складываются.
     assert cfg.debug_audio_dir == ""
-    assert cfg.keepwarm_seconds == 300
+    assert cfg.keepwarm_seconds == 120
     assert cfg.utterance_pause_ms == 1500
     assert cfg.silence_timeout_ms == 15000
     assert cfg.stt_timeout_s == 10

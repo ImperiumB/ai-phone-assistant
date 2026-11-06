@@ -1085,3 +1085,28 @@ def test_unknown_request_carries_the_wrong_guess_only_when_given():
     pairs = {item["Key"]: item["Value"] for item in with_guess["prms"]} if "prms" in with_guess else None
     assert "wrongGuess" in str(with_guess) and "нужна уборка квартиры" in str(with_guess)
     assert "wrongGuess" not in str(plain)
+
+
+def test_listen_stats_line_reports_chunks_read_during_deafness():
+    """Строка «LISTEN ON» для разбора обрезанных слов (269643565, 09.10.2026)."""
+    from ai_assistant.agi import ai_assistant as agi_module
+
+    agi_module.reset_listening_block()
+    assert agi_module.listen_stats_line() == ""
+    now = 1000.0
+    agi_module.time.time = lambda: now  # noqa: E731 — заморозить часы на время теста
+    try:
+        agi_module.block_listening_until(now + 4.0)
+        for _ in range(3):
+            agi_module.note_blocked_chunk()
+        agi_module.note_listen_resumed(now + 4.2)
+        line = agi_module.listen_stats_line()
+    finally:
+        import time as real_time
+        agi_module.time.time = real_time.time
+        agi_module.reset_listening_block()
+    assert "глухота 4.0 с" in line
+    assert "кусков прочитано 3 (ожидалось ~8)" in line
+    assert "через 0.20 с" in line
+    # Напечатали — второй раз та же глухота не печатается.
+    assert agi_module.listen_stats_line() == ""

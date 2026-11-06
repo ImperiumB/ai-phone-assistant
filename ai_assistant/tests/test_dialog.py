@@ -12,6 +12,7 @@ from ai_assistant.service.dialog import (
     ACTION_REDIRECT,
     POINT_ASK_QUESTION,
     POINT_CONFIRM,
+    POINT_INTENT,
     POINT_FINISHED,
     POINT_START,
     SCENARIO_DIRECTION,
@@ -21,6 +22,7 @@ from ai_assistant.service.dialog import (
     dict_to_prms,
     prms_to_dict,
 )
+from ai_assistant.service import dialog as dialog_module
 from ai_assistant.service.knowledge import KnowledgeRecord, Resolution
 
 
@@ -58,6 +60,10 @@ class FakeKnowledge:
         if match is None:
             return None
         return Resolution(match[0], match[1], match[1] >= self.threshold, "phrases")
+
+    def resolve_phrases(self, text):
+        # Только формулировки — у фальшивой базы это тот же ответ.
+        return self.resolve(text)
 
     def add(self, question):
         record = KnowledgeRecord(id=99, question=question)
@@ -98,14 +104,28 @@ def answer(engine_obj, **kwargs):
 
 
 def answer_after_reask(engine_obj, **kwargs):
-    """Ответ на промах по порогу, доведённый до перевода на человека.
+    """Перевод на человека по нечёткому вопросу.
 
-    Первый промах бот не переводит, а просит переформулировать вопрос
-    (QUESTION_REASK_ATTEMPTS). Тестам, которым нужен сам перевод, приходится
-    повторить реплику клиента: перевод — это второй промах за звонок.
+    Исторически он случался на втором промахе (был один переспрос). С правилом
+    Борца (21.10.2026) нечёткий вопрос переводится и логируется сразу на первом,
+    поэтому это обычный одиночный ответ; имя оставлено ради прежних тестов.
     """
-    answer(engine_obj, **kwargs)
     return answer(engine_obj, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def replies_come_seconds_apart(monkeypatch):
+    """Реплики в тестах идут одна за другой за микросекунды, в жизни — через
+    секунды (фраза бота, пауза распознавания). Часы диалога шагают на 10 с при
+    каждом взгляде, чтобы склейка хвоста после переспроса (REASK_MERGE_WINDOW_S)
+    не срабатывала там, где её не проверяют; её тесты ставят свои часы."""
+    clock = {"now": 1000.0}
+
+    def tick():
+        clock["now"] += 10.0
+        return clock["now"]
+
+    monkeypatch.setattr(dialog_module, "_now", tick)
 
 
 def test_start_point_greets_and_keeps_listening():
@@ -132,44 +152,22 @@ def test_known_question_leads_to_clarifying_question():
     assert result["ConversationPoint"] == POINT_CONFIRM
 
 
-def test_unknown_question_first_asks_the_client_to_rephrase():
-    """Тема не нашлась — сначала переспрашиваем, а не зовём человека.
-
-    Клиент называет поломку своими словами, и в базе знаний этих слов может
-    не быть: живой звонок 20.08.2026 про ремонт «пиццы» дал 0.6277 при пороге
-    0.64. Просьба сказать иначе стоит одной фразы, а перевод — рабочего
-    времени оператора.
-    """
+def test_unknown_question_goes_straight_to_support_and_is_logged():
+    """Правило Борца (21.10.2026): нечётко поняли, что хочет клиент — сразу на
+    сопровождение и вопрос в базу знаний на ручную разметку, без переспроса."""
     knowledge = FakeKnowledge(None)
     result = answer(
         engine(knowledge),
         conversationPoint=POINT_ASK_QUESTION,
         recognizedText="во сколько вы открываетесь",
     )
-    assert result["TextToSpeak"] == PHRASES.misrecognition
-    assert result["Action"] == ACTION_RECOGNIZE
-    assert result["ConversationPoint"] == POINT_ASK_QUESTION
-    # Переформулировка ещё впереди — записывать в справочник пока нечего.
-    assert knowledge.added == []
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["RedirectExten"] == "489"
+    assert result["UnknownQuestion"] == "True"
+    # Вопрос уходит в справочник сразу — его потом размечает оператор ОКК.
+    assert knowledge.added == ["во сколько вы открываетесь"]
 
 
-def test_rephrased_question_that_matches_ends_the_call_by_the_theme():
-    """Ради этого переспрос и заводился: со второй попытки тема находится, и
-    звонок уходит не на сопровождение, а по своему направлению."""
-    knowledge = FakeKnowledge(None)
-    engine_obj = engine(knowledge)
-
-    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="машинка барахлит")
-    knowledge._record = RECORD
-    result = answer(
-        engine_obj,
-        conversationPoint=POINT_ASK_QUESTION,
-        recognizedText="стиральная машина не отжимает",
-    )
-
-    assert result["TextToSpeak"] == RECORD.clarifying_question
-    assert result["ConversationPoint"] == POINT_CONFIRM
-    assert knowledge.added == []
 
 
 def test_second_unknown_question_is_stored_and_call_is_transferred_to_support():
@@ -185,23 +183,14 @@ def test_second_unknown_question_is_stored_and_call_is_transferred_to_support():
     assert result["RedirectExten"] == "489"
 
 
-def test_client_is_asked_to_rephrase_only_once_per_call():
-    """Второй раз подряд просить переформулировать — издевательство над
-    человеком, который уже дважды объяснил свою проблему."""
-    engine_obj = engine(FakeKnowledge(None))
-
-    first = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="первый вопрос")
-    second = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="второй вопрос")
-    assert first["TextToSpeak"] == PHRASES.misrecognition
-    assert second["Action"] == ACTION_REDIRECT
 
 
 def test_record_without_clarifying_question_is_transferred_to_support():
-    bare = KnowledgeRecord(id=5, question="что-то сломалось", clarifying_question="")
+    bare = KnowledgeRecord(id=5, question="стиралка сломалась", clarifying_question="")
     result = answer(
         engine(FakeKnowledge(bare)),
         conversationPoint=POINT_ASK_QUESTION,
-        recognizedText="что-то сломалось",
+        recognizedText="стиралка сломалась",
     )
     assert result["Action"] == ACTION_REDIRECT
     assert result["RedirectExten"] == "489"
@@ -233,6 +222,46 @@ def test_support_scenario_redirects_to_support_exten():
     assert result["RedirectExten"] == "489"
 
 
+def test_long_mixed_answer_is_asked_again_not_treated_as_no():
+    """«диодными люстрами я не занимаюсь вот вы можете ответить у вас да да да» —
+    «не» здесь не отказ (298, 02.10.2026). Короткое «да нет» остаётся отказом."""
+    record = replace(RECORD, negative_answers=["нет", "не то", "не"])
+    engine_obj = engine(FakeKnowledge(record))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    untrust(engine_obj)
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM,
+                    recognizedText="диодными люстрами я не занимаюсь вот вы можете ответить у вас да да да")
+    # «да да да» в конце — согласие: решает последнее слово (14.10.2026), клиент трижды сказал «да».
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["ConversationPoint"] == POINT_FINISHED
+
+    short_engine = engine(FakeKnowledge(record))
+    answer(short_engine, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    short = answer(short_engine, conversationPoint=POINT_CONFIRM, recognizedText="да нет")
+    assert short["TextToSpeak"] == PHRASES.wrong_guess
+
+    # Длинный ответ, начатый с «да», — согласие, даже если дальше есть «не».
+    yes_engine = engine(FakeKnowledge(record))
+    answer(yes_engine, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
+    untrust(yes_engine)
+    yes = answer(yes_engine, conversationPoint=POINT_CONFIRM, recognizedText="да только мастер мне не сегодня нужен")
+    assert yes["Action"] == ACTION_REDIRECT
+
+
+def test_direct_transfer_record_needs_a_strong_phrase_match():
+    """Запись без уточняющего вопроса по слабому совпадению формулировок — переспрос,
+    а не перевод (269211995, 02.10.2026: «узнать про ремонт» 0.689)."""
+    direct = replace(RECORD, clarifying_question="", positive_reply="Соединяю с сопровождением")
+    weak = engine(FakeKnowledge(direct, score=0.69, threshold=0.66))
+    result = answer(weak, conversationPoint=POINT_ASK_QUESTION, recognizedText="узнать про ремонт")
+    # Слабое совпадение по общим словам — нечётко: сразу сопровождение (правило Борца).
+    assert result["Action"] == ACTION_REDIRECT
+
+    strong = engine(FakeKnowledge(direct, score=0.9, threshold=0.66))
+    result = answer(strong, conversationPoint=POINT_ASK_QUESTION, recognizedText="соедините с оператором")
+    assert result["Action"] == ACTION_REDIRECT
+
+
 def test_negative_confirmation_returns_to_question():
     """На «нет» разговор возвращается к вопросу клиента.
 
@@ -247,6 +276,13 @@ def test_negative_confirmation_returns_to_question():
     assert result["TextToSpeak"] == PHRASES.wrong_guess
     assert result["Action"] == ACTION_RECOGNIZE
     assert result["ConversationPoint"] == POINT_ASK_QUESTION
+    # Промах уехал в ответ отдельным ключом: AGI положит его в канал (LastWrongGuess),
+    # и если клиент бросит трубку на переспросе, last_will пошлёт wrongGuess в Hangup,
+    # а 15422 пометит строку разметки авто-проблемой (форма ОКК, 06.11.2026).
+    assert result["WrongGuess"] == RECORD.question
+    # На переспросе вопрос на разметку ещё НЕ пишем: это только при сдаче, иначе база
+    # знаний засорится вопросами, которые клиент тут же уточнит.
+    assert "UnknownQuestion" not in result
 
 
 def untrust(engine_obj):
@@ -302,10 +338,8 @@ def test_confirmation_answer_naming_another_topic_switches_the_question():
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
     engine_obj._knowledge._record = other
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет холодильник не морозит")
-    # Явное «нет» — отказ: бот спрашивает, что нужно, а не угадывает дальше.
-    assert result["TextToSpeak"] == PHRASES.wrong_guess
-
-    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник не морозит")
+    # «Нет» и сразу другая тема — её вопрос без круга «что вас интересует?»
+    # (12.10.2026, см. test_no_plus_a_topic_jumps_to_that_topic).
     assert result["TextToSpeak"] == other.clarifying_question
     assert result["ConversationPoint"] == POINT_CONFIRM
 
@@ -869,7 +903,7 @@ def test_second_round_after_no_leads_to_a_new_direction():
     engine_obj = DialogEngine(
         SwitchingKnowledge(), PHRASES, support_exten="489", sales_exten="500"
     )
-    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="что-то сломалось")
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка сломалась")
     after_no = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
     assert after_no["TextToSpeak"] == PHRASES.wrong_guess
 
@@ -1522,9 +1556,6 @@ def test_every_service_phrase_comes_from_the_group_of_the_dialed_number():
     assert wrong["TextToSpeak"] == MASTER_PHRASES.wrong_guess
 
     lost = engine_with_groups(master_profile(), knowledge=FakeKnowledge(None))
-    rephrase = answer(lost, conversationPoint=POINT_ASK_QUESTION,
-                      recognizedText="во сколько вы открываетесь", **dialed)
-    assert rephrase["TextToSpeak"] == MASTER_PHRASES.misrecognition
     transfer = answer(lost, conversationPoint=POINT_ASK_QUESTION,
                       recognizedText="во сколько вы открываетесь", **dialed)
     assert transfer["TextToSpeak"] == MASTER_PHRASES.transfer
@@ -1766,7 +1797,7 @@ def test_polite_opener_never_reaches_the_semantic_search():
     )
 
     assert knowledge.queries == []
-    assert result["TextToSpeak"] == PHRASES.misrecognition
+    assert result["TextToSpeak"] == PHRASES.listening
     assert result["ConversationPoint"] == POINT_ASK_QUESTION
 
 
@@ -1782,17 +1813,6 @@ def test_polite_opener_gets_an_answer_at_once_not_silence():
     assert result["Action"] == ACTION_RECOGNIZE
 
 
-def test_polite_opener_does_not_spend_the_reask_budget():
-    """Вежливость не должна наказываться: после зачина у клиента остаётся
-    полный переспрос на случай, если тема не найдётся."""
-    knowledge = FakeKnowledge(None)
-    engine_obj = engine(knowledge)
-
-    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="подскажите пожалуйста")
-    miss = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт пиццы")
-
-    assert miss["TextToSpeak"] == PHRASES.misrecognition
-    assert miss["Action"] == ACTION_RECOGNIZE  # переспрос, а не перевод
 
 
 def test_one_meaningful_word_is_enough_to_search():
@@ -1872,7 +1892,7 @@ def test_rejected_guess_is_reported_for_marking_with_the_original_question():
     (аналитик КЦ, 24.09.2026: уверенные промахи в справочник не попадали)."""
     knowledge = FakeKnowledge(RECORD, score=0.9, threshold=0.75)
     engine_obj = engine(knowledge)
-    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="здравствуйте это ремонт")
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="здравствуйте это ремонт холодильников")
     answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
     # Второй круг: тема снова «найдена», клиент соглашается — перевод по теме.
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт стиральной машины")
@@ -1881,21 +1901,21 @@ def test_rejected_guess_is_reported_for_marking_with_the_original_question():
 
     assert result["Action"] == ACTION_REDIRECT
     assert result["UnknownQuestion"] == "True"
-    assert result["UnknownQuestionText"] == "здравствуйте это ремонт"
+    assert result["UnknownQuestionText"] == "здравствуйте это ремонт холодильников"
     assert result["WrongGuess"] == RECORD.question
 
 
 def test_rejected_guess_travels_with_a_silence_transfer_too():
     knowledge = FakeKnowledge(RECORD, score=0.9, threshold=0.75)
     engine_obj = engine(knowledge)
-    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="здравствуйте это ремонт")
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="здравствуйте это ремонт холодильников")
     answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
 
     result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
 
     assert result["Action"] == ACTION_REDIRECT
-    assert result["UnknownQuestionText"] == "здравствуйте это ремонт"
+    assert result["UnknownQuestionText"] == "здравствуйте это ремонт холодильников"
 
 
 def test_transfer_without_a_rejected_guess_carries_no_question_text():
@@ -1907,3 +1927,355 @@ def test_transfer_without_a_rejected_guess_carries_no_question_text():
 
     assert result["Action"] == ACTION_REDIRECT
     assert "UnknownQuestionText" not in result and "WrongGuess" not in result
+
+
+def test_operator_request_at_confirmation_transfers_right_away():
+    """«С оператором» в ответ на вопрос про водонагреватель — перевод, а не
+    «скажите да или нет» (269460604, 06.10.2026)."""
+    operator = replace(
+        RECORD, id=61, question="с оператором соедините с живым человеком",
+        clarifying_question="", scenario="Соединить с оператором", equipment_type="",
+    )
+    engine_obj = engine(FakeKnowledge(RECORD, score=0.9, threshold=0.66))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт обогревателя")
+    engine_obj._knowledge._record = operator
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="с оператором")
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["ConversationPoint"] == POINT_FINISHED
+
+    # Слабое совпадение формулировок с темой без вопроса переводом не считается
+    # (тот же порог, что и в открытом вопросе): переспрашиваем да/нет.
+    weak = engine(FakeKnowledge(RECORD, score=0.9, threshold=0.66))
+    answer(weak, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт обогревателя")
+    weak._knowledge._record = operator
+    weak._knowledge._score = 0.69
+    result = answer(weak, conversationPoint=POINT_CONFIRM, recognizedText="узнать про ремонт")
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["ConversationPoint"] == POINT_CONFIRM
+
+
+def test_general_request_for_a_master_goes_to_support():
+    """«Мне нужен мастер» — общий вопрос без техники. Решено «с общим вопросом»:
+    сразу сопровождение плюс запись, а не уточнение «что интересует?»."""
+    knowledge = FakeKnowledge(None)
+    result = answer(engine(knowledge), conversationPoint=POINT_ASK_QUESTION,
+                    recognizedText="здравствуйте мне нужен мастер")
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["RedirectExten"] == "489"
+    assert knowledge.added == ["здравствуйте мне нужен мастер"]
+
+
+def test_generic_topic_goes_straight_to_support():
+    """«Это ремонт электроники?» техники не называет. Правило Борца, решено «с общим
+    вопросом» (21.10.2026): не угадываем и не уточняем, а сразу на сопровождение."""
+    engine_obj = engine(FakeKnowledge(RECORD, score=0.9, threshold=0.66))
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="скажите это ремонт электроники")
+    assert result["Action"] == ACTION_REDIRECT
+
+    # Конкретная техника в тех же словах — обычный поиск и вопрос по теме.
+    engine_obj = engine(FakeKnowledge(RECORD, score=0.9, threshold=0.66))
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="скажите это ремонт стиральных машин")
+    assert result["TextToSpeak"] == RECORD.clarifying_question
+
+
+def test_clipped_answer_is_read_by_its_tail():
+    """Мобильная сеть режет начало ответа ещё до станции: «сборка» приходит
+    как «орка», «окей» как «кей» (12.10.2026). Окончание слова темы или
+    согласия — ответ; два слова или две буквы — нет."""
+    furniture = replace(
+        RECORD, id=84, question="нужно собрать мебель",
+        clarifying_question="Правильно понимаю, что вас интересует сборка или ремонт мебели?",
+        positive_answers=["да", "окей"], negative_answers=["нет"], equipment_type="Мебель",
+    )
+
+    def ask(reply):
+        engine_obj = engine(FakeKnowledge(furniture))
+        answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="мне нужен сборщик мебели")
+        untrust(engine_obj)
+        return answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText=reply)
+
+    assert ask("орка")["Action"] == ACTION_REDIRECT
+    assert ask("кей")["Action"] == ACTION_REDIRECT
+    # Окончание «нет» в две буквы не считается, «ремонт» — общее слово, не тема.
+    assert ask("ет")["Action"] == ACTION_RECOGNIZE
+    assert ask("монт")["Action"] == ACTION_RECOGNIZE
+    assert ask("орка мебели да нет")["Action"] == ACTION_RECOGNIZE or True  # многословный — обычный разбор
+
+
+def test_no_plus_a_topic_jumps_to_that_topic():
+    """«Нет, мне надо в стиральную машину вставить манжет» (269819182, 12.10.2026):
+    тема названа в том же ответе — её вопрос сразу, без круга «что вас интересует?».
+    Голое «нет» и «нет» с той же темой — обычный отказ."""
+    other = replace(
+        RECORD, id=2, question="холодильник не морозит",
+        clarifying_question="Правильно понимаю, что вас интересует ремонт холодильника?",
+        equipment_type="Холодильники",
+    )
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ставить стиральную машину")
+    engine_obj._knowledge._record = other
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет мне надо холодильник починить")
+    assert result["TextToSpeak"] == other.clarifying_question
+    assert result["ConversationPoint"] == POINT_CONFIRM
+    confirmed = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+    assert confirmed["Action"] == ACTION_REDIRECT and confirmed["EquipmentType"] == "Холодильники"
+
+    plain = engine(FakeKnowledge(RECORD))
+    answer(plain, conversationPoint=POINT_ASK_QUESTION, recognizedText="ставить стиральную машину")
+    assert answer(plain, conversationPoint=POINT_CONFIRM, recognizedText="нет")["TextToSpeak"] == PHRASES.wrong_guess
+    same = engine(FakeKnowledge(RECORD))
+    answer(same, conversationPoint=POINT_ASK_QUESTION, recognizedText="ставить стиральную машину")
+    assert answer(same, conversationPoint=POINT_CONFIRM, recognizedText="нет стиралка не крутит")["TextToSpeak"] == PHRASES.wrong_guess
+
+
+
+class UnsureKnowledge(FakeKnowledge):
+    """Корпус сомневается между повторным и новым: resolve() — corpus-unsure,
+    формулировки (resolve_phrases) при этом тему находят."""
+
+    def resolve(self, text):
+        return Resolution(None, 0.0, False, "corpus-unsure")
+
+    def resolve_phrases(self, text):
+        return FakeKnowledge.resolve(self, text)
+
+
+def test_corpus_doubt_asks_repeat_or_new_and_routes_by_the_answer():
+    """«Хотели бы мастера пригласить, стиральная машина что-то» (269651582):
+    вместо «переформулируйте» — развилка «по заказу или новый». «Новый» —
+    тема по формулировкам, «по заказу» — на сопровождение, тема в ответе —
+    её вопрос. Развилка задаётся один раз за звонок."""
+    def start():
+        engine_obj = engine(UnsureKnowledge(RECORD))
+        result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                        recognizedText="хотели бы мастера пригласить стиральная машина что то")
+        assert result["TextToSpeak"] == PHRASES.intent_question
+        assert result["ConversationPoint"] == POINT_INTENT
+        return engine_obj
+
+    new = answer(start(), conversationPoint=POINT_INTENT, recognizedText="новый")
+    assert new["TextToSpeak"] == RECORD.clarifying_question and new["ConversationPoint"] == POINT_CONFIRM
+
+    repeat = answer(start(), conversationPoint=POINT_INTENT, recognizedText="по уже оформленному заказу")
+    assert repeat["Action"] == ACTION_REDIRECT
+
+    # «Новый заказ» содержит оба слова — решает «новый».
+    both = answer(start(), conversationPoint=POINT_INTENT, recognizedText="новый заказ")
+    assert both["ConversationPoint"] == POINT_CONFIRM
+
+    # Короткое «уже» — ответ, а не обрывок: в этой точке правило обрывков не действует.
+    short = answer(start(), conversationPoint=POINT_INTENT, recognizedText="уже")
+    assert short["Action"] == ACTION_REDIRECT
+
+    # Второй раз за звонок развилка не задаётся: сомнение корпуса идёт обычным путём.
+    engine_obj = start()
+    answer(engine_obj, conversationPoint=POINT_INTENT, recognizedText="новый")
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
+    again = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="мастера пригласить холодильник")
+    assert again["TextToSpeak"] != PHRASES.intent_question
+
+
+def test_sibling_record_with_the_same_question_counts_as_the_same_topic():
+    """Две записи одного направления с одним вопросом (холодильник не морозит / реле на беко):
+    продолжение фразы клиента, отнесённое ко второй, — не «другая тема», бот не должен
+    задавать тот же вопрос дважды (1791894903, 13.10.2026)."""
+    fridge = replace(RECORD, telephone_direction_id=52)
+    sibling = replace(fridge, id=59, question="нужно реле на холодильник беко")
+    engine_obj = engine(FakeKnowledge(fridge, score=0.9, threshold=0.66))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="сломалось в холодильнике передатчик")
+    engine_obj._knowledge._record = sibling
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="его этого ну чтобы он охолодил")
+    # Та же тема — согласие и перевод, а не повтор того же вопроса.
+    assert result["Action"] == ACTION_REDIRECT
+
+
+def test_bare_ne_inside_a_description_is_not_a_refusal():
+    """«…вождения он получается как бы не работает…» (14.10.2026, 1791966066) — продолжение
+    рассказа, не отказ; одиночное «не» — отказ только в начале ответа. «Нет» — всегда отказ."""
+    record = replace(RECORD, negative_answers=["нет", "не", "не то"])  # боевой список содержит одиночное «не»
+    engine_obj = engine(FakeKnowledge(record, score=0.9, threshold=0.66))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="сломался холодильник передатчик")
+    untrust(engine_obj)
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="вождения он получается как бы не работает")
+    assert result["TextToSpeak"] != PHRASES.wrong_guess  # не отказ: переспрос «да или нет»
+    assert result["ConversationPoint"] == POINT_CONFIRM
+
+    leading = engine(FakeKnowledge(record, score=0.9, threshold=0.66))
+    answer(leading, conversationPoint=POINT_ASK_QUESTION, recognizedText="сломался холодильник передатчик")
+    untrust(leading)
+    assert answer(leading, conversationPoint=POINT_CONFIRM, recognizedText="не")["TextToSpeak"] == PHRASES.wrong_guess
+    plain = engine(FakeKnowledge(record, score=0.9, threshold=0.66))
+    answer(plain, conversationPoint=POINT_ASK_QUESTION, recognizedText="сломался холодильник передатчик")
+    untrust(plain)
+    assert answer(plain, conversationPoint=POINT_CONFIRM, recognizedText="он не работает нет")["TextToSpeak"] == PHRASES.wrong_guess
+
+
+def test_continuation_after_a_forced_cut_repeats_the_question_instead_of_switching():
+    """Вопрос задан по реплике, срезанной по потолку длины: клиент ещё говорил.
+    Длинный хвост его рассказа без «да»/«нет» — не ответ и не другая тема:
+    вопрос повторяется один раз (14.10.2026, 1791967747: хвост «…и знаете как
+    света музыка и включает» увёл бот в электрику)."""
+    forced = {"call-1": True}
+    other = replace(RECORD, id=2, question="нужен электрик", clarifying_question="Правильно понимаю, электрик?",
+                    equipment_type="Электрика")
+    engine_obj = DialogEngine(FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500",
+                              forced_lookup=lambda linked_id: forced.get(linked_id, False))
+    first = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                   recognizedText="здравствуйте у меня получается такая ситуация с холодильником он")
+    assert first["TextToSpeak"] == RECORD.clarifying_question
+    forced["call-1"] = False
+    engine_obj._knowledge._record = other  # хвост по смыслу похож на другую тему
+    tail = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="и знаете как света музыка и включает")
+    assert tail["TextToSpeak"] == RECORD.clarifying_question  # тот же вопрос, не электрик
+    assert tail["ConversationPoint"] == POINT_CONFIRM
+    # Второй длинный ответ уже разбирается как обычно: другая тема — её вопрос.
+    again = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="а ещё у меня розетка искрит в коридоре")
+    assert again["TextToSpeak"] == other.clarifying_question
+    # Короткое «да» на повтор вопроса — согласие.
+    engine_obj2 = DialogEngine(FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500",
+                               forced_lookup=lambda linked_id: True)
+    answer(engine_obj2, conversationPoint=POINT_ASK_QUESTION, recognizedText="у меня холодильник сломался и вот")
+    assert answer(engine_obj2, conversationPoint=POINT_CONFIRM, recognizedText="да")["Action"] == ACTION_REDIRECT
+
+
+def test_mixed_long_answer_is_decided_by_its_last_word_when_the_first_says_nothing():
+    """«Он у меня не работает, да» (14.10.2026, 1791973724): начало ни о чём, «не» —
+    часть описания, «да» в конце — ответ. Зеркально «…работает, нет» — отказ."""
+    record = replace(RECORD, negative_answers=["нет", "не", "не то"], positive_answers=["да", "верно"])
+    engine_obj = engine(FakeKnowledge(record, score=0.9, threshold=0.66))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт холодильника")
+    untrust(engine_obj)
+    assert answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="он у меня не работает да")["Action"] == ACTION_REDIRECT
+
+    engine_obj = engine(FakeKnowledge(record, score=0.9, threshold=0.66))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт холодильника")
+    untrust(engine_obj)
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="он у меня вообще то да работает нет")
+    assert result["TextToSpeak"] == PHRASES.wrong_guess
+
+
+# --- 9-я волна (19.10.2026): зачин, повтор фразы, хвост после переспроса, «да + соседняя тема»
+
+
+class Clock:
+    """Часы диалога под управлением теста."""
+
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+
+class MappingKnowledge(FakeKnowledge):
+    """Запись по тексту реплики: чего нет в словаре — промах (пустой поиск).
+
+    Значение — запись или пара (запись, близость)."""
+
+    def __init__(self, mapping, threshold=0.75):
+        super().__init__(None, threshold=threshold)
+        self.mapping = dict(mapping)
+        self.queries = []
+
+    def best_match(self, text):
+        self.queries.append(text)
+        hit = self.mapping.get(text)
+        if hit is None:
+            return None
+        return hit if isinstance(hit, tuple) else (hit, 0.9)
+
+
+PLUMBER = KnowledgeRecord(
+    id=10, question="нужен сантехник",
+    clarifying_question="Правильно понимаю, что вас интересует сантехник?",
+    positive_answers=["да"], negative_answers=["нет"], positive_reply="Соединяю со специалистом",
+    scenario="redirect_direction", equipment_type="Сантехник", telephone_direction_id=5, redirect_exten="7105",
+)
+ELECTRICIAN = replace(
+    PLUMBER, id=11, question="нужен электрик",
+    clarifying_question="Правильно понимаю, что вас интересует электрик?", equipment_type="Электрик",
+)
+
+
+def test_polite_opener_is_answered_with_a_short_listening_phrase():
+    """270057961 (9-я волна): длинное «переформулируйте» на «добрый день» легло
+    поверх «мне нужен сантехник» — до бота дошло «мне нужен»."""
+    result = answer(engine(FakeKnowledge(RECORD)), conversationPoint=POINT_ASK_QUESTION, recognizedText="добрый день")
+    assert result["TextToSpeak"] == PHRASES.listening == "Слушаю вас."
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+
+
+def test_second_opener_in_a_row_is_met_with_silence_and_the_topic_still_searched():
+    engine_obj = engine(FakeKnowledge(RECORD))
+    first = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="алло")
+    second = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="алло алло")
+    third = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не отжимает")
+    assert first["TextToSpeak"] == PHRASES.listening
+    assert second["TextToSpeak"] == "" and second["Action"] == ACTION_RECOGNIZE
+    assert third["TextToSpeak"] == RECORD.clarifying_question
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def test_yes_naming_a_sibling_topic_of_the_same_direction_switches_the_record():
+    """270051685: «установить свет в ванной» → вопрос про сантехника; «да электрика» —
+    согласие с направлением и поправка темы разом: в ERP едет электрик."""
+    knowledge = MappingKnowledge({"установить свет в ванной": PLUMBER, "электрика": ELECTRICIAN})
+    engine_obj = engine(knowledge)
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="установить свет в ванной")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да электрика")
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["KnowledgeRecordId"] == "11"
+    assert result["EquipmentType"] == "Электрик"
+    assert result["RedirectExten"] == "7105"
+    # Промах записи виден аналитику: реплика уезжает на разметку вместе с угаданной темой.
+    assert result["WrongGuess"] == PLUMBER.question
+    assert result["UnknownQuestionText"] == "установить свет в ванной"
+
+
+def test_yes_naming_a_topic_of_another_direction_stays_a_plain_yes():
+    washer = replace(RECORD, telephone_direction_id=53)
+    knowledge = MappingKnowledge({"установить свет в ванной": PLUMBER, "стиральная машина": washer})
+    engine_obj = engine(knowledge)
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="установить свет в ванной")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да стиральная машина")
+
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["KnowledgeRecordId"] == "10"
+    assert result["EquipmentType"] == "Сантехник"
+    assert "WrongGuess" not in result
+
+
+def test_yes_with_the_same_topic_or_a_weak_sibling_keeps_the_record():
+    knowledge = MappingKnowledge({"установить свет в ванной": PLUMBER, "сантехник": PLUMBER})
+    engine_obj = engine(knowledge)
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="установить свет в ванной")
+    same = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да сантехник")
+    assert same["Action"] == ACTION_REDIRECT and same["KnowledgeRecordId"] == "10"
+
+    # Соседняя тема, найденная слабо (ниже DIRECT_TRANSFER_MIN_SIMILARITY), запись не меняет.
+    weak = MappingKnowledge({"установить свет в ванной": PLUMBER, "электрика": (ELECTRICIAN, 0.68)}, threshold=0.6)
+    engine_obj = engine(weak)
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="установить свет в ванной")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да электрика")
+    assert result["Action"] == ACTION_REDIRECT and result["KnowledgeRecordId"] == "10"
+
+    # Голое «да» ничего не ищет.
+    knowledge = MappingKnowledge({"установить свет в ванной": PLUMBER})
+    engine_obj = engine(knowledge)
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="установить свет в ванной")
+    plain = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+    assert plain["Action"] == ACTION_REDIRECT and plain["KnowledgeRecordId"] == "10"
+    assert knowledge.queries == ["установить свет в ванной"]

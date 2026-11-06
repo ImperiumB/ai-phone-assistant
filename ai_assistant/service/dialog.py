@@ -8,8 +8,11 @@ import hashlib
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+from ai_assistant.service.knowledge import content_words, exact_key
 
 log = logging.getLogger("aia.dialog")
 
@@ -18,6 +21,11 @@ _WORD_RE = re.compile(r"\w+")
 POINT_START = "Start"
 POINT_ASK_QUESTION = "AskQuestion"
 POINT_CONFIRM = "Confirm"
+#: Развилка «по уже оформленному заказу или новый»: задаётся, когда корпус
+#: видит в реплике повторное обращение, но не настолько уверенно, чтобы
+#: переводить без вопроса («хотели бы мастера пригласить, стиральная машина
+#: что-то» — 269651582, 7-я волна). Раньше тут звучало «переформулируйте».
+POINT_INTENT = "Intent"
 POINT_FINISHED = "Finished"
 
 ACTION_RECOGNIZE = "Recognize"
@@ -71,16 +79,45 @@ CONFIRM_UNCLEAR_ATTEMPTS = 1
 # вводили. Молчащего клиента подберёт ветка silence по своему таймауту.
 ASK_SILENT_EMPTY_ATTEMPTS = 1
 
-# Сколько раз за звонок бот просит переформулировать вопрос, не найдя темы.
-# Клиент называет поломку своими словами, и в базе знаний этих слов может не
-# оказаться — на живом звонке 20.08.2026 «здравствуйте меня интересует ремонт
-# пиццы» дало близость 0.6277 при пороге 0.64. До перевода на человека честно
-# попросить сказать иначе: часто со второй попытки тема находится, и звонок
-# заканчивается там же, где и должен, — на нужном отделе.
-#
-# Ровно один переспрос: вторая просьба переформулировать подряд читается уже
-# как издевательство над человеком, который дважды объяснил свою проблему.
-QUESTION_REASK_ATTEMPTS = 1
+# Запись без уточняющего вопроса — это перевод на человека сразу, без права на
+# ошибку: переспросить потом некого. Поэтому по формулировкам такая запись
+# берётся только при заметно более близком совпадении, чем обычная (у которой
+# ошибку поймает вопрос «правильно понимаю…?»). Планка та же, что у корпуса
+# для перевода на сопровождение без вопроса (AIA_CORPUS_OPERATOR_THRESHOLD).
+# 5-я волна 02.10.2026, 269211995: «узнать про ремонт» дало 0.689 с записью
+# «вопрос по оформленному заказу на кофемашину или оргтехнику» — и клиент уехал
+# на сопровождение вместо переспроса.
+DIRECT_TRANSFER_MIN_SIMILARITY = 0.72
+
+#: Слова, которыми технику называют вообще, не называя её: «ремонт
+#: электроники», «починить технику», «нужен мастер». Реплика только из них
+#: (после отсева приветствий и связок, см. knowledge.content_words) темы не
+#: содержит, и по смыслу её искать нельзя — найдётся ближайшее случайное
+#: (269649822, 09.10.2026: «это ремонт электроники» → оргтехника).
+GENERIC_TOPIC_WORDS = frozenset("""
+ремонт ремонта ремонту ремонтом ремонтируете ремонтировать отремонтировать починить чинить
+сломалось сломалась сломался сломались работает включается
+техника техники технику техникой электроника электроники электронику
+оборудование оборудования аппаратура аппаратуры аппаратуру прибор прибора приборы
+устройство устройства бытовая бытовой бытовую бытовые
+нужен нужна нужно надо хочу хотел хотела хотели бы вызвать заказать
+мастер мастера мастером сервис сервисный центр
+занимаетесь делаете можно ли это такое вопрос
+узнать спросить уточнить поинтересоваться интересует интересуюсь по поводу насчет
+не ни
+""".split())
+
+# Длиннее этого ответ на уточняющий вопрос, в котором есть и слова согласия, и
+# слова отказа, не разбирается по словам: «диодными люстрами я не занимаюсь, вот
+# вы можете ответить, у вас да да да» — это «да», а «не» внутри относится к
+# другому (298, 02.10.2026). Короткие «да нет», «нет да» — по-прежнему отказ.
+MIXED_ANSWER_SHORT_WORDS = 3
+
+#: Обрезанное слово в ответе на подтверждение: от скольких букв его можно
+#: дочитать до слова из ожидаемых ответов или темы («орка» → «сборка»).
+#: Короче — слишком много случайных совпадений («ет» подошло бы и к «нет»,
+#: и к «будет»).
+CLIPPED_WORD_MIN_LETTERS = 3
 
 # Переспрос в точке подтверждения. Формулировка намеренно без грамматического
 # рода: голос выбирается в справочнике группы линий и может быть как мужским
@@ -96,6 +133,30 @@ QUESTION_REASK_ATTEMPTS = 1
 # normalize_for_vosk выбросит его молча. Значение обязано совпадать с
 # DefaultConfirmNotHeard в обработчике 15424 — оно присылается в посылке.
 DEFAULT_CONFIRM_NOT_HEARD = "Простите, не слышу вас. Скажите, пожалуйста, да... или нет"
+
+# Развилка намерения (POINT_INTENT). Своего поля в справочнике группы линий
+# пока нет — значение по умолчанию, как у confirm_not_heard; фраза записана
+# голосами библиотеки, текст менять только вместе с записью.
+DEFAULT_INTENT_QUESTION = "Вы звоните по уже оформленному заказу или хотите оформить новый?"
+
+# Ответ на вежливый зачин без темы («алло», «добрый день»). До 19.10.2026 бот
+# отвечал на него той же длинной просьбой переформулировать, что и на промах:
+# 3,6 секунды поверх клиента, который как раз начинал говорить («добрый день» →
+# «попробуйте переформулировать» → перебитое «мне нужен сантехник», 9-я волна,
+# 270057961). Одна секунда «Слушаю вас» — и клиент договаривает.
+DEFAULT_LISTENING_PHRASE = "Слушаю вас."
+
+#: Ответ на развилку — «по заказу»: слова про уже существующий заказ.
+INTENT_REPEAT_WORDS = frozenset("""
+оформленному оформленного оформленный оформленной оформлен оформляли оформляла оформлял
+заказу заказа заявке заявки заявку существующему старому старый первому первый прежнему
+повторно повторный уже звонили звонил звонила приезжал приезжала был была ждем ждём жду ждали
+""".split())
+#: Ответ на развилку — «новый»: слова про новый заказ. Проверяются первыми:
+#: «новый заказ» содержит и «заказ», и «новый».
+INTENT_NEW_WORDS = frozenset("""
+новый новая новую нового новой новое оформить заказать вызвать второй другой впервые
+""".split())
 
 # Реплика уходит в поиск по смыслу, только если в ней есть слово хотя бы такой
 # длины. Эмбеддинг двух-трёх букв — шум: близость у него к какой-нибудь теме
@@ -178,6 +239,11 @@ class Phrases:
     #: вернуло пустоту. Значение по умолчанию — на то время, пока в справочнике
     #: группы линий нет своего поля: посылка без него применяется как обычно.
     confirm_not_heard: str = DEFAULT_CONFIRM_NOT_HEARD
+    #: Развилка «по заказу или новый» (POINT_INTENT); значение по умолчанию до
+    #: появления своего поля в справочнике группы линий.
+    intent_question: str = DEFAULT_INTENT_QUESTION
+    #: Короткий ответ на зачин без темы; записан голосами библиотеки.
+    listening: str = DEFAULT_LISTENING_PHRASE
 
 
 # Сколько последних цифр номера участвуют в сравнении. Набранный номер
@@ -196,6 +262,8 @@ PHRASE_SLOTS = (
     "silence",
     "wrong_guess",
     "confirm_not_heard",
+    "intent_question",
+    "listening",
 )
 
 
@@ -259,6 +327,16 @@ def _playback_name(text: str, audio_signature: str = "") -> str:
     return "aia_" + digest
 
 
+def _now() -> float:
+    """Часы диалога — отдельной функцией, чтобы тесты могли их подменить."""
+    return time.time()
+
+
+def _said_key(text: str) -> str:
+    """Фраза как ключ сравнения «та же самая»: слова через пробел, без регистра и знаков."""
+    return " ".join(_WORD_RE.findall(text.lower().replace("ё", "е")))
+
+
 class _SessionState:
     def __init__(self) -> None:
         self.record = None
@@ -277,6 +355,21 @@ class _SessionState:
         #: которого один раз попросили сказать иначе, не должен услышать ту же
         #: просьбу ещё раз где-то в конце разговора.
         self.reask_count = 0
+        #: Развилка «по заказу или новый» задаётся один раз за звонок; реплика,
+        #: на которой корпус засомневался, ждёт ответа на неё.
+        self.intent_asked = False
+        self.pending_text = ""
+        #: Последняя реплика отдана по потолку длины (клиент ещё говорил), и
+        #: заданный по ней вопрос застал клиента на полуслове.
+        self.last_forced = False
+        self.question_forced = False
+        #: Последняя служебная фраза, которую бот произнёс (текст). Одну и ту же
+        #: подряд не повторяем: «переформулируйте» дважды в 469 (9-я волна).
+        self.last_said = ""
+        #: Когда и по какой реплике бот в последний раз просил переформулировать:
+        #: ответ, пришедший через секунду-полторы, — продолжение той же фразы.
+        self.reask_at = 0.0
+        self.last_miss_text = ""
         #: Реплика клиента, по которой нашлась record, — чтобы при «нет» на
         #: уточняющий вопрос было что отправить на разметку.
         self.question_text = ""
@@ -305,8 +398,13 @@ class DialogEngine:
         audio_files: Optional[Dict[str, str]] = None,
         line_profiles: Optional[List[LineProfile]] = None,
         is_private_master: bool = False,
+        forced_lookup=None,
     ):
         self._knowledge = knowledge
+        #: Была ли последняя реплика звонка отдана распознаванию принудительно, по
+        #: потолку длины (vad.MAX_UTTERANCE_SECONDS). Сервис знает это в потоке
+        #: звука, диалог — нет: AGI присылает только текст. Функция (linkedId → bool).
+        self._forced_lookup = forced_lookup
         self._support_exten = support_exten
         self._sales_exten = sales_exten
         self._max_sessions = max_sessions
@@ -409,6 +507,8 @@ class DialogEngine:
         text = (prms.get("recognizedText") or "").strip().lower()
         silence = str(prms.get("silenceDetected", "")).lower() == "true"
         state = self._session(linked_id)
+        if text:
+            state.last_forced = bool(self._forced_lookup and self._forced_lookup(linked_id))
         # Набор выбирается на каждой реплике заново, а не запоминается в
         # сессии: набранный номер приезжает в каждом запросе, и лишнее
         # состояние тут ничего не даёт.
@@ -478,7 +578,8 @@ class DialogEngine:
                     "Обрывок в точке %s подряд %s раз — просим сказать иначе",
                     point, state.empty_count,
                 )
-                result = self._say(profile, "misrecognition", ACTION_RECOGNIZE, point)
+                result = self._say_fresh(state, profile, "misrecognition", ACTION_RECOGNIZE, point,
+                                         fallbacks=("listening",))
             else:
                 log.info("Пустой результат распознавания в точке %s — продолжаем слушать", point)
                 result = self._keep_listening(point)
@@ -491,17 +592,29 @@ class DialogEngine:
             #
             # Промахом это не считается: переспрос по теме (reask_count) не
             # тратится, иначе вежливый клиент оказался бы наказан за вежливость.
+            #
+            # Отвечаем коротким «Слушаю вас.», а не просьбой переформулировать:
+            # та длинная, и на всё её время станция глуха — в 9-й волне
+            # (270057961) она легла поверх «мне нужен сантехник», до бота дошло
+            # «мне нужен». Второй зачин подряд — молчим: приглашение уже
+            # прозвучало, клиент сейчас назовёт тему.
             log.info("Реплика %r — вежливый зачин без темы, в поиск не идёт", text)
             state.silence_count = 0
             state.empty_count = 0
-            result = self._say(profile, "misrecognition", ACTION_RECOGNIZE, point)
+            result = self._say_fresh(state, profile, "listening", ACTION_RECOGNIZE, point)
         else:
             state.silence_count = 0
             state.empty_count = 0
             if point == POINT_CONFIRM:
                 result = self._handle_confirmation(state, text, profile)
+            elif point == POINT_INTENT:
+                result = self._handle_intent(state, text, profile)
             else:
                 result = self._handle_question(state, text, profile)
+
+        spoken = self._spoken_text(result)
+        if spoken:
+            state.last_said = _said_key(spoken)
 
         # Разговор дошёл до конца (перевод на специалиста или на продажи) —
         # его состояние больше не понадобится, держать его в памяти дальше
@@ -524,11 +637,17 @@ class DialogEngine:
         ошибка распознавания). Одно слово в одной точке разговора осмысленно,
         в другой — шум, и различать их можно только по точке.
         """
-        if point == POINT_CONFIRM:
+        if point in (POINT_CONFIRM, POINT_INTENT):
             return False
         return not any(
             len(word) >= MIN_SEARCHABLE_WORD_LETTERS for word in _LETTERS_RE.findall(text)
         )
+
+    @staticmethod
+    def _is_generic_only(text: str) -> bool:
+        """Техника названа вообще («ремонт электроники»), а не конкретно."""
+        words = content_words(text)
+        return bool(words) and all(w in GENERIC_TOPIC_WORDS for w in words)
 
     @staticmethod
     def _is_filler_only(text: str, point: str) -> bool:
@@ -537,7 +656,7 @@ class DialogEngine:
         В точке подтверждения не действует по той же причине, что и правило об
         обрывках: там та же реплика — не название темы, а ответ на вопрос бота.
         """
-        if point == POINT_CONFIRM:
+        if point in (POINT_CONFIRM, POINT_INTENT):
             return False
         words = _LETTERS_RE.findall(text.lower().replace("ё", "е"))
         return bool(words) and all(word in FILLER_WORDS for word in words)
@@ -545,6 +664,39 @@ class DialogEngine:
     @staticmethod
     def _reaches(result: List[Dict[str, str]], point: str) -> bool:
         return any(item.get("Key") == "ConversationPoint" and item.get("Value") == point for item in result)
+
+    @staticmethod
+    def _spoken_text(result: List[Dict[str, str]]) -> str:
+        for item in result:
+            if item.get("Key") == "TextToSpeak":
+                return item.get("Value") or ""
+        return ""
+
+    def _say_fresh(
+        self,
+        state: _SessionState,
+        profile: LineProfile,
+        slot: str,
+        action: str,
+        point: str,
+        fallbacks: tuple = (),
+    ) -> List[Dict[str, str]]:
+        """Служебная фраза, но не та, что бот произнёс только что.
+
+        Одна и та же фраза дважды подряд звучит как заевшая пластинка: в 9-й
+        волне (270043147) клиент услышал «переформулируйте» два раза кряду и
+        положил трубку. Повтор заменяем запасной фразой с другим текстом, а
+        если запасной нет или она тоже только что звучала — молчим и слушаем
+        дальше в той же точке.
+        """
+        for candidate in (slot,) + tuple(fallbacks):
+            text = getattr(profile.phrases, candidate, "")
+            if text and _said_key(text) != state.last_said:
+                if candidate != slot:
+                    log.info("Фраза %r только что звучала — говорим %r", slot, candidate)
+                return self._say(profile, candidate, action, point)
+        log.info("Фраза %r только что звучала — молчим и слушаем дальше", slot)
+        return self._keep_listening(point)
 
     def _handle_question(
         self, state: _SessionState, text: str, profile: LineProfile
@@ -557,39 +709,61 @@ class DialogEngine:
         # примерно вдвое, хотя измеряется именно ради честной цифры этого
         # отрезка). Получаем лучшее совпадение один раз, логируем его и на
         # нём же принимаем решение — повторного обращения к поиску нет.
-        resolution = self._knowledge.resolve(text) if text else None
-        match = (resolution.record, resolution.score) if resolution and resolution.record else None
-        self._log_similarity(text, match)
+        query = text
+        exact = getattr(self._knowledge, "exact", None)
+        if self._is_generic_only(query) and not (exact and exact(query)):
+            # «Это ремонт электроники?», «нужно починить технику» — техника не
+            # названа, а эмбеддер всё равно подберёт ближайшее: «электроника»
+            # ушла в оргтехнику (269649822, 09.10.2026), оператор ответил
+            # «не ремонтируем». Такой вопрос честнее переспросить, чем угадать.
+            # Исключение — формулировка, записанная аналитиком слово в слово:
+            # она написана осознанно и общей не считается.
+            log.info("Реплика %r называет технику слишком общо — тему не угадываем", query)
+            resolution = None
+            match = None
+            generic = True
+        else:
+            generic = False
+            resolution = self._knowledge.resolve(query) if query else None
+            match = (resolution.record, resolution.score) if resolution and resolution.record else None
+            self._log_similarity(query, match)
         self._log_vote(resolution)
 
         # Кому верить, решает база знаний (KnowledgeBase.resolve): соседям по
         # корпусу живых реплик, если они уверены, иначе порогу по формулировке.
         found = match if resolution is not None and resolution.trusted else None
+        if (found is None and resolution is not None and resolution.source == "corpus-unsure"
+                and not state.intent_asked):
+            # Корпус видит повторное обращение, но не настолько уверенно, чтобы
+            # переводить без вопроса. Раньше бот просил переформулировать, и
+            # клиент повторял то же самое (269651582, 7-я волна). Спрашиваем
+            # прямо: по заказу или новый — ответ решает за корпус.
+            state.intent_asked = True
+            state.pending_text = query
+            log.info("Корпус сомневается между повторным и новым — спрашиваем развилку")
+            return self._say(profile, "intent_question", ACTION_RECOGNIZE, POINT_INTENT)
+        if (found is not None and resolution.source == "phrases"
+                and found[1] < DIRECT_TRANSFER_MIN_SIMILARITY):
+            log.info(
+                "Формулировочная близость %r всего %.4f < %.2f: ни перевод, ни уточняющий "
+                "вопрос, уходим к Борцу (сопровождение и запись вопроса на разметку)",
+                found[0].question, found[1], DIRECT_TRANSFER_MIN_SIMILARITY,
+            )
+            found = None
         if found is None:
-            # Промах по порогу — ещё не повод звать человека. Сначала просим
-            # сказать иначе и слушаем дальше, оставаясь в той же точке
-            # разговора. Вопрос при этом никуда не записываем: если клиент
-            # переформулирует и тема найдётся, писать в справочник нечего —
-            # бот справился сам.
-            if state.reask_count < QUESTION_REASK_ATTEMPTS:
-                state.reask_count += 1
-                log.info(
-                    "Тема не найдена — просим переформулировать вопрос (переспрос %s из %s)",
-                    state.reask_count, QUESTION_REASK_ATTEMPTS,
-                )
-                # Запись найденной темы сбрасываем: клиент сейчас назовёт
-                # поломку заново, и старое совпадение к его новым словам
-                # отношения не имеет.
-                state.record = None
-                return self._say(profile, "misrecognition", ACTION_RECOGNIZE, POINT_ASK_QUESTION)
-
+            # Правило Борца (21.10.2026): нечётко поняли, что хочет клиент — не
+            # угадываем и не переспрашиваем, а сразу переводим на сопровождение
+            # и пишем вопрос в базу знаний на ручную разметку. Это и общий
+            # вопрос («нужен мастер», «ремонт техники»), и промах по порогу —
+            # любой из них повод для человека, а не для догадки. Раньше был один
+            # переспрос; руководство выбрало точность и сбор нечётких вопросов
+            # вместо охвата. Текст уходит и в справочник (add), и в ответ с
+            # признаком UnknownQuestion — по нему оператор ОКК правит базу.
             if text:
                 self._knowledge.add(text)
-            # Совпадение ниже порога всё равно отдаём наружу: по нему потом
-            # разбирают, промахнулись мы чуть-чуть или не поняли вопрос вовсе.
-            # Но только как справку — тип оборудования по нему не проставляется.
             return self._transfer(
-                profile, self._support_exten, match=match, trusted=False, unknown_question=True, state=state
+                profile, self._support_exten, match=match, trusted=False,
+                unknown_question=True, state=state,
             )
 
         record, score = found
@@ -600,7 +774,8 @@ class DialogEngine:
 
         state.record = record
         state.score = score
-        state.question_text = text
+        state.question_text = query
+        state.question_forced = state.last_forced
         # Уточняющий вопрос всегда синтезируется: он живёт в базе знаний, а
         # записанные аудио есть только у служебных фраз группы линий.
         return self._speak(profile, record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
@@ -667,6 +842,51 @@ class DialogEngine:
             return self._sales_exten
         return self._support_exten
 
+    def _handle_intent(
+        self, state: _SessionState, text: str, profile: LineProfile
+    ) -> List[Dict[str, str]]:
+        """Ответ на развилку «по уже оформленному заказу или новый».
+
+        «По заказу» — повторное обращение, его ведёт человек: перевод на
+        сопровождение с исходной репликой клиента. «Новый» — тему ищем по
+        исходной реплике, но уже без корпуса: он здесь и засомневался, а
+        формулировки базы знаний в живой речи клиента найдут стиральную машину.
+        Клиент может вместо «да/нет» назвать тему заново — тогда её вопрос.
+        Ничего не нашлось — спрашиваем, что интересует, обычным ходом.
+        """
+        words = set(content_words(text)) | set(_WORD_RE.findall(text.lower().replace("ё", "е")))
+        wants_new = bool(words & INTENT_NEW_WORDS)
+        wants_repeat = not wants_new and bool(words & INTENT_REPEAT_WORDS)
+        pending = state.pending_text or text
+        if wants_repeat:
+            log.info("Развилка: %r — повторное обращение, переводим на сопровождение", text)
+            state.question_text = pending
+            return self._transfer(profile, self._support_exten, state=state)
+
+        # Тема, названная в самом ответе («стиральная машина»), важнее исходной реплики.
+        for candidate in ([text] if not wants_new and not self._is_generic_only(text) else []) + [pending]:
+            resolution = self._knowledge.resolve_phrases(candidate) if candidate == pending \
+                else self._knowledge.resolve(candidate)
+            self._log_vote(resolution)
+            if resolution is None or not resolution.trusted or resolution.record is None:
+                continue
+            record = resolution.record
+            if record.clarifying_question:
+                log.info("Развилка: %r — новый заказ, тема по формулировкам %r", text, record.question)
+                state.record = record
+                state.score = resolution.score
+                state.question_text = candidate
+                state.confirm_unclear = 0
+                return self._speak(profile, record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
+            if resolution.source != "phrases" or resolution.score >= DIRECT_TRANSFER_MIN_SIMILARITY:
+                return self._transfer(profile, self._support_exten, match=(record, resolution.score),
+                                      trusted=True, state=state)
+
+        log.info("Развилка: %r — тема не найдена, спрашиваем, что интересует", text)
+        state.record = None
+        return self._say_fresh(state, profile, "wrong_guess", ACTION_RECOGNIZE, POINT_ASK_QUESTION,
+                               fallbacks=("misrecognition",))
+
     def _handle_confirmation(
         self, state: _SessionState, text: str, profile: LineProfile
     ) -> List[Dict[str, str]]:
@@ -685,19 +905,114 @@ class DialogEngine:
         # засчитывался как «да» (обращения 268480915 и 268488949, 21.09.2026:
         # клиент сказал «нет», а бот соединил с холодильниками и клинингом).
         # Явное «нет» перевешивает любое попутное слово согласия.
-        if self._matches(text, negative):
+        # Отказ решает одиночное «не» только в начале ответа (_is_negative), но
+        # для смешанного ответа «…не занимаюсь… да да да» любое «не» считается:
+        # там решает первое слово, а не поиск отказа.
+        is_no_anywhere = self._matches(text, negative)
+        is_no = self._is_negative(text, negative)
+        is_yes = self._matches(text, positive)
+        if is_no_anywhere and is_yes and len(_WORD_RE.findall(text)) > MIXED_ANSWER_SHORT_WORDS:
+            is_no = True
+        if not is_no and not is_yes:
+            # Обрезанное слово. Мобильная сеть глушит передатчик в тишине и
+            # первые десятки миллисекунд ответа теряет ещё до станции: на
+            # записи станции «сборка» уже «орка», «окей» — «кей» (тестовые
+            # звонки 12.10.2026). Одно слово от трёх букв, которым кончается
+            # слово из ожидаемых ответов или из темы вопроса, — этот ответ.
+            clipped = self._clipped_word(text)
+            if clipped:
+                is_no = self._is_tail_of(clipped, negative)
+                is_yes = not is_no and (
+                    self._is_tail_of(clipped, positive) or self._is_tail_of(clipped, self._topic_words(record)))
+                if is_no or is_yes:
+                    log.info("Ответ %r на подтверждение — обрезанное слово, читаем как %s",
+                             text, "отказ" if is_no else "согласие")
+        if is_no and is_yes and len(_WORD_RE.findall(text)) > MIXED_ANSWER_SHORT_WORDS:
+            # Длинный ответ и с «да», и с «не». Решает то, с чего он начат: «нет, мне
+            # нужно ремонт мясорубки» — отказ, «да, но не сегодня» — согласие. Ни с
+            # того ни с другого — разбираем как непонятный (ниже), а не как отказ.
+            # См. MIXED_ANSWER_SHORT_WORDS.
+            is_no = self._starts_with(text, negative)
+            is_yes = not is_no and self._starts_with(text, positive)
+            if not is_no and not is_yes:
+                # Начало ни о чём («он у меня не работает, да» — 14.10.2026,
+                # 1791973724): решает последнее слово. «Не» внутри — часть
+                # описания поломки, «да» в конце — ответ на вопрос.
+                is_no = self._ends_with(text, negative)
+                is_yes = not is_no and self._ends_with(text, positive)
+            if not is_no and not is_yes:
+                log.info("Ответ %r на подтверждение содержит и согласие, и отказ — переспрашиваем", text)
+
+        if is_no:
+            # «Нет, мне надо в стиральную машину вставить манжет» (269819182,
+            # 12.10.2026), «нет, ремонт газовой колонки» (269828493): после
+            # отказа клиент тут же называет тему. Спросить «что вас
+            # интересует?» и услышать то же самое ещё раз — лишний круг, за
+            # который его и ругают. Берём тему из того же ответа: другая
+            # запись с вопросом — сразу её вопрос, запись без вопроса —
+            # перевод. Та же запись или ничего внятного — обычный отказ.
+            rest = self._after_negation(text, negative)
+            if rest and len(content_words(rest)) >= 1 and not self._is_generic_only(rest):
+                named = self._knowledge.resolve(rest)
+                self._log_vote(named)
+                if named is not None and named.trusted and named.record is not None \
+                        and not self._same_topic(named.record, record):
+                    if state.question_text and state.wrong_guess is None:
+                        state.wrong_guess = (state.question_text, record.question)
+                    if named.record.clarifying_question:
+                        log.info("Отказ %r сразу называет другую тему — спрашиваем её", text)
+                        state.record = named.record
+                        state.score = named.score
+                        state.question_text = rest
+                        state.confirm_unclear = 0
+                        return self._speak(profile, named.record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
+                    if named.source != "phrases" or named.score >= DIRECT_TRANSFER_MIN_SIMILARITY:
+                        log.info("Отказ %r сразу просит тему без вопроса %r — переводим", text, named.record.question)
+                        return self._transfer(
+                            profile, self._support_exten,
+                            match=(named.record, named.score), trusted=True, state=state,
+                        )
             if state.question_text and state.wrong_guess is None:
                 state.wrong_guess = (state.question_text, record.question)
             state.record = None
-            return self._say(profile, "wrong_guess", ACTION_RECOGNIZE, POINT_ASK_QUESTION)
+            # Промах (клиент сказал «нет» на угаданную тему) отдаём в ответ отдельным
+            # ключом, чтобы AGI положил его в канал: бросит трубку на переспросе.
+            # last_will пошлёт wrongGuess в Hangup, и форма ОКК увидит промах. Только
+            # WrongGuess, без UnknownQuestion: вопрос на разметку пишется при сдаче, а не
+            # на переспросе, иначе база знаний засорится вопросами, которые клиент ещё уточнит.
+            reask_extra = {"WrongGuess": state.wrong_guess[1]} if state.wrong_guess else None
+            return self._say(profile, "wrong_guess", ACTION_RECOGNIZE, POINT_ASK_QUESTION,
+                             extra=reask_extra)
 
-        if self._matches(text, positive):
+        if is_yes:
+            sibling = self._sibling_after_yes(text, positive, record)
+            if sibling is not None:
+                # «Да, электрика» на вопрос про сантехника (270051685, 9-я
+                # волна): направление то же, но тема названа точнее, и в ERP
+                # должен уехать электрик, а не сантехник.
+                log.info("Согласие %r называет соседнюю тему %r — переводим по ней", text, sibling.record.question)
+                if state.question_text and state.wrong_guess is None:
+                    state.wrong_guess = (state.question_text, record.question)
+                record = sibling.record
+                state.record = record
+                state.score = sibling.score
             exten = self._exten_for(record, profile)
             extra = self._with_wrong_guess(state, self._match_extra((record, state.score), trusted=True))
             return self._speak(
                 profile, record.positive_reply, ACTION_REDIRECT, POINT_FINISHED,
                 exten=exten, extra=extra,
             )
+
+        if state.question_forced and len(_WORD_RE.findall(text)) > MIXED_ANSWER_SHORT_WORDS:
+            # Вопрос задан по реплике, срезанной по потолку длины: клиент ещё
+            # говорил, когда бот заговорил сам. Длинный ответ без «да»/«нет» —
+            # это хвост его рассказа, а не ответ на вопрос («…и знаете как света
+            # музыка и включает», 14.10.2026, 1791967747: бот принял хвост за
+            # другую тему и ушёл в электрику). Вопрос повторяем один раз, тему
+            # не меняем.
+            state.question_forced = False
+            log.info("Ответ %r — продолжение срезанной реплики, повторяем вопрос", text)
+            return self._speak(profile, record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
 
         # Ни «да», ни «нет». Раньше бот тут сразу просил переформулировать и
         # забывал тему — и следующее «да» клиента падало в пустоту (4-я волна
@@ -715,7 +1030,7 @@ class DialogEngine:
             resolution = self._knowledge.resolve(text)
             self._log_vote(resolution)
         if resolution is not None and resolution.trusted and resolution.record is not None:
-            if resolution.record.id == record.id:
+            if self._same_topic(resolution.record, record):
                 log.info("Ответ %r на подтверждение называет ту же тему — считаем согласием", text)
                 exten = self._exten_for(record, profile)
                 extra = self._with_wrong_guess(state, self._match_extra((record, state.score), trusted=True))
@@ -734,6 +1049,21 @@ class DialogEngine:
                 return self._speak(
                     profile, resolution.record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM
                 )
+            if resolution.source != "phrases" or resolution.score >= DIRECT_TRANSFER_MIN_SIMILARITY:
+                # Тема без уточняющего вопроса — «соедините с оператором».
+                # Клиент на вопрос про водонагреватель ответил «с оператором»
+                # (269460604, 06.10.2026), а бот переспрашивал «да или нет».
+                # Просьба позвать человека — не непонятный ответ, а ответ.
+                log.info(
+                    "Ответ %r на подтверждение называет тему без вопроса %r — переводим",
+                    text, resolution.record.question,
+                )
+                if state.question_text and state.wrong_guess is None:
+                    state.wrong_guess = (state.question_text, record.question)
+                return self._transfer(
+                    profile, self._support_exten,
+                    match=(resolution.record, resolution.score), trusted=True, state=state,
+                )
 
         if state.confirm_unclear < CONFIRM_UNCLEAR_ATTEMPTS:
             state.confirm_unclear += 1
@@ -748,6 +1078,114 @@ class DialogEngine:
         state.record = None
         state.confirm_unclear = 0
         return self._say(profile, "misrecognition", ACTION_RECOGNIZE, POINT_ASK_QUESTION)
+
+    def _sibling_after_yes(self, text: str, positive: List[str], record) -> Optional[Any]:
+        """Согласие, в котором названа соседняя тема того же направления.
+
+        «Да электрика» на вопрос про сантехника — согласие с направлением и
+        поправка темы разом. Соседней считается другая запись того же
+        телефонного направления с другим вопросом, найденная уверенно: ключом,
+        дословно или с близостью от DIRECT_TRANSFER_MIN_SIMILARITY. Тема из
+        чужого направления («да, стиральная машина» на вопрос про сантехника)
+        соседней не считается — согласие остаётся согласием, как и раньше.
+        """
+        rest = self._after_negation(text, positive)
+        if not rest or not content_words(rest) or self._is_generic_only(rest):
+            return None
+        named = self._knowledge.resolve(rest)
+        self._log_vote(named)
+        if named is None or not named.trusted or named.record is None:
+            return None
+        other = named.record
+        if other.id == record.id or self._same_topic(other, record):
+            return None
+        if not other.telephone_direction_id or other.telephone_direction_id != record.telephone_direction_id:
+            return None
+        if named.source not in ("exact", "keyword") and named.score < DIRECT_TRANSFER_MIN_SIMILARITY:
+            return None
+        return named
+
+    @staticmethod
+    def _same_topic(a, b) -> bool:
+        """Одна и та же тема для клиента: та же запись либо то же направление с тем же
+        вопросом. У холодильников две записи (2 «не морозит» и 59 «реле на беко») с одним
+        вопросом: продолжение «…чтобы он охолодил» корпус отнёс к 59, и бот задал тот же
+        вопрос второй раз (13.10.2026, 1791894903)."""
+        if a is None or b is None:
+            return False
+        if a.id == b.id:
+            return True
+        return (a.telephone_direction_id and a.telephone_direction_id == b.telephone_direction_id
+                and (a.clarifying_question or "").strip().lower() == (b.clarifying_question or "").strip().lower())
+
+    def _is_negative(self, text: str, negative: List[str]) -> bool:
+        """Отказ: любое слово из списка, но одиночное «не» — только в начале ответа.
+
+        «…вождения он получается как бы не работает…» (14.10.2026, 1791966066) —
+        продолжение рассказа о поломке, а не отказ; «не» внутри описания
+        («не работает», «не включается») отказом не считается. В начале —
+        считается: «не, стиральная машина» — разговорное «нет».
+        """
+        words = _WORD_RE.findall(text.lower().replace("ё", "е"))
+        if not words:
+            return False
+        others = [v for v in negative if exact_key(v) != "не"]
+        if self._matches(text, others):
+            return True
+        return any(exact_key(v) == "не" for v in negative) and words[0] == "не"
+
+    @staticmethod
+    def _after_negation(text: str, negative: List[str]) -> str:
+        """Ответ без ведущих слов отказа: «нет мне надо манжет» → «мне надо манжет»."""
+        negative_words = {w for variant in negative for w in _WORD_RE.findall(variant.lower())}
+        words = _WORD_RE.findall(text.lower())
+        while words and words[0] in negative_words:
+            words.pop(0)
+        return " ".join(words)
+
+    @staticmethod
+    def _clipped_word(text: str) -> str:
+        """Единственное слово ответа от трёх букв — кандидат на обрезанное; иначе пусто."""
+        words = _WORD_RE.findall(text.lower().replace("ё", "е"))
+        if len(words) == 1 and len(words[0]) >= CLIPPED_WORD_MIN_LETTERS:
+            return words[0]
+        return ""
+
+    @staticmethod
+    def _is_tail_of(word: str, variants: List[str]) -> bool:
+        """Слово — окончание какого-то более длинного слова из вариантов."""
+        for variant in variants:
+            for full in _WORD_RE.findall(variant.lower().replace("ё", "е")):
+                if len(full) > len(word) and full.endswith(word):
+                    return True
+        return False
+
+    @staticmethod
+    def _topic_words(record) -> List[str]:
+        """Слова темы, которыми клиент может повторить запись: из её вопроса и формулировок,
+        без приветствий, связок и общих слов вроде «ремонт»."""
+        texts = [record.clarifying_question or "", record.question or ""] + list(record.question_variants or [])
+        return [w for text in texts for w in content_words(text) if w not in GENERIC_TOPIC_WORDS]
+
+    @staticmethod
+    def _ends_with(text: str, variants: List[str]) -> bool:
+        """Ответ кончается одним из вариантов (слово в слово, без пунктуации)."""
+        words = _WORD_RE.findall(text.lower())
+        for variant in variants:
+            variant_words = _WORD_RE.findall(variant.lower())
+            if variant_words and words[-len(variant_words):] == variant_words:
+                return True
+        return False
+
+    @staticmethod
+    def _starts_with(text: str, variants: List[str]) -> bool:
+        """Ответ начинается с одного из вариантов (слово в слово, без пунктуации)."""
+        words = _WORD_RE.findall(text.lower())
+        for variant in variants:
+            variant_words = _WORD_RE.findall(variant.lower())
+            if variant_words and words[:len(variant_words)] == variant_words:
+                return True
+        return False
 
     @staticmethod
     def _matches(text: str, variants: List[str]) -> bool:

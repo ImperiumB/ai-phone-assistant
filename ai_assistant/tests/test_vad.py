@@ -70,7 +70,8 @@ def test_utterance_is_emitted_after_the_pause():
     events = seg.feed(silent_frame() * 4)
     utterances = [e for e in events if e.kind == "utterance"]
     assert len(utterances) == 1
-    assert len(utterances[0].pcm) == 3 * FRAME_BYTES
+    # 3 кадра речи + 4 кадра паузы-хвоста (TAIL_KEEP_MS длиннее этой паузы).
+    assert len(utterances[0].pcm) == (3 + 4) * FRAME_BYTES
     # Minor из повторного ревью: реплика, выданная по естественной паузе,
     # обязана нести forced=False — иначе main.py не сможет отличить её от
     # принудительной выдачи по потолку длины и решить, вычитать ли паузу.
@@ -85,7 +86,7 @@ def test_two_phrases_are_emitted_separately():
     second = seg.feed(silent_frame() * 4)
     assert len([e for e in first if e.kind == "utterance"]) == 1
     assert len([e for e in second if e.kind == "utterance"]) == 1
-    assert len([e for e in second if e.kind == "utterance"][0].pcm) == 5 * FRAME_BYTES
+    assert len([e for e in second if e.kind == "utterance"][0].pcm) == (5 + 4) * FRAME_BYTES
 
 
 def test_long_silence_without_speech_reports_silence_event():
@@ -122,7 +123,7 @@ def test_partial_frames_are_buffered_between_calls():
     events = seg.feed(silent_frame() * 4)
     utterances = [e for e in events if e.kind == "utterance"]
     assert len(utterances) == 1
-    assert len(utterances[0].pcm) == 3 * FRAME_BYTES
+    assert len(utterances[0].pcm) == (3 + 4) * FRAME_BYTES
 
 
 def test_reset_drops_accumulated_audio():
@@ -218,7 +219,7 @@ def test_speech_after_a_forced_utterance_accumulates_from_scratch():
     third = seg.feed(silent_frame() * 4)
     utterances = [e for e in third if e.kind == "utterance"]
     assert len(utterances) == 1
-    assert len(utterances[0].pcm) == 2 * FRAME_BYTES
+    assert len(utterances[0].pcm) == (2 + 4) * FRAME_BYTES
     # Следующая после принудительной реплика выдана обычной паузой —
     # forced обязан вернуться к False, а не залипнуть в True.
     assert utterances[0].forced is False
@@ -326,3 +327,45 @@ def test_real_silero_clone_diverges_from_the_original_after_use():
     base_state = base._model._state.clone()
     clone_state = clone._model._state.clone()
     assert not torch.equal(base_state, clone_state)
+
+
+def test_utterance_carries_pre_roll_and_inner_pauses():
+    """Начало слова до срабатывания детектора и тихие согласные внутри — часть
+    реплики (12.10.2026: «сборка» доходила как «орка», «ремонт холодильника»
+    как «от холодильника»). Запас перед речью — PRE_ROLL_MS, не больше."""
+    from ai_assistant.service.vad import FRAME_BYTES, PRE_ROLL_MS, TAIL_KEEP_MS
+
+    pre_roll_frames = -(-PRE_ROLL_MS // 32)
+    tail_frames = -(-TAIL_KEEP_MS // 32)
+    seg = segmenter(pause_ms=320)  # 10 кадров паузы, длиннее хвоста
+    seg.feed(silent_frame() * 30)  # долгая тишина: в запас уйдут только последние кадры
+    seg.feed(speech_frame() * 3 + silent_frame() * 2 + speech_frame() * 3)  # пауза внутри слова
+    events = seg.feed(silent_frame() * 10)
+    utterances = [e for e in events if e.kind == "utterance"]
+    assert len(utterances) == 1
+    assert len(utterances[0].pcm) == (pre_roll_frames + 3 + 2 + 3 + tail_frames) * FRAME_BYTES
+    # Запас — именно тишина, а речь на своём месте после него.
+    assert utterances[0].pcm[:pre_roll_frames * FRAME_BYTES] == silent_frame() * pre_roll_frames
+    assert utterances[0].pcm[pre_roll_frames * FRAME_BYTES:(pre_roll_frames + 3) * FRAME_BYTES] == speech_frame() * 3
+
+
+def test_reset_detector_only_outside_an_utterance():
+    """После разрыва потока (фраза бота) память детектора сбрасывается, но не внутри
+    начатой реплики: холодный старт режет начало слова (13.10.2026, 1791894785)."""
+    class RecordingDetector(CountingDetector):
+        def __init__(self):
+            super().__init__()
+            self.resets = 0
+
+        def reset(self):
+            self.resets += 1
+
+    det = RecordingDetector()
+    seg = UtteranceSegmenter(det, pause_ms=100, silence_timeout_ms=10 ** 9)
+    base = det.resets  # reset() зовётся и из конструктора через seg.reset()
+    seg.reset_detector()
+    assert det.resets == base + 1 and not seg.in_utterance
+    seg.feed(speech_frame() * 2)
+    assert seg.in_utterance
+    seg.reset_detector()
+    assert det.resets == base + 1

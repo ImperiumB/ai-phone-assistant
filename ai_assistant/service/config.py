@@ -9,6 +9,10 @@ class Config:
     http_port: int
     stt_engine: str
     gigaam_model: str
+    #: Вторая модель GigaAM для перераспознавания реплики, которую первая
+    #: распознала так, что тема не нашлась («верхер», «перфер», «апл» вместо
+    #: бренда — 13–14.10.2026). Пусто — без второго мнения.
+    stt_fallback_model: str
     tts_engine: str
     tts_model: str
     vosk_tts_model_path: str
@@ -26,6 +30,11 @@ class Config:
     corpus_operator_threshold: float
     corpus_min_words: int
     silence_timeout_ms: int
+    #: Порог детектора речи Silero (0..1). 0.35 — замер 13.10.2026 на 45 сырых
+    #: потоках звонков: вместе со сбросом памяти детектора по разрыву потока
+    #: возвращает короткие ответы после фразы бота («новый», «угу», «да»)
+    #: без единой потери; 0.5 теряло три коротких ответа.
+    vad_threshold: float
     utterance_pause_ms: int
     stt_timeout_s: int
     knowledge_path: str
@@ -69,6 +78,7 @@ def load_config() -> Config:
         # Другие варианты: v3_ctc (ещё быстрее, чуть менее точна),
         # v3_e2e_rnnt (расставляет пунктуацию и заглавные буквы).
         gigaam_model=_env_str("GIGAAM_MODEL", "v3_rnnt"),
+        stt_fallback_model=_env_str("STT_FALLBACK_MODEL", "v2_rnnt"),
         # vosk, а не silero: модель Silero v5_ru лицензирована как CC BY-NC —
         # некоммерческая, — а бот работает на боевой линии коммерческой
         # компании (разбор лицензий 03.09.2026, UL-17568). Silero оставлен
@@ -148,6 +158,7 @@ def load_config() -> Config:
         # показываем: у них соседи — такие же пустые начала повторных звонков.
         corpus_min_words=_env_int("CORPUS_MIN_WORDS", 2),
         silence_timeout_ms=_env_int("SILENCE_TIMEOUT_MS", 15000),
+        vad_threshold=_env_float("VAD_THRESHOLD", 0.35),
         # 1500, а не 3000: с трёхсекундной паузой ответ бота приходит через ~4 секунды
         # после конца фразы, и разговор ощущается сломанным. Плата — бот перебьёт того,
         # кто задумался дольше полутора секунд.
@@ -169,5 +180,6 @@ def load_config() -> Config:
         # Пять минут — с запасом чаще, чем система успевает выгрузить страницы
         # простаивающего процесса, и достаточно редко, чтобы не мешать. Одна
         # прогонка стоит десятки миллисекунд.
-        keepwarm_seconds=_env_int("KEEPWARM_SECONDS", 300),
+        # 300 → 120 (19.10.2026): после ночного простоя первые звонки шли 5–15 с.
+        keepwarm_seconds=_env_int("KEEPWARM_SECONDS", 120),
     )

@@ -318,6 +318,9 @@ def block_listening_until(deadline):
     """
     global _listen_blocked_until
     if deadline > _listen_blocked_until:
+        if not listening_blocked():
+            _listen_stats["blocked_since"] = time.time()
+            _listen_stats["blocked_chunks"] = 0
         _listen_blocked_until = deadline
 
 
@@ -331,6 +334,45 @@ def reset_listening_block():
     """Снять глухоту. Нужно тестам и повторному запуску в одном процессе."""
     global _listen_blocked_until
     _listen_blocked_until = 0.0
+    _listen_stats.update(blocked_chunks=0, blocked_since=0.0, pending=None)
+
+
+# Сколько звука прочитано вокруг глухоты — для разбора обрезанных слов
+# (269643565 и 269648881, 09.10.2026: до сервиса дошли полсекунды «отри» из
+# придержанного куска, а живой звук сразу после конца глухоты пришёл
+# тишиной). Поток генератора только считает, печатает основной поток:
+# log_it в генераторе нельзя (см. audio_stream).
+_listen_stats = {"blocked_chunks": 0, "blocked_since": 0.0, "pending": None}
+
+
+def note_blocked_chunk():
+    # type: () -> None
+    """Кусок звука прочитан в глухоте."""
+    _listen_stats["blocked_chunks"] += 1
+
+
+def note_listen_resumed(now=None):
+    # type: (float) -> None
+    """Первый кусок после глухоты прочитан: запомнить, что было, до печати."""
+    now = time.time() if now is None else now
+    _listen_stats["pending"] = (
+        _listen_stats["blocked_since"], _listen_blocked_until, _listen_stats["blocked_chunks"], now)
+    _listen_stats["blocked_chunks"] = 0
+
+
+def listen_stats_line():
+    # type: () -> str
+    """Строка лога по последней глухоте или пустая строка, если печатать нечего."""
+    pending = _listen_stats.get("pending")
+    if not pending:
+        return ""
+    _listen_stats["pending"] = None
+    since, until, chunks, resumed = pending
+    chunk_seconds = CHUNK_SIZE / 16000.0
+    expected = int(round(max(0.0, until - since) / chunk_seconds))
+    return ("LISTEN ON: глухота {0:.1f} с, кусков прочитано {1} (ожидалось ~{2}), "
+            "первый живой кусок через {3:.2f} с после конца глухоты").format(
+        until - since, chunks, expected, resumed - until)
 
 
 def tts_params(text, voice):
@@ -460,14 +502,20 @@ def build_equipment_request(document_id, recognized_text, equipment_type_name, d
     ])
 
 
-def build_transfer_request(document_id, redirect_exten, direction_name, recognized_text):
-    # type: (Any, str, str, str) -> Dict[str, Any]
-    return build_erp_request(EVENT_TRANSFER, [
+def build_transfer_request(document_id, redirect_exten, direction_name, recognized_text,
+                           wrong_guess=""):
+    # type: (Any, str, str, str, str) -> Dict[str, Any]
+    pairs = [
         ("documentId", document_id),
         ("redirectExten", redirect_exten),
         ("directionName", direction_name),
         ("recognizedText", recognized_text),
-    ])
+    ]
+    # Тема, предложенная неверно (клиент сказал нет), но звонок всё равно перевели:
+    # 15422 пометит строку разметки авто-проблемой для формы ОКК. Пусто не уходит.
+    if wrong_guess:
+        pairs.append(("wrongGuess", wrong_guess))
+    return build_erp_request(EVENT_TRANSFER, pairs)
 
 
 def build_unknown_request(document_id, recognized_text, wrong_guess=""):
@@ -839,6 +887,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
             path = os.path.join(AUDIO_CACHE_DIR, answer.file_to_playback)
         # Playback блокирует до конца фразы — обязателен перед Goto и Hangup.
         application = "Playback" if blocking else "background"
+        stats = listen_stats_line()
+        if stats:
+            log_it(stats)
         log_it("TIMING playback_start {0:.3f}".format(time.time()))
         # Глохнем на время собственной фразы ДО её запуска, а не после: с
         # `background` управление вернётся мгновенно, и первые же куски звука
@@ -966,13 +1017,14 @@ def _main():  # pragma: no cover - требует живого канала Aste
             log=log_it,
         )
 
-    def report_transfer(redirect_exten, direction_name):
+    def report_transfer(redirect_exten, direction_name, wrong_guess=""):
         if not state["document_id"]:
             return
         send_to_erp(
             aster2_address,
             build_transfer_request(
-                state["document_id"], redirect_exten, direction_name, state["last_text"]
+                state["document_id"], redirect_exten, direction_name, state["last_text"],
+                wrong_guess,
             ),
             log=log_it,
         )
@@ -1002,6 +1054,11 @@ def _main():  # pragma: no cover - требует живого канала Aste
     def apply(answer):
         global _redirect_done
         step = decide_next_step(answer)
+        # Тему, предложенную неверно (клиент сказал нет), кладём в канал: если клиент
+        # сейчас бросит трубку, last_will прочтёт её и пошлёт в Hangup, чтобы форма
+        # ОКК увидела промах. Ставим только непустую, последнюю.
+        if answer.wrong_guess:
+            set_var("LastWrongGuess", answer.wrong_guess)
         # Про тему разговора сообщаем до озвучки, а не после: фраза о переводе
         # длится пару секунд, и если клиент бросит трубку на ней, скрипт умрёт
         # мгновенно (SIGHUP, см. ниже) — в обращении так и останется
@@ -1018,7 +1075,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
             # В обращение пишем настоящий номер темы, а переводим туда, куда
             # велит отладочный переключатель: иначе в истории обращения будет
             # враньё, и разбирать потом эти звонки станет нечем.
-            report_transfer(answer.redirect_exten, direction_name_of(answer))
+            report_transfer(answer.redirect_exten, direction_name_of(answer), answer.wrong_guess)
             redirect_exten = effective_redirect_exten(answer.redirect_exten)
             if REAL_REDIRECT:
                 log_it("REDIRECT -> {0}".format(redirect_exten))
@@ -1127,6 +1184,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
 
     def audio_stream(audio_source):
         yield speech_pb2.StreamRequest(session_id=linked_id)
+        # Последний кусок, прочитанный в глухоте: уйдёт первым, когда слух
+        # включится (см. ниже).
+        held_back = None
         while True:
             data = audio_source.read(CHUNK_SIZE)
             if not data:
@@ -1141,7 +1201,20 @@ def _main():  # pragma: no cover - требует живого канала Aste
             # получилась бы ровно та беда, от которой мы защищаемся строкой
             # выше. О начале и конце глухоты пишет speak(), из своего потока.
             if listening_blocked():
+                # Кусок помним, а не выбрасываем: слово, начатое за долю
+                # секунды до конца глухоты, иначе доходит до распознавания
+                # обрезанным и теряется (5-я волна 02.10.2026, 269218128:
+                # «да» через 0,3 с после конца вопроса, в логе сервиса пусто).
+                held_back = data
+                note_blocked_chunk()
                 continue
+            if held_back is not None:
+                note_listen_resumed()
+                # Досылаем последние полсекунды глухоты вместе с первым живым
+                # куском. Эха бота в них почти нет: вопросы теперь кончаются
+                # на знак вопроса, а не на «...или нет», и ECHO_GUARD_S стоит.
+                yield speech_pb2.StreamRequest(audio_chunk=held_back)
+                held_back = None
             yield speech_pb2.StreamRequest(audio_chunk=data)
 
     def run():
@@ -1163,6 +1236,11 @@ def _main():  # pragma: no cover - требует живого канала Aste
                 stub = speech_pb2_grpc.SpeechStub(channel)
                 responses = stub.Recognize(audio_stream(audio_source), timeout=CALL_TIMEOUT_S * 3)
                 for response in responses:
+                    # Что читалось вокруг последней глухоты — печатаем здесь,
+                    # из основного потока, перед самим событием.
+                    stats = listen_stats_line()
+                    if stats:
+                        log_it(stats)
                     if response.type == speech_pb2.StreamResponse.SILENCE:
                         if not apply(ask_dialog("", True)):
                             return

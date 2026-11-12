@@ -13,6 +13,7 @@ import requests
 
 from ai_assistant.agi.ai_assistant_last_will import (
     ERP_TIMEOUT_S,
+    LAST_WILL_RETRIES,
     FAILURE_REASON_VAR,
     build_hangup_request,
     call_length_seconds,
@@ -252,3 +253,67 @@ def test_script_does_not_import_the_main_agi_module():
         elif isinstance(node, ast.ImportFrom):
             imported.append(node.module or "")
     assert not [name for name in imported if "ai_assistant" in name or "grpc" in name]
+
+
+def test_last_will_retries_while_erp_answers_fail():
+    """Отказ ERP значит «обращение ещё не зафиксировано», и надо повторить.
+
+    Код обращения попадает в канал только ПОСЛЕ ответа ERP на создание, а это
+    до пяти секунд. Сброс в этом окне убивает основной скрипт мгновенно,
+    последняя воля уходит с одним идентификатором канала, ERP документ по нему
+    не находит и отвечает отказом. Повторов не было, и обращение оставалось в
+    подтипе, который никто не ведёт: с 17.08.2026 таких накопилось 33 (B2-03).
+    """
+    answers = [
+        FakeResponse([{"Key": "Result", "Value": "FAIL"},
+                      {"Key": "Message", "Value": "Обращение не найдено"}]),
+        FakeResponse([{"Key": "Result", "Value": "OK"}]),
+    ]
+    tries = {"n": 0}
+
+    def fake_post(url, json=None, timeout=None):
+        tries["n"] += 1
+        return answers[min(tries["n"], len(answers)) - 1]
+
+    assert send_last_will("host/svc", {"prms": []}, post=fake_post, delay=0) is True
+    assert tries["n"] == 2
+
+
+def test_last_will_does_not_repeat_a_successful_report():
+    """Об одном обрыве нельзя сообщить дважды: успех повторов не вызывает."""
+    tries = {"n": 0}
+
+    def fake_post(url, json=None, timeout=None):
+        tries["n"] += 1
+        return FakeResponse([{"Key": "Result", "Value": "OK"}])
+
+    assert send_last_will("host/svc", {"prms": []}, post=fake_post, delay=0) is True
+    assert tries["n"] == 1
+
+
+def test_last_will_gives_up_after_the_last_attempt():
+    """Если ERP упорно отвечает отказом, попытки кончаются, а скрипт не висит."""
+    tries = {"n": 0}
+
+    def fake_post(url, json=None, timeout=None):
+        tries["n"] += 1
+        return FakeResponse([{"Key": "Result", "Value": "FAIL"}])
+
+    assert send_last_will("host/svc", {"prms": []}, post=fake_post, delay=0) is False
+    assert tries["n"] == LAST_WILL_RETRIES
+
+
+def test_unparsable_answer_is_not_retried():
+    """Ответ, который не разобрать, считаем обработанным.
+
+    Иначе любая смена формата ответа превратилась бы в троекратное сообщение об
+    одном и том же обрыве.
+    """
+    tries = {"n": 0}
+
+    def fake_post(url, json=None, timeout=None):
+        tries["n"] += 1
+        return FakeResponse({"не": "список"})
+
+    assert send_last_will("host/svc", {"prms": []}, post=fake_post, delay=0) is True
+    assert tries["n"] == 1

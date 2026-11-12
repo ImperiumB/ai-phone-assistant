@@ -10,6 +10,7 @@ from ai_assistant.agi.ai_assistant import (
     ECHO_GUARD_S,
     ERP_INTEGRATION,
     ERP_TIMEOUT_S,
+    agi_safe_value,
     MAX_PLAYBACK_GUESS_S,
     REAL_REDIRECT,
     REASON_CALL_TIMEOUT,
@@ -210,11 +211,35 @@ def test_conversation_start_time_is_published_to_the_channel():
 
 
 def test_source_avoids_pep604_unions_in_annotations():
+    """`X | Y` в аннотации валит скрипт на станции при ИМПОРТЕ, а не при разборе.
+
+    Грамматику 3.9 такая запись не нарушает, поэтому `ast.parse(feature_version)`
+    её пропускает: союз вычисляется в рантайме и даёт
+    `TypeError: unsupported operand type(s) for |`. Скрипт не стартует, и звонок
+    уходит в диалплан без бота. Проверять приходится отдельно, потому что 3.9
+    локально не стоит.
+
+    Смотрим не только присваивания с типом, но и подписи функций: аннотированные
+    подписи в файле есть, а прежде страж их не обходил.
+    """
     source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    annotations = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.AnnAssign) and isinstance(node.annotation, ast.BinOp):
-            pytest.fail("Аннотация вида X | Y не работает на Python 3.9")
+        if isinstance(node, ast.AnnAssign):
+            annotations.append((node.lineno, node.annotation))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.returns is not None:
+                annotations.append((node.lineno, node.returns))
+            spec = node.args
+            for arg in list(spec.posonlyargs) + list(spec.args) + list(spec.kwonlyargs) \
+                    + [spec.vararg, spec.kwarg]:
+                if arg is not None and arg.annotation is not None:
+                    annotations.append((arg.lineno, arg.annotation))
+    for lineno, annotation in annotations:
+        for inner in ast.walk(annotation):
+            if isinstance(inner, ast.BinOp) and isinstance(inner.op, ast.BitOr):
+                pytest.fail("Строка %d: аннотация вида X | Y не работает на Python 3.9" % lineno)
 
 
 # --- Обращение в ERP на время звонка (UL-18797) -------------------------------
@@ -1110,3 +1135,278 @@ def test_listen_stats_line_reports_chunks_read_during_deafness():
     assert "через 0.20 с" in line
     # Напечатали — второй раз та же глухота не печатается.
     assert agi_module.listen_stats_line() == ""
+
+
+def test_transfer_request_carries_the_scenario_direction():
+    """Направление сценария уезжает в ERP, иначе отчётность врёт.
+
+    Сервис присылает направление в ответе, а до 09.11.2026 мы его дальше не
+    передавали, и ERP выводила направление из типа оборудования первой
+    попавшейся строкой связки. Итог: четыре обращения переведены в профильный
+    отдел, а в документе и в форме разбора написано «Сопровождение» (B3-04).
+    """
+    request = build_transfer_request(42, "7250", "Водонагреватели", "бойлер не греет",
+                                     telephone_direction_id="62")
+    assert erp_pairs(request)["telephoneDirectionId"] == "62"
+
+
+def test_transfer_request_without_direction_stays_backward_compatible():
+    """Пусто не уходит: старый обработчик параметра не знает."""
+    request = build_transfer_request(42, "7250", "Водонагреватели", "бойлер не греет")
+    assert "telephoneDirectionId" not in erp_pairs(request)
+
+
+def test_agi_safe_value_disarms_quotes_and_newlines():
+    """Кавычка с пробелом рвёт команду AGI, перевод строки сдвигает ответы.
+
+    Протокол разбирает команду по пробелам с учётом кавычек, а библиотека
+    оборачивает значение в двойные кавычки сама. Кавычка внутри значения
+    закрывает аргумент раньше времени: Астериск видит пять аргументов вместо
+    четырёх и отвечает 520, исключение глушится, и в канале остаётся ПРЕЖНЕЕ
+    значение. Цена: при сбросе на переспросе в ERP уезжает неверная пометка
+    «бот предложил не то», и авто-флаг качества не ставится (B2-06).
+
+    Перевод строки хуже кавычки: он сдвинул бы ответы AGI на шаг, и дальше
+    скрипт читал бы чужие ответы.
+    """
+    assert agi_safe_value('ремонт "бойлера" на дому') == "ремонт 'бойлера' на дому"
+    assert agi_safe_value("первая\nвторая") == "первая вторая"
+    assert agi_safe_value("третья\r\nчетвёртая") == "третья четвёртая"
+    assert agi_safe_value("с\tтабом  и   пробелами") == "с табом и пробелами"
+    assert agi_safe_value("обратный\\слэш") == "обратный слэш"
+    assert agi_safe_value(None) == ""
+    assert agi_safe_value(42) == "42"
+
+
+# --------------------------------------------------------------- поток звука
+#
+# Куски звука здесь это не русские слова, а короткие ASCII-метки: в bytes-литерал
+# кириллица не лезет (SyntaxError), а имя куска нужно только для сверки порядка.
+
+class _FakeSource:
+    """Дескриптор звука: отдаёт заранее заданные куски, потом пустоту.
+
+    Пустой кусок у настоящего дескриптора значит конец потока (трубку
+    положили), и генератор обязан на нём закончиться.
+    """
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.reads = 0
+        self.sizes = []
+
+    def read(self, size):
+        self.reads += 1
+        self.sizes.append(size)
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+def _run_stream(chunks, blocked_flags):
+    """Прогнать поток, где глухота задана флагом на каждый прочитанный кусок."""
+    from ai_assistant.agi.ai_assistant import audio_chunks_to_send
+
+    source = _FakeSource(chunks)
+    flags = list(blocked_flags)
+    events = []
+
+    def blocked():
+        # Флаг на тот кусок, который только что прочитали.
+        return flags[source.reads - 1] if source.reads <= len(flags) else False
+
+    sent = list(audio_chunks_to_send(
+        source.read, blocked,
+        on_blocked=lambda: events.append("глухой кусок"),
+        on_resumed=lambda: events.append("слух включился")))
+    return sent, events, source
+
+
+def test_the_held_chunk_goes_first_when_listening_resumes():
+    """Слово, начатое в конце глухоты, не теряется (269218128, 02.10.2026).
+
+    Придерживается ровно последний кусок глухоты: в нём начало ответа клиента.
+    Вся глухота целиком это фраза бота, и дошли бы его собственные слова.
+    """
+    sent, events, _ = _run_stream(
+        [b"bot-1", b"bot-2", b"da-start", b"live"],
+        [True, True, True, False])
+    assert sent == [b"da-start", b"live"]
+    assert events == ["глухой кусок", "глухой кусок", "глухой кусок", "слух включился"]
+
+
+def test_the_descriptor_is_read_even_during_deafness():
+    """Перестать читать значит забить буфер станции."""
+    sent, _events, source = _run_stream([b"a", b"b", b"c"], [True, True, True])
+    # Прочитаны все три куска плюс четвёртое чтение, вернувшее конец потока.
+    assert source.reads == 4
+    assert sent == []
+
+
+def test_a_stream_without_deafness_passes_everything_through():
+    sent, events, _ = _run_stream([b"one", b"two"], [False, False])
+    assert sent == [b"one", b"two"]
+    assert events == []
+
+
+def test_only_the_last_chunk_of_each_deafness_is_held():
+    """Две глухоты за звонок: от каждой досылается свой последний кусок."""
+    sent, events, _ = _run_stream(
+        [b"q1", b"a1-start", b"a1", b"q2", b"a2-start", b"a2"],
+        [True, True, False, True, True, False])
+    assert sent == [b"a1-start", b"a1", b"a2-start", b"a2"]
+    assert events.count("слух включился") == 2
+    assert events.count("глухой кусок") == 4
+
+
+def test_an_empty_chunk_ends_the_stream_and_the_held_chunk_dies_with_it():
+    """Трубку положили в глухоте: досылать некуда, но и падать нельзя."""
+    sent, events, _ = _run_stream([b"bot"], [True])
+    assert sent == []
+    assert events == ["глухой кусок"]
+
+
+def test_the_real_deafness_check_is_the_default():
+    """По умолчанию берётся боевой listening_blocked, а не подстановка теста."""
+    from ai_assistant.agi import ai_assistant as agi_module
+
+    agi_module.reset_listening_block()
+    try:
+        agi_module.block_listening_until(agi_module.time.time() + 30.0)
+        source = _FakeSource([b"bot-speech", b"more"])
+        assert list(agi_module.audio_chunks_to_send(source.read)) == []
+        agi_module.reset_listening_block()
+        source = _FakeSource([b"client"])
+        assert list(agi_module.audio_chunks_to_send(source.read)) == [b"client"]
+    finally:
+        agi_module.reset_listening_block()
+
+
+def test_every_read_asks_for_exactly_one_chunk():
+    """Размер чтения обязан быть CHUNK_SIZE, и это надо прибить тестом.
+
+    `read()` без размера на живом дескрипторе блокируется до конца потока: за
+    весь звонок в распознавание не уйдёт ни один кусок, и бот промолчит до
+    таймаута станции. Подмена размера на другое число меняет длительность
+    куска, а от неё считается и ожидаемое число кусков в строке «LISTEN ON».
+    """
+    from ai_assistant.agi.ai_assistant import CHUNK_SIZE
+
+    _sent, _events, source = _run_stream([b"one", b"two"], [False, False])
+    assert source.sizes == [CHUNK_SIZE] * source.reads
+    assert CHUNK_SIZE > 0
+
+
+def test_the_deafness_log_line_comes_out_of_the_real_stream():
+    """Полная цепочка: глухота, придержанный кусок, счётчики, строка лога.
+
+    Прежде счётчики дёргались в тестах руками, в обход генератора, и подмена
+    `on_blocked` / `on_resumed` на пустышки прошла бы незамеченной. А пропала
+    бы при этом строка `LISTEN ON`, написанная под разбор обрезанных слов
+    (269643565 и 269648881, 09.10.2026).
+    """
+    from ai_assistant.agi import ai_assistant as agi_module
+
+    agi_module.reset_listening_block()
+    # Часы двигаем, а блок не сбрасываем: в бою глухота кончается именно
+    # истечением срока. Сброс это тестовая помощь, он стирает и счётчики, и
+    # строка лога вышла бы с нулями.
+    clock = {"now": 1000.0}
+    agi_module.time.time = lambda: clock["now"]  # noqa: E731 — часы на время теста
+    try:
+        agi_module.block_listening_until(1004.0)
+        source = _FakeSource([b"bot-1", b"bot-2", b"da-start", b"live"])
+        # Глухота держится первые три чтения, то есть третий кусок прочитан ещё
+        # в ней: в нём и лежит начало ответа клиента, который нельзя потерять.
+        def blocked():
+            if source.reads > 3:
+                clock["now"] = 1004.2
+            return agi_module.listening_blocked()
+
+        sent = list(agi_module.audio_chunks_to_send(source.read, blocked))
+        line = agi_module.listen_stats_line()
+    finally:
+        import time as real_time
+        agi_module.time.time = real_time.time
+        agi_module.reset_listening_block()
+    # Придержанный кусок ушёл первым, и именно он нёс начало ответа клиента.
+    assert sent == [b"da-start", b"live"]
+    assert "глухота 4.0 с" in line
+    assert "кусков прочитано 3" in line
+    assert "через 0.20 с" in line
+
+
+def test_the_audio_stream_wrapper_keeps_its_contract():
+    """Обёртка внутри _main живого канала требует, поэтому сторожим исходником.
+
+    Три ошибки в одной строке проходят все тесты и ломают живой звонок:
+    передать сам дескриптор вместо его метода чтения, потерять первый кадр с
+    номером сессии, завернуть кусок не в то поле. В потоке-итераторе это
+    `TypeError`, он уходит в FATAL с причиной «ошибка скрипта», и клиент
+    слышит тишину и обрыв.
+    """
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert "yield speech_pb2.StreamRequest(session_id=linked_id)" in source
+    assert "for data in audio_chunks_to_send(audio_source.read):" in source
+    assert "yield speech_pb2.StreamRequest(audio_chunk=data)" in source
+    # Номер сессии уходит ДО первого куска: сервис без него не знает, чей поток.
+    assert source.index("StreamRequest(session_id=linked_id)") \
+        < source.index("for data in audio_chunks_to_send(")
+
+
+def test_the_stream_generator_stays_silent():
+    """Внутри генератора нельзя ни логировать, ни трогать AGI.
+
+    `log_it` берёт AGI-блокировку, а её на всё время блокирующего Playback
+    держит основной поток. Поток генератора встал бы на ней и перестал читать
+    дескриптор: буфер станции набивается, и после фразы бота в распознавание
+    влетает разом всё накопленное. Это ровно то, от чего защищает правило
+    «читаем дескриптор всегда», вывернутое наизнанку.
+
+    Функция уехала на уровень модуля, за сотни строк от `_main`, и рядом с ней
+    больше не видно ни `speak`, ни блокировки. Поэтому запрет сторожит тест, а
+    не только проза в докстринге.
+    """
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "agi" / "ai_assistant.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    body = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "audio_chunks_to_send":
+            body = node
+            break
+    assert body is not None, "функции audio_chunks_to_send в скрипте нет"
+    forbidden = ("log_it", "print", "speak", "_agi_lock", "agi")
+    for inner in ast.walk(body):
+        name = ""
+        if isinstance(inner, ast.Name):
+            name = inner.id
+        elif isinstance(inner, ast.Attribute) and isinstance(inner.value, ast.Name):
+            name = inner.value.id
+        if name in forbidden:
+            pytest.fail("В audio_chunks_to_send нельзя обращаться к %s: поток встанет"
+                        " на AGI-блокировке и перестанет читать дескриптор" % name)
+
+
+def test_decision_source_travels_from_the_service_answer_to_the_erp_event():
+    """Кто решил реплику (замок, корпус, формулировки) и с какой уверенностью:
+    сервис присылает, скрипт дописывает в событие ERP. Пусто не уходит."""
+    from ai_assistant.agi.ai_assistant import (add_decision, build_transfer_request,
+                                               parse_dialog_response)
+
+    answer = parse_dialog_response([{"Key": "Action", "Value": "Redirect"},
+                                    {"Key": "DecisionSource", "Value": "corpus"},
+                                    {"Key": "DecisionScore", "Value": "0.6550"}])
+    assert answer.decision_source == "corpus" and answer.decision_score == "0.6550"
+    old = parse_dialog_response([{"Key": "Action", "Value": "Redirect"}])
+    assert old.decision_source == "" and old.decision_score == ""
+
+    body = add_decision(build_transfer_request(1, "7082", "", "ремонт"), "corpus", "0.6550")
+    pairs = {item["Key"]: item["Value"] for item in body["prms"]}
+    assert pairs["decisionSource"] == "corpus" and pairs["decisionScore"] == "0.6550"
+
+    gate = add_decision(build_transfer_request(1, "7082", "", "ремонт"), "gate", "")
+    keys = [item["Key"] for item in gate["prms"]]
+    assert "decisionSource" in keys and "decisionScore" not in keys
+
+    silent = add_decision(build_transfer_request(1, "7082", "", "ремонт"), "", "")
+    assert "decisionSource" not in [item["Key"] for item in silent["prms"]]
+

@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 import wave
-from collections import deque
+from collections import OrderedDict, deque
 from concurrent import futures
 from dataclasses import replace
 from datetime import datetime
@@ -50,6 +50,8 @@ import speech_pb2  # noqa: E402
 import speech_pb2_grpc  # noqa: E402
 
 from ai_assistant.service.config import load_config  # noqa: E402
+from ai_assistant.service import dialog as dialog_module  # noqa: E402
+from ai_assistant.service import knowledge as knowledge_module  # noqa: E402
 from ai_assistant.service.dialog import (  # noqa: E402
     PHRASE_SLOTS,
     DialogEngine,
@@ -64,9 +66,12 @@ from ai_assistant.service.knowledge import (  # noqa: E402
     SentenceTransformerEmbedder,
     load_knowledge_base,
 )
+from ai_assistant.service.intent import load_intent_model  # noqa: E402
 from ai_assistant.service.knowledge_feed import (  # noqa: E402
     FeedError,
     ParsedFeed,
+    archive_feed,
+    check_feed,
     load_feed,
     parse_feed,
     save_feed,
@@ -89,10 +94,81 @@ from ai_assistant.service.tts import (  # noqa: E402
     VoiceLibrary,
     VoskSynthesizer,
     create_synthesizer,
+    engine_default_voice,
 )
 from ai_assistant.service.vad import SileroVoiceDetector, UtteranceSegmenter  # noqa: E402
 
 log = logging.getLogger("aia")
+
+
+def log_build_fingerprint(cfg) -> None:
+    """Отпечаток версии сервиса и его настроек одной строкой при старте.
+
+    Нужен, чтобы волну разбора можно было привязать к КОДУ, а не к дате.
+    Версию кода волн 8-10 восстановить уже нельзя: в логе нет ни коммита, ни
+    настроек, а пороги с тех пор менялись семь раз. Эта строка закрывает дыру:
+    по ней видно, какой код и с какими порогами отвечал на звонки.
+    """
+    import hashlib
+    import subprocess
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    commit = ""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root, stderr=subprocess.DEVNULL, timeout=5,
+        ).decode("ascii", "replace").strip()
+    except Exception:
+        commit = "неизвестен"
+    # Коммита мало: сервис почти всегда запускается с незакоммиченными правками,
+    # и тогда номер коммита описывает НЕ тот код, который отвечает на звонки.
+    # Пометка «+правки» говорит разборщику волны, что по коммиту версию не
+    # восстановить и надо смотреть хэши модулей ниже.
+    try:
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo_root, stderr=subprocess.DEVNULL, timeout=5,
+        ).decode("utf-8", "replace").strip()
+        if dirty:
+            commit += "+правки(%d файлов)" % len(dirty.splitlines())
+    except Exception:
+        commit += "+правки(неизвестно)"
+    modules = []
+    # intent.py добавлен 09.11.2026: ярус намерения решает 1595 реплик из 4000,
+    # а его версия в отпечаток не входила вовсе.
+    for name in ("dialog.py", "knowledge.py", "main.py", "vad.py", "tts.py", "intent.py"):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+        try:
+            with open(path, "rb") as handle:
+                modules.append(hashlib.sha1(handle.read()).hexdigest()[:8])
+        except OSError:
+            modules.append("нет")
+    log.info(
+        "СБОРКА коммит=%s модули=%s | распознавание=%s второе_мнение=%s порог_детектора=%.2f "
+        "| пороги: формулировки=%.2f корпус=%.2f оператор=%.2f перевод=%.2f "
+        "серая_зона=%s переспросов_в_серой=%s | ярус=%s порог_повторного=%.2f "
+        "| предел_фраз=%s второй_круг=%s | голос=%s корпус_индекс=%s",
+        commit, "/".join(modules),
+        # Основная модель распознавания не писалась в лог НИГДЕ, хотя вторая
+        # писалась: по логу волны нельзя было сказать, чем распознавали речь.
+        cfg.gigaam_model or cfg.stt_engine,
+        cfg.stt_fallback_model or "выкл", cfg.vad_threshold,
+        cfg.similarity_threshold, cfg.corpus_threshold, cfg.corpus_operator_threshold,
+        dialog_module.DIRECT_TRANSFER_MIN_SIMILARITY,
+        # Серая зона это главная правка волны 13: ниже этого порога бот тему не
+        # называет, а просит повторить. Без неё в отпечатке разбор волны не мог
+        # бы сказать, действовало ли правило вообще.
+        ("%.2f" % knowledge_module.CORPUS_GREY_ZONE) if knowledge_module.CORPUS_GREY_ZONE else "выкл",
+        dialog_module.QUESTION_REASK_ATTEMPTS,
+        "вкл" if cfg.tiers_enabled else "выкл", cfg.intent_repeat_threshold,
+        dialog_module.MAX_BOT_PHRASES or "нет",
+        "нет" if dialog_module.NO_SECOND_ROUND_AFTER_NO else "есть",
+        # Эти две настройки можно выключить словом из bat, и отпечаток должен
+        # показывать, что откат сработал.
+        os.path.basename(cfg.voice_library_dir.rstrip("/\\")) if cfg.voice_library_dir else "выкл",
+        os.path.basename(cfg.corpus_index_path) if cfg.corpus_index_path else "выкл",
+    )
 
 
 def load_corpus_index(cfg):
@@ -103,8 +179,13 @@ def load_corpus_index(cfg):
     кладётся рядом с сервисом руками.
     """
     path = cfg.corpus_index_path
-    if not path or not os.path.exists(path):
-        log.info("Корпус реплик не подключён (%s нет) — решают только формулировки", path or "путь пуст")
+    if not path:
+        # Выключен словом в bat (AIA_CORPUS_INDEX_PATH=нет). Прежде это было
+        # невыразимо: пустое значение cmd удаляет, и откат не срабатывал.
+        log.info("Корпус реплик выключен настройкой — решают только формулировки")
+        return None
+    if not os.path.exists(path):
+        log.info("Корпус реплик не подключён (файла %s нет) — решают только формулировки", path)
         return None
     corpus = CorpusIndex.load(path, k=cfg.corpus_k, threshold=cfg.corpus_threshold,
                               operator_threshold=cfg.corpus_operator_threshold,
@@ -350,6 +431,9 @@ class SpeechServicer(speech_pb2_grpc.SpeechServicer):
 
                 timeline = CallTimeline(session_id)
                 remember_forced(session_id, bool(event.forced))
+                # Громкость реплики нужна диалогу: по ней он отличает речь,
+                # которую движок не разобрал, от шума в линии.
+                remember_peak(session_id, float(event.peak_dbfs))
                 if event.forced:
                     # Реплика выдана принудительно по потолку длины
                     # (MAX_UTTERANCE_SECONDS в vad.py) — паузы перед этим не
@@ -447,18 +531,165 @@ STREAM_GAP_RESET_S = 1.0
 #: forced_lookup: AGI присылает в /dialog только текст, а решение «это хвост
 #: монолога, а не ответ» нужно именно диалогу. Записи вытесняются вместе с
 #: сессиями диалога — ключ тот же linkedId.
-FORCED_FINALS: Dict[str, bool] = {}
+#: Признак «последняя реплика звонка срезана по потолку длины»: диалог по нему
+#: понимает, что клиент ещё говорил, когда бот заговорил сам.
+#:
+#: Хранится не словарём с полной очисткой, а упорядоченным словарём с
+#: вытеснением самого старого (как MAX_ACTIVE_TIMELINES и сессии диалога).
+#: Прежний `clear()` при переполнении стирал флаги ВСЕХ звонков, включая те,
+#: что идут прямо сейчас: на две тысячи первом звонке живой разговор терял
+#: признак срезанной реплики и получал повтор вопроса вместо продолжения
+#: (находка B1-08 ультракода).
+FORCED_FINALS: "OrderedDict[str, bool]" = OrderedDict()
 FORCED_FINALS_MAX = 2000
 
 
 def remember_forced(session_id: str, forced: bool) -> None:
-    if len(FORCED_FINALS) >= FORCED_FINALS_MAX:
-        FORCED_FINALS.clear()
     FORCED_FINALS[session_id] = forced
+    FORCED_FINALS.move_to_end(session_id)
+    while len(FORCED_FINALS) > FORCED_FINALS_MAX:
+        # Вытесняем самый старый звонок, а не все разом.
+        FORCED_FINALS.popitem(last=False)
 
 
 def was_forced(session_id: str) -> bool:
     return FORCED_FINALS.get(session_id, False)
+
+
+#: Громкость последней реплики каждого звонка в dBFS. Нужна диалогу: пустое
+#: распознавание бывает двух сортов, и вести себя с ними надо по-разному. Щелчок
+#: в линии или шорох это тишина, на такое бот молчит и слушает дальше. А реплика
+#: нормальной громкости, из которой движок не достал ни слова, значит, что
+#: человек говорил и ждёт ответа: молчать в ответ он читает как поломку.
+#: На записях 07.11.2026 примерно половина пустых распознаваний громче минус 25
+#: dBFS, то есть это живая речь, а не шум.
+LAST_PEAKS: "OrderedDict[str, float]" = OrderedDict()
+
+
+def remember_peak(session_id: str, peak: float) -> None:
+    LAST_PEAKS[session_id] = peak
+    LAST_PEAKS.move_to_end(session_id)
+    while len(LAST_PEAKS) > FORCED_FINALS_MAX:
+        LAST_PEAKS.popitem(last=False)
+
+
+def last_peak(session_id: str) -> float:
+    return LAST_PEAKS.get(session_id, -99.0)
+
+
+#: Как часто чистить папку отладочных записей. Чаще смысла нет: в худшем
+#: случае между чистками набегает несколько минут записей.
+PRUNE_DEBUG_AUDIO_EVERY_S = 300
+
+
+def prune_old_files(directory: str, max_mb: int, keep_days: int, now: Optional[float] = None,
+                    what: str = "Отладочные записи") -> int:
+    """Убрать из папки то, что старше срока и лишнее по объёму.
+
+    Служит двум папкам: записям разговоров и кэшу синтеза. Имена в кэше это
+    хэши от модели, голоса и текста, поэтому «устаревший» файл по имени не
+    отличить, и чистить его можно только по возрасту и объёму. Копился он без
+    предела: 2287 файлов и 177 МБ при 58 живых фразах, потому что в ключ входит
+    отпечаток библиотеки, и каждая её правка переименовывает весь кэш, а старые
+    имена остаются на диске навсегда (A6, п. 6-8).
+
+    Записи разговоров клиентов нельзя копить без предела. Боевой bat держал
+    запись включённой постоянно (а комментарий в нём обещает «только на время
+    разбора споров»), и за 25 дней на одной группе линий набежало 1608 файлов
+    на 181 МБ при 0,3 МБ на звонок. На всех линиях это кратно больше, а диск C
+    на 07.11.2026 занят на 94 % (свободно 7,7 ГБ). Полный диск немеет бота
+    целиком: синтез не может создать временный файл, ручка /tts отдаёт 500, и
+    станция уводит каждый звонок на аварийный перевод.
+
+    Сначала удаляется то, что старше keep_days, затем, если папка всё ещё
+    больше max_mb, самые старые файлы до нужного объёма. Возвращает число
+    удалённых файлов. Ноль в max_mb или keep_days отключает соответствующее
+    правило.
+    """
+    if not directory:
+        return 0
+    stamp = time.time() if now is None else now
+    removed = 0
+    try:
+        entries = []
+        # scandir, а не listdir плюс stat плюс isfile: тип и размер приходят
+        # вместе с именем, то есть один системный вызов на файл вместо трёх.
+        # На папке из 1608 файлов это 0,09 с против 0,26 с.
+        with os.scandir(directory) as scan:
+            for entry in scan:
+                try:
+                    if not entry.is_file():
+                        continue
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                entries.append((stat.st_mtime, stat.st_size, entry.path))
+        entries.sort()
+        if keep_days > 0:
+            deadline = stamp - keep_days * 86400
+            for mtime, _size, path in list(entries):
+                if mtime >= deadline:
+                    break
+                try:
+                    os.remove(path)
+                except OSError:
+                    continue
+                entries.remove((mtime, _size, path))
+                removed += 1
+        if max_mb > 0:
+            limit = max_mb * 1024 * 1024
+            total = sum(size for _mtime, size, _path in entries)
+            for mtime, size, path in list(entries):
+                if total <= limit:
+                    break
+                try:
+                    os.remove(path)
+                except OSError:
+                    continue
+                total -= size
+                removed += 1
+        if removed:
+            log.info("%s: удалено %s файлов (срок %s дн., предел %s МБ)",
+                     what, removed, keep_days, max_mb)
+    except Exception:
+        # Чистка не имеет права уронить живой звонок.
+        log.exception("Не удалось почистить папку %s (%s)", directory, what)
+    return removed
+
+
+def start_debug_audio_cleaner(directory: str, max_mb: int, keep_days: int, stop_event=None):
+    """Чистить папку отладочных записей в отдельном потоке, а не в звонке.
+
+    Первая версия звала чистку прямо из обработчика потока на первом куске
+    звука. Это ровно та авария, от которой избавлялись пределом одновременных
+    вызовов: пока идёт обход каталога, обработчик не читает поток и не отдаёт
+    ни распознанную реплику, ни событие тишины, то есть клиент слушает тишину.
+    Замер на этой машине: папка из 1608 файлов обходится 0,26 с, удаление 1,36
+    мс на файл, а первая чистка после рестарта удалила бы 1105 файлов, то есть
+    около 1,8 с тишины в начале звонка. При пределе 1024 МБ каталог дорастает
+    до девяти тысяч файлов, и полуторасекундная пауза попадала бы в каждый
+    звонок после пятиминутного простоя.
+
+    Возвращает поток (или None, если оба правила выключены нулём).
+    """
+    if not directory or (max_mb <= 0 and keep_days <= 0):
+        log.info("Чистка папки отладочных записей выключена")
+        return None
+
+    stop = stop_event or threading.Event()
+
+    def loop() -> None:
+        # Первый проход сразу: после рестарта в папке обычно и лежит всё лишнее.
+        while True:
+            prune_old_files(directory, max_mb, keep_days)
+            if stop.wait(PRUNE_DEBUG_AUDIO_EVERY_S):
+                return
+
+    thread = threading.Thread(target=loop, name="debug-audio-cleaner", daemon=True)
+    thread.start()
+    log.info("Чистка папки отладочных записей: каждые %d с, предел %d МБ, срок %d дн.",
+             PRUNE_DEBUG_AUDIO_EVERY_S, max_mb, keep_days)
+    return thread
 
 
 def open_stream_dump(directory: str, session_id: str):
@@ -590,6 +821,7 @@ def build_dialog_factory(
             line_profiles=profiles,
             is_private_master=feed.is_private_master,
             forced_lookup=was_forced,
+            peak_lookup=last_peak,
         )
 
     return factory
@@ -604,13 +836,21 @@ class KnowledgeState:
     """
 
     def __init__(self, cache_path, embedder, threshold=0.64, dialog_factory=None,
-                 fallback_engine=None, default_voice="", corpus=None):
+                 fallback_engine=None, default_voice="", corpus=None,
+                 intent=None, intent_repeat_threshold=0.70):
         self._cache_path = cache_path
         self._embedder = embedder
         self._threshold = threshold
         # Корпус живых реплик один на все посылки: он не приезжает из ERP,
         # а собирается из записей звонков и меняется только с перезапуском.
         self._corpus = corpus
+        # Ярус намерения тоже один на все посылки и по той же причине: модель
+        # обучается офлайн и лежит файлом рядом с сервисом. Передавать его
+        # здесь ОБЯЗАТЕЛЬНО: база знаний пересобирается на каждой посылке из
+        # ERP (раз в десять минут), и без этого ярус тихо отключился бы через
+        # десять минут после запуска.
+        self._intent = intent
+        self._intent_repeat_threshold = intent_repeat_threshold
         self._dialog_factory = dialog_factory
         # Движок на базе из файла — он обслуживает звонки, пока первой посылки
         # не было, и разговоры при первой же подмене надо перенимать у него.
@@ -628,6 +868,10 @@ class KnowledgeState:
         #: значение считает поводом прислать справочники — то есть до первой
         #: посылки он их пришлёт, как и должен.
         self.content_hash = ""
+        #: Что в последней принятой базе знаний выглядит сломанным. Видно в
+        #: /health: аналитик узнаёт о своей опечатке в тот же день, а не на
+        #: разборе волны через две недели.
+        self.warnings: List[str] = []
         self.record_count = 0
         self.phrase_count = 0
         #: Сколько наборов фраз приехало сверх набора по умолчанию. Смена
@@ -639,8 +883,11 @@ class KnowledgeState:
         #: чем синтезировать, приходится самому сервису.
         self.voice = default_voice
 
-    def apply(self, feed: ParsedFeed) -> None:
-        knowledge = KnowledgeBase(feed.records, self._embedder, self._threshold, corpus=self._corpus)
+    def apply(self, feed: ParsedFeed, warnings: Optional[List[str]] = None) -> None:
+        warnings = list(warnings or ())
+        knowledge = KnowledgeBase(feed.records, self._embedder, self._threshold,
+                                  corpus=self._corpus, intent=self._intent,
+                                  intent_repeat_threshold=self._intent_repeat_threshold)
         phrase_count = sum(1 + len(r.question_variants) for r in feed.records)
         voice = resolve_voice(feed.voice, self._default_voice)
         engine = self._dialog_factory(knowledge, feed) if self._dialog_factory else None
@@ -663,6 +910,7 @@ class KnowledgeState:
             # снова. Проставь мы отпечаток раньше применения — он бы решил, что
             # база принята, и бот молча жил бы на старой.
             self.content_hash = feed.content_hash
+            self.warnings = warnings
             self.record_count = len(feed.records)
             self.phrase_count = phrase_count
             self.line_group_count = len(feed.line_groups)
@@ -672,8 +920,13 @@ class KnowledgeState:
         # диск. Иначе на диск попадёт посылка, которую сервис не смог применить,
         # и после перезапуска он поднимется именно на ней.
         feed = parse_feed(payload)
-        self.apply(feed)
+        warnings = check_feed(feed)
+        self.apply(feed, warnings)
         save_feed(payload, self._cache_path)
+        # Копия в архив под отпечатком содержимого: на диске лежала только
+        # последняя посылка, и реплей прошлой волны шёл на нынешней базе, то
+        # есть проверял не то, что тогда отвечало на звонки.
+        archive_feed(payload, self._cache_path, feed.content_hash)
         return feed
 
     def restore_from_disk(self) -> bool:
@@ -681,7 +934,8 @@ class KnowledgeState:
         if payload is None:
             return False
         try:
-            self.apply(parse_feed(payload))
+            restored = parse_feed(payload)
+            self.apply(restored, check_feed(restored))
             return True
         except FeedError:
             log.exception("Копия посылки не разбирается, стартуем без неё")
@@ -855,7 +1109,16 @@ def build_http_app(
             state.record_count, state.phrase_count, state.line_group_count,
             state.voice, feed.generated_at,
         )
-        return {"records": state.record_count, "phrases": state.phrase_count}
+        for warning in state.warnings:
+            # Предупреждением, а не отказом: правку аналитика из-за подозрения
+            # останавливать нельзя, он правит базу по живым жалобам. Но мёртвый
+            # замок категории уже жил в работе две недели незамеченным.
+            log.warning("База знаний: %s", warning)
+        return {
+            "records": state.record_count,
+            "phrases": state.phrase_count,
+            "warnings": state.warnings,
+        }
 
     @app.get("/health")
     def health():
@@ -869,7 +1132,7 @@ def build_http_app(
         # пятисот формулировок ради базы, которая не менялась.
         knowledge_info = {
             "records": 0, "phrases": 0, "generated_at": None, "received_at": None,
-            "content_hash": "", "source": "file",
+            "content_hash": "", "source": "file", "warnings": [],
         }
         if state is not None:
             knowledge_info = {
@@ -879,8 +1142,17 @@ def build_http_app(
                 "received_at": state.received_at,
                 "content_hash": state.content_hash,
                 "source": "feed" if state.dialog_engine is not None else "file",
+                # Что в базе выглядит сломанным: записи без формулировок,
+                # одинаковые формулировки у разных записей, замки категорий без
+                # записей, записи, которые некуда переводить.
+                "warnings": list(state.warnings),
             }
-        return {"status": "ok", "knowledge": knowledge_info}
+        gates_info = {}
+        if state is not None and state.knowledge is not None:
+            # Замок категории сработал, а вести по нему было некуда. Ноль здесь
+            # означает, что все замки целятся в существующие записи.
+            gates_info = dict(getattr(state.knowledge, "category_misses", {}) or {})
+        return {"status": "ok", "knowledge": knowledge_info, "dead_category_gates": gates_info}
 
     return app
 
@@ -918,8 +1190,27 @@ def main() -> None:
     log.info("Загружаем эмбеддер %s", cfg.embedder_model)
     embedder = SentenceTransformerEmbedder(cfg.embedder_model)
     corpus = load_corpus_index(cfg)
+    intent = None
+    if cfg.tiers_enabled:
+        # Размерность проверяется по живому эмбеддеру: модель, обученная на
+        # другом эмбеддере, молча давала бы мусорные вероятности, а при
+        # несовпадении длины вектора ронял бы каждый звонок в аварийный
+        # перевод (находка консилиума L5-05).
+        probe = embedder.encode(["search_query: проверка"])[0]
+        intent = load_intent_model(
+            cfg.intent_model_path,
+            expected_dim=int(len(probe)),
+            expected_embedder=cfg.embedder_model,
+        )
+        if intent is None:
+            log.warning("Ярус намерения включён настройкой, но модель не загрузилась: решают корпус и формулировки")
+        else:
+            log.info("Ярус намерения включён, порог повторного обращения %.2f", cfg.intent_repeat_threshold)
+    else:
+        log.info("Ярус намерения выключен (AIA_TIERS_ENABLED=0)")
     knowledge = load_knowledge_base(
-        cfg.knowledge_path, embedder, cfg.similarity_threshold, corpus=corpus
+        cfg.knowledge_path, embedder, cfg.similarity_threshold, corpus=corpus,
+        intent=intent, intent_repeat_threshold=cfg.intent_repeat_threshold,
     )
 
     log.info("Загружаем движок распознавания %s", cfg.stt_engine)
@@ -946,16 +1237,51 @@ def main() -> None:
     fallback_voice = cfg.tts_voice
     library = VoiceLibrary(cfg.voice_library_dir)
     if library.voices:
-        synthesizer = RecordedSynthesizer(library, synthesizer)
+        # Запасной голос вычисляем ДО создания синтезатора и передаём ему
+        # именем. Раньше синтезатор создавался первым и запасного голоса не
+        # получал вовсе: в движок уходило имя библиотечного голоса, которого он
+        # не знает, и он брал своё умолчание. Настройка запасного голоса не
+        # действовала, а в логе появлялось ложное «проверьте AI_VOICE в группе
+        # линий» (A6, п. 5).
+        #
+        # Умолчание берём у самого движка, а не прошиваем именем vosk-голоса:
+        # на откате AIA_TTS_ENGINE=silero прошитое s3 уехало бы в silero,
+        # который таких дикторов не знает, и ручка /tts отдала бы 500.
         if fallback_voice in library.voices:
-            fallback_voice = VoskSynthesizer.DEFAULT_VOICE
+            fallback_voice = engine_default_voice(synthesizer)
+        synthesizer = RecordedSynthesizer(library, synthesizer, fallback_voice)
+        log.info("Запасной голос для фраз вне библиотеки: %s", fallback_voice)
         log.info("Библиотека голосов %s: %s",
                  cfg.voice_library_dir,
                  ", ".join("%s (%d фраз)" % (v, library.phrase_count(v)) for v in library.voices))
     else:
         library = None
-        log.info("Библиотека голосов не подключена (%s пуста или нет) — только синтез", cfg.voice_library_dir)
+        if cfg.voice_library_dir:
+            log.info("Библиотека голосов не подключена (%s пуста или нет) — только синтез",
+                     cfg.voice_library_dir)
+        else:
+            # Выключена словом в bat (AIA_VOICE_LIBRARY_DIR=нет): это откат на
+            # синтез, когда в бой уехала плохая запись голоса. Прежде такой
+            # откат пустым значением не срабатывал, см. config._env_optional_str.
+            log.info("Библиотека голосов выключена настройкой — только синтез")
     tts_cache = TtsCache(synthesizer, cfg.tts_cache_dir)
+    # Чистка кэша синтеза идёт ДО прогрева, а не после. Попадание в кэш время
+    # файла не обновляет, поэтому живая фраза, синтезированная месяц назад,
+    # для правила срока выглядит так же, как мусор от старого отпечатка
+    # библиотеки. Чистим первыми, и прогрев тут же создаёт заново всё, что
+    # действительно нужно, с новым временем. После прогрева порядок был бы
+    # обратным: живую фразу удалили бы, а синтез её пришёлся бы на звонок.
+    #
+    # И именно поэтому чистка держится за прогрев: без него восстанавливать
+    # удалённое НЕКОМУ, и каждая живая фраза досинтезировалась бы внутри
+    # разговора по полсекунды, приветствие в том числе. Обоснование порядка
+    # выше при выключенном прогреве просто неверно, так что выключаем вместе.
+    if cfg.prewarm_tts:
+        prune_old_files(cfg.tts_cache_dir, cfg.tts_cache_max_mb, cfg.tts_cache_keep_days,
+                        what="Кэш синтеза")
+    elif cfg.tts_cache_max_mb > 0 or cfg.tts_cache_keep_days > 0:
+        log.info("Чистка кэша синтеза пропущена: прогрев выключен, восстанавливать "
+                 "удалённое было бы некому, и синтез пришёлся бы на разговор")
     # Подпись звука берётся у самого синтезатора, а не из cfg.tts_model:
     # у vosk модель задаётся папкой, и cfg.tts_model при нём вообще не
     # участвует в синтезе. Возьми мы его — подпись осталась бы прежней при
@@ -1020,7 +1346,26 @@ def main() -> None:
             silence_timeout_ms=cfg.silence_timeout_ms,
         )
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
+    # Предел одновременных вызовов задаётся вместе с пулом и равен ему.
+    # Обработчик Recognize занимает поток на весь звонок, поэтому без
+    # maximum_concurrent_rpcs лишний вызов не отклонялся, а молча ждал
+    # свободного потока: обработчик не стартовал, события FINAL и SILENCE не
+    # приходили, и клиент после приветствия слушал тишину до таймаута станции
+    # 120 с. С пределом лишний звонок получает отказ сразу, а станция по
+    # отказу gRPC уводит его на аварийный перевод к человеку
+    # (agi/ai_assistant.py, decide_failure_step и failover_to_support).
+    if cfg.torch_threads > 0:
+        try:
+            import torch
+
+            torch.set_num_threads(cfg.torch_threads)
+            log.info("Потоков на одно распознавание: %s", cfg.torch_threads)
+        except Exception:
+            log.exception("Не удалось ограничить число потоков torch")
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=cfg.grpc_max_calls),
+        maximum_concurrent_rpcs=cfg.grpc_max_calls,
+    )
     speech_pb2_grpc.add_SpeechServicer_to_server(
         SpeechServicer(
             segmenter_factory, engine, timeline_sink, active_timelines, timelines_lock,
@@ -1033,9 +1378,11 @@ def main() -> None:
     )
     if cfg.debug_audio_dir:
         log.info("Реплики звонков сохраняются в %s", cfg.debug_audio_dir)
+        start_debug_audio_cleaner(cfg.debug_audio_dir, cfg.debug_audio_max_mb, cfg.debug_audio_keep_days)
     server.add_insecure_port("0.0.0.0:{0}".format(cfg.grpc_port))
     server.start()
     log.info("gRPC слушает порт %s", cfg.grpc_port)
+    log_build_fingerprint(cfg)
 
     # Приёмник справочников из ERP. Пришедшая база знаний обслуживает звонки
     # сама (см. выбор движка в /dialog), база из файла остаётся страховкой на
@@ -1051,6 +1398,8 @@ def main() -> None:
         fallback_engine=dialog_engine,
         default_voice=cfg.tts_voice,
         corpus=corpus,
+        intent=intent,
+        intent_repeat_threshold=cfg.intent_repeat_threshold,
     )
     if knowledge_state.restore_from_disk():
         log.info(

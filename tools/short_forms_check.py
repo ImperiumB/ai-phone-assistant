@@ -72,11 +72,11 @@ def main() -> None:
             out.write("-- Короткие формы живой речи, не находящие свою запись (tools/short_forms_check.py)\nSET DEFINE OFF;\n\n")
             for kb_id, items in failures.items():
                 phrases = sorted({t for t, _ in items})
-                out.write("INSERT INTO ULTIMA.AI_KB_PHRASES (ID, KNOWLEDGE_BASE_ID, PHRASE, IS_FROM_BOT)\n"
-                          "SELECT (SELECT NVL(MAX(ID), 0) FROM ULTIMA.AI_KB_PHRASES) + ROWNUM, %d, v.PHRASE, 0\n  FROM (\n" % kb_id)
+                out.write("INSERT INTO ULTIMA.AI_KB_TO_PHRASES (KNOWLEDGE_BASE_ID, PHRASE, IS_FROM_BOT)\n"
+                          "SELECT %d, v.PHRASE, 0\n  FROM (\n" % kb_id)
                 out.write(" UNION ALL\n".join("    SELECT '%s'%s FROM DUAL" % (p.replace("'", "''"), " AS PHRASE" if i == 0 else "")
                                               for i, p in enumerate(phrases)))
-                out.write("\n  ) v\n WHERE NOT EXISTS (SELECT 1 FROM ULTIMA.AI_KB_PHRASES p\n"
+                out.write("\n  ) v\n WHERE NOT EXISTS (SELECT 1 FROM ULTIMA.AI_KB_TO_PHRASES p\n"
                           "                    WHERE p.KNOWLEDGE_BASE_ID = %d\n"
                           "                      AND LOWER(TRIM(REGEXP_REPLACE(p.PHRASE, '[[:space:]]+', ' '))) = v.PHRASE);\n\n" % kb_id)
             out.write("COMMIT;\n")

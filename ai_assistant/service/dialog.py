@@ -6,13 +6,14 @@
 """
 import hashlib
 import logging
+import os
 import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from ai_assistant.service.knowledge import content_words, exact_key
+from ai_assistant.service.knowledge import OPERATOR_META_RE, content_words, exact_key
 
 log = logging.getLogger("aia.dialog")
 
@@ -21,11 +22,6 @@ _WORD_RE = re.compile(r"\w+")
 POINT_START = "Start"
 POINT_ASK_QUESTION = "AskQuestion"
 POINT_CONFIRM = "Confirm"
-#: Развилка «по уже оформленному заказу или новый»: задаётся, когда корпус
-#: видит в реплике повторное обращение, но не настолько уверенно, чтобы
-#: переводить без вопроса («хотели бы мастера пригласить, стиральная машина
-#: что-то» — 269651582, 7-я волна). Раньше тут звучало «переформулируйте».
-POINT_INTENT = "Intent"
 POINT_FINISHED = "Finished"
 
 ACTION_RECOGNIZE = "Recognize"
@@ -64,6 +60,41 @@ CONFIRM_SILENT_EMPTY_ATTEMPTS = 1
 # что вопрос клиенту не подходит, и держать его в этой точке невежливо.
 CONFIRM_UNCLEAR_ATTEMPTS = 1
 
+#: Сколько фраз бот говорит за звонок, прежде чем перестать угадывать и отдать
+#: разговор человеку. Предела кругов не было вовсе, кроме таймаута станции в
+#: 120 секунд: реплей 455 звонков волн 11 и 12 показал 52 звонка, где бот
+#: произнёс четыре фразы и больше, и почти все они в замечаниях аналитика.
+#: Предел 5 обрезает 17 звонков из 455, 15 из них уже помечены проблемными, а
+#: беспроблемных переводов по теме не теряется ни одного. Предел 3 обрезал бы
+#: 95 звонков, среди них 26 помеченных «всё ок», поэтому именно 5.
+#:
+#: Ноль выключает предел (поведение до 07.11.2026). Нужно не для боя, а для
+#: замера: tools/replay_dialogs.py прогоняет один и тот же набор живых звонков
+#: с пределом и без, и только так видно цену правки.
+MAX_BOT_PHRASES = int(os.environ.get("AIA_MAX_BOT_PHRASES", "5"))
+
+#: Громкость, с которой пустое распознавание считается живой речью, а не шумом.
+#: Ниже порога бот молчит и слушает дальше, выше отвечает вслух.
+EMPTY_ANSWER_PEAK_DBFS = float(os.environ.get("AIA_EMPTY_ANSWER_PEAK_DBFS", "-25"))
+
+#: Ведёт ли явное «нет» сразу к человеку (решение аналитика КЦ после 11-й волны,
+#: подтверждено заказчиком 07.11.2026). Ноль возвращает прежний второй круг:
+#: бот спрашивал «Тогда подскажите, что вас интересует?» и искал тему заново.
+#:
+#: Переключатель нужен по двум причинам. Первая: откат боевой правки без
+#: выкладки кода, одной строкой в настройках плюс рестарт. Вторая: без него
+#: нельзя замерить саму правку, потому что сравнивать новое поведение не с чем,
+#: и цифры «до» приходится брать из памяти вместо прогона.
+NO_SECOND_ROUND_AFTER_NO = os.environ.get("AIA_NO_SECOND_ROUND", "1") != "0"
+
+# Отдельного запрета «не предлагать отвергнутую тему второй раз» здесь нет
+# намеренно. Он был написан 07.11.2026 и оказался недостижим: явное «нет» теперь
+# закрывает разговор переводом, а перевод удаляет состояние звонка, поэтому
+# набор отвергнутых записей не доживал до следующей реплики. Повтор отвергнутой
+# темы на живом наборе из 738 звонков всё равно упал с 14 звонков до нуля, но
+# сделал это сам перевод, а не запрет. Мёртвый код убран, чтобы он не выглядел
+# работающей защитой (находка консилиума L2-05, L3-5, L5-09).
+
 # То же самое для точки, где клиент называет тему, — но только для реплик,
 # которые всё-таки распознались. Первую проглатываем молча, со второй подряд
 # бот обязан заговорить.
@@ -79,15 +110,34 @@ CONFIRM_UNCLEAR_ATTEMPTS = 1
 # вводили. Молчащего клиента подберёт ветка silence по своему таймауту.
 ASK_SILENT_EMPTY_ATTEMPTS = 1
 
+#: Сколько раз за звонок бот просит повторить вопрос, когда корпус попал в
+#: серую зону уверенности. Один раз: человек переформулирует, и этого обычно
+#: хватает, а второй переспрос подряд клиент читает как неисправность.
+QUESTION_REASK_ATTEMPTS = int(os.environ.get("AIA_GREY_REASK_ATTEMPTS", "1"))
+
 # Запись без уточняющего вопроса — это перевод на человека сразу, без права на
-# ошибку: переспросить потом некого. Поэтому по формулировкам такая запись
-# берётся только при заметно более близком совпадении, чем обычная (у которой
-# ошибку поймает вопрос «правильно понимаю…?»). Планка та же, что у корпуса
-# для перевода на сопровождение без вопроса (AIA_CORPUS_OPERATOR_THRESHOLD).
-# 5-я волна 02.10.2026, 269211995: «узнать про ремонт» дало 0.689 с записью
-# «вопрос по оформленному заказу на кофемашину или оргтехнику» — и клиент уехал
-# на сопровождение вместо переспроса.
-DIRECT_TRANSFER_MIN_SIMILARITY = 0.72
+# ошибку: переспросить потом некого. Таких записей в посылке 14, и все ведут в
+# направление 17 «Сопровождение» на номер 7082.
+#
+# Планка жёстко равна порогу формулировок, а не отдельному числу (07.11.2026,
+# Э2 плана ультракода). Раньше здесь стояло 0.72 «как у корпуса для перевода на
+# сопровождение без вопроса», но операторский порог корпуса опущен до 0.50 по
+# совершенно другой причине: там корпус уверен в направлении, а здесь речь о
+# близости рукописной формулировки. Связывать их механически нельзя, а держать
+# третье независимое число означает три правды о доверии вместо одной.
+#
+# Повышенного зазора над порогом формулировок больше нет намеренно: политика
+# согласована как «не уверен, значит человек», то есть сдача на сопровождение
+# это допустимый исход, а не ошибка. Замер линейкой на 4000 реплик при паре
+# порогов 0.50 и 0.74 даёт мягких промахов 2.2 % при пределе приёмки 3.0 %.
+#
+# Случай, ради которого планка появилась (5-я волна 02.10.2026, 269211995:
+# «узнать про ремонт» дало 0.689 с записью «вопрос по оформленному заказу на
+# кофемашину или оргтехнику» и клиент уехал на сопровождение вместо переспроса),
+# новым порогом формулировок 0.74 закрывается сам: 0.689 до него не дотягивает.
+DIRECT_TRANSFER_MIN_SIMILARITY = float(
+    os.environ.get("AIA_DIRECT_TRANSFER_MIN",
+                   os.environ.get("AIA_SIMILARITY_THRESHOLD", "0.74")))
 
 #: Слова, которыми технику называют вообще, не называя её: «ремонт
 #: электроники», «починить технику», «нужен мастер». Реплика только из них
@@ -134,11 +184,6 @@ CLIPPED_WORD_MIN_LETTERS = 3
 # DefaultConfirmNotHeard в обработчике 15424 — оно присылается в посылке.
 DEFAULT_CONFIRM_NOT_HEARD = "Простите, не слышу вас. Скажите, пожалуйста, да... или нет"
 
-# Развилка намерения (POINT_INTENT). Своего поля в справочнике группы линий
-# пока нет — значение по умолчанию, как у confirm_not_heard; фраза записана
-# голосами библиотеки, текст менять только вместе с записью.
-DEFAULT_INTENT_QUESTION = "Вы звоните по уже оформленному заказу или хотите оформить новый?"
-
 # Ответ на вежливый зачин без темы («алло», «добрый день»). До 19.10.2026 бот
 # отвечал на него той же длинной просьбой переформулировать, что и на промах:
 # 3,6 секунды поверх клиента, который как раз начинал говорить («добрый день» →
@@ -146,17 +191,15 @@ DEFAULT_INTENT_QUESTION = "Вы звоните по уже оформленно�
 # 270057961). Одна секунда «Слушаю вас» — и клиент договаривает.
 DEFAULT_LISTENING_PHRASE = "Слушаю вас."
 
-#: Ответ на развилку — «по заказу»: слова про уже существующий заказ.
-INTENT_REPEAT_WORDS = frozenset("""
-оформленному оформленного оформленный оформленной оформлен оформляли оформляла оформлял
-заказу заказа заявке заявки заявку существующему старому старый первому первый прежнему
-повторно повторный уже звонили звонил звонила приезжал приезжала был была ждем ждём жду ждали
-""".split())
-#: Ответ на развилку — «новый»: слова про новый заказ. Проверяются первыми:
-#: «новый заказ» содержит и «заказ», и «новый».
-INTENT_NEW_WORDS = frozenset("""
-новый новая новую нового новой новое оформить заказать вызвать второй другой впервые
-""".split())
+#: Реплику, срезанную по потолку длины (vad.MAX_UTTERANCE_SECONDS), не разбираем
+#: сразу, а ждём продолжения и решаем по склейке. Обращение 271748387 (волна 13,
+#: 10.11.2026): клиент десять секунд рассказывал про подвал, бот срезал реплику
+#: на «…по стенам течёт и в этих», по обрезку угадал сантехника, задал вопрос
+#: поверх говорящего человека, а услышав продолжение рассказа, задал тот же
+#: вопрос ещё раз. Склеивается один раз: второй срез подряд разбирается как
+#: есть, иначе болтун держал бы линию без ответа. Выключатель на откат.
+FORCED_MERGE_ENABLED = os.environ.get("AIA_FORCED_MERGE", "1").strip().lower() not in (
+    "0", "нет", "net", "выкл", "off", "none", "-", "false")
 
 # Реплика уходит в поиск по смыслу, только если в ней есть слово хотя бы такой
 # длины. Эмбеддинг двух-трёх букв — шум: близость у него к какой-нибудь теме
@@ -218,6 +261,12 @@ FILLER_WORDS = frozenset([
     "есть", "ли", "короче", "значит",
     "девушка", "молодой", "человек", "будьте", "добры", "извините", "простите",
     "слушайте",
+    # Слова ожидания: клиент говорит их не боту, а кому-то рядом, или просит
+    # паузу. Обращение 271801482 (волна 13, 11.11.2026): «подожди подожди» на
+    # стыке с приветствием ушло в поиск, корпус увёл звонок в сопровождение, и
+    # клиент не успел сказать ни слова по делу. Темой эти слова быть не могут.
+    "подожди", "подождите", "погоди", "погодите", "секунду", "секундочку",
+    "минуту", "минутку", "минуточку", "сейчас", "щас",
 ])
 
 # Буквы, без цифр и подчёркиваний: правило меряет именно слово.
@@ -239,9 +288,6 @@ class Phrases:
     #: вернуло пустоту. Значение по умолчанию — на то время, пока в справочнике
     #: группы линий нет своего поля: посылка без него применяется как обычно.
     confirm_not_heard: str = DEFAULT_CONFIRM_NOT_HEARD
-    #: Развилка «по заказу или новый» (POINT_INTENT); значение по умолчанию до
-    #: появления своего поля в справочнике группы линий.
-    intent_question: str = DEFAULT_INTENT_QUESTION
     #: Короткий ответ на зачин без темы; записан голосами библиотеки.
     listening: str = DEFAULT_LISTENING_PHRASE
 
@@ -262,7 +308,6 @@ PHRASE_SLOTS = (
     "silence",
     "wrong_guess",
     "confirm_not_heard",
-    "intent_question",
     "listening",
 )
 
@@ -337,6 +382,66 @@ def _said_key(text: str) -> str:
     return " ".join(_WORD_RE.findall(text.lower().replace("ё", "е")))
 
 
+#: Отбрасывать ли реплику, которая оказалась куском фразы самого бота.
+#: Ноль выключает, если правило вдруг начнёт мешать.
+ECHO_MIN_WORDS = int(os.environ.get("AIA_ECHO_MIN_WORDS", "2"))
+
+#: Сколько секунд после своей фразы бот считает её куски эхом. Дальше те же
+#: слова сказал человек.
+#:
+#: Окно нужно из-за служебных фраз: «не слышу» это кусок нашего «простите, не
+#: слышу вас», а «вы меня слышите» это наша фраза целиком. Клиент говорит и то и
+#: другое, когда ему кажется, что связь пропала. Без окна такие реплики
+#: отбрасывались бы, и живой человек получал бы в ответ тишину.
+#:
+#: Три секунды: станция глохнет на время своей фразы плюс ECHO_GUARD_S, эхо
+#: приходит в первые куски сразу за снятием глухоты. Реплика, пришедшая позже,
+#: эхом быть уже не может.
+ECHO_WINDOW_S = float(os.environ.get("AIA_ECHO_WINDOW_S", "3.0"))
+
+
+def is_echo_of_own_phrase(text: str, last_said: str, point: str, since: float = 0.0) -> bool:
+    """Это не клиент, это эхо фразы бота вернулось с линии.
+
+    Станция глохнет на время своей фразы и ещё немного после (ECHO_GUARD_S), но
+    акустическое эхо с телефона клиента приходит с задержкой и попадает в первые
+    куски уже после снятия глухоты. Тогда бот «слышит» кусок собственной фразы,
+    темы в нём нет, и разговор уходит на сопровождение: один звонок из 548 длился
+    3,5 секунды, единственной «репликой» в нём было «могу помочь» из приветствия
+    (F3 речевого аудита; в логе ещё четыре-пять таких текстов).
+
+    Правило намеренно узкое, потому что ложное срабатывание дороже пропуска:
+    * работает только там, где бот задавал СВОЙ служебный вопрос, то есть в
+      начале разговора и на переспросе. В точке подтверждения и на развилке не
+      работает вовсе: там кусок фразы бота это как раз осмысленный ответ
+      («ремонт холодильника» в ответ на «правильно понимаю, что вас интересует
+      ремонт холодильника?» значит согласие, и его ловит отдельная ветка);
+    * слов должно быть не меньше ECHO_MIN_WORDS: односложное «да» эхом не
+      считаем никогда;
+    * слова должны идти в фразе бота ПОДРЯД и в том же порядке. Совпадение
+      вразброс значит, что человек говорит своими словами;
+    * реплика должна прийти в пределах ECHO_WINDOW_S после фразы. Это главная
+      защита от ложного срабатывания: «не слышу» и «вы меня слышите» клиент
+      говорит сам, когда ему кажется, что связь пропала, и отбрасывать такое
+      нельзя. Эхо же приходит сразу за фразой.
+
+    `since` — момент, когда бот закончил говорить. Ноль означает «бот ещё
+    ничего не говорил», и тогда эха быть не может.
+    """
+    if not ECHO_MIN_WORDS or point == POINT_CONFIRM:
+        return False
+    if not since or _now() - since > ECHO_WINDOW_S:
+        return False
+    heard = _said_key(text).split()
+    said = last_said.split()
+    if len(heard) < ECHO_MIN_WORDS or len(heard) > len(said):
+        return False
+    for start in range(len(said) - len(heard) + 1):
+        if said[start:start + len(heard)] == heard:
+            return True
+    return False
+
+
 class _SessionState:
     def __init__(self) -> None:
         self.record = None
@@ -355,17 +460,21 @@ class _SessionState:
         #: которого один раз попросили сказать иначе, не должен услышать ту же
         #: просьбу ещё раз где-то в конце разговора.
         self.reask_count = 0
-        #: Развилка «по заказу или новый» задаётся один раз за звонок; реплика,
-        #: на которой корпус засомневался, ждёт ответа на неё.
-        self.intent_asked = False
-        self.pending_text = ""
         #: Последняя реплика отдана по потолку длины (клиент ещё говорил), и
         #: заданный по ней вопрос застал клиента на полуслове.
         self.last_forced = False
         self.question_forced = False
+        #: Начало реплики, срезанной по потолку длины: ждёт продолжения, чтобы
+        #: бот решал по рассказу целиком (FORCED_MERGE_ENABLED).
+        self.forced_head = ""
         #: Последняя служебная фраза, которую бот произнёс (текст). Одну и ту же
         #: подряд не повторяем: «переформулируйте» дважды в 469 (9-я волна).
         self.last_said = ""
+        #: Когда бот закончил говорить. Нужно фильтру эха: акустическое эхо
+        #: приходит сразу за фразой, а те же слова через полминуты сказал
+        #: человек. Без окна «не слышу» и «вы меня слышите» от живого клиента
+        #: отбрасывались бы как эхо наших же служебных фраз.
+        self.last_said_at = 0.0
         #: Когда и по какой реплике бот в последний раз просил переформулировать:
         #: ответ, пришедший через секунду-полторы, — продолжение той же фразы.
         self.reask_at = 0.0
@@ -383,6 +492,20 @@ class _SessionState:
         #: при этом не теряется (4-я волна 01.10.2026: «техник» → переспрос по
         #: теме → «да» ушло в пустоту, 269164694).
         self.confirm_unclear = 0
+        #: Какая стадия резолвера решила последнюю реплику: exact, keyword,
+        #: intent, category, corpus, phrases или ничего. Раньше источник
+        #: терялся сразу после решения, и в логе его не было вовсе.
+        self.last_source = ""
+        #: Уверенность той же стадии, если у неё есть мера: доля голосов
+        #: корпуса или близость формулировки. У замков, яруса и точного
+        #: совпадения меры нет, там ноль.
+        self.last_decision_score = 0.0
+        #: Сколько фраз бот уже произнёс за звонок. Предела кругов у разговора
+        #: не было вовсе, кроме таймаута станции 120 с: реплей 455 звонков
+        #: показал 52 звонка с четырьмя и более ходами. Предел 5 обрезает 17
+        #: звонков, 15 из них уже помечены аналитиком как проблемные, а
+        #: беспроблемных переводов по теме теряется ноль.
+        self.said_count = 0
 
 
 class DialogEngine:
@@ -399,12 +522,15 @@ class DialogEngine:
         line_profiles: Optional[List[LineProfile]] = None,
         is_private_master: bool = False,
         forced_lookup=None,
+        peak_lookup=None,
     ):
         self._knowledge = knowledge
         #: Была ли последняя реплика звонка отдана распознаванию принудительно, по
         #: потолку длины (vad.MAX_UTTERANCE_SECONDS). Сервис знает это в потоке
         #: звука, диалог — нет: AGI присылает только текст. Функция (linkedId → bool).
         self._forced_lookup = forced_lookup
+        #: Громкость последней реплики звонка: см. LAST_PEAKS в main.py.
+        self._peak_lookup = peak_lookup
         self._support_exten = support_exten
         self._sales_exten = sales_exten
         self._max_sessions = max_sessions
@@ -509,6 +635,16 @@ class DialogEngine:
         state = self._session(linked_id)
         if text:
             state.last_forced = bool(self._forced_lookup and self._forced_lookup(linked_id))
+        merged = False
+        if state.forced_head and point not in (POINT_START, POINT_CONFIRM):
+            # Клиент договорил (или замолчал) после среза по потолку: решаем по
+            # всему рассказу. Молчание после среза значит, что рассказ кончился
+            # ровно на потолке, и тогда разбирается одно начало.
+            head, state.forced_head = state.forced_head, ""
+            text = (head + " " + text).strip() if text else head
+            silence = False
+            merged = True
+            log.info("Срезанная по потолку реплика склеена с продолжением: %r", text[:120])
         # Набор выбирается на каждой реплике заново, а не запоминается в
         # сессии: набранный номер приезжает в каждом запросе, и лишнее
         # состояние тут ничего не даёт.
@@ -580,9 +716,28 @@ class DialogEngine:
                 )
                 result = self._say_fresh(state, profile, "misrecognition", ACTION_RECOGNIZE, point,
                                          fallbacks=("listening",))
+            elif not text and self._loud_enough_to_answer(linked_id):
+                # Движок не достал ни слова, но громкость реплики как у живой
+                # речи: человек говорил и ждёт ответа. Молчание он читает как
+                # поломку бота (обращение 270982285, волна 12: пустое
+                # распознавание, тишина, и клиент положил трубку). Отвечаем
+                # коротким «Слушаю вас.»: фраза уже записана голосом оператора,
+                # новой озвучки не требует и не занимает линию надолго.
+                log.info("Пустое распознавание в точке %s при живой громкости — отвечаем вслух", point)
+                result = self._say_fresh(state, profile, "listening", ACTION_RECOGNIZE, point)
             else:
                 log.info("Пустой результат распознавания в точке %s — продолжаем слушать", point)
                 result = self._keep_listening(point)
+        elif is_echo_of_own_phrase(text, state.last_said, point, state.last_said_at):
+            # Вернулось эхо нашей же фразы. Клиент ещё ничего не сказал, поэтому
+            # отвечать нельзя: мы бы заговорили поверх него. Молчим и слушаем
+            # дальше в той же точке.
+            #
+            # Счётчики промахов не тратим: клиент не виноват, что станция
+            # услышала бота.
+            log.info("Реплика %r — эхо нашей же фразы %r, в поиск не идёт",
+                     text, state.last_said)
+            result = self._keep_listening(point)
         elif self._is_filler_only(text, point):
             # Клиент поздоровался или вежливо начал, но о деле ещё ничего не
             # сказал. В поиск такую реплику пускать нельзя: тема найдётся
@@ -607,14 +762,50 @@ class DialogEngine:
             state.empty_count = 0
             if point == POINT_CONFIRM:
                 result = self._handle_confirmation(state, text, profile)
-            elif point == POINT_INTENT:
-                result = self._handle_intent(state, text, profile)
+            elif FORCED_MERGE_ENABLED and state.last_forced and not merged:
+                # Клиент ещё говорит: реплику срезал потолок длины. Не перебиваем
+                # и не гадаем по половине рассказа, молча слушаем продолжение.
+                state.forced_head = text
+                log.info("Реплика срезана по потолку длины, ждём продолжения: %r", text[:120])
+                result = self._keep_listening(point)
             else:
                 result = self._handle_question(state, text, profile)
 
+        if merged:
+            # В обращение ERP должен уехать весь рассказ клиента, а не его хвост:
+            # станция помнит только последнюю реплику.
+            result = list(result) + [{"Key": "QuestionText", "Value": text}]
+        self._log_decision(linked_id, point, text, result, state)
+        if state.last_source:
+            # Кто решил и с какой уверенностью: едет через станцию в строку
+            # разметки ERP (колонка «Кто решил» формы ОКК), чтобы на разборе
+            # волны не поднимать лог сервиса по каждому обращению.
+            result = list(result) + [{"Key": "DecisionSource", "Value": state.last_source}]
+            if state.last_decision_score > 0:
+                result.append({"Key": "DecisionScore", "Value": "{0:.4f}".format(state.last_decision_score)})
         spoken = self._spoken_text(result)
         if spoken:
             state.last_said = _said_key(spoken)
+            state.last_said_at = _now()
+            state.said_count += 1
+        # Предел кругов. Если бот уже произнёс свою норму фраз и всё ещё
+        # собирается слушать дальше, разговор отдаётся человеку: клиент,
+        # которого переспросили пять раз, темы уже не назовёт, а в замечаниях
+        # аналитика такие звонки идут подряд.
+        if (MAX_BOT_PHRASES and state.said_count >= MAX_BOT_PHRASES and point != POINT_START
+                and self._action_of(result) == ACTION_RECOGNIZE):
+            log.info("Предел фраз бота (%d) исчерпан — переводим на человека", MAX_BOT_PHRASES)
+            # Тема, до которой бот всё-таки докопался, уезжает в обращение, но
+            # как НЕподтверждённая: trusted=False. Иначе в ERP ушли бы тип
+            # оборудования, сценарий и направление по теме, которую клиент не
+            # подтверждал, а это прямо запрещено политикой «не уверен, значит
+            # человек». Без match обращение уезжало вообще пустым, без записи и
+            # без меры близости, и разобрать такой звонок было нечем.
+            result = self._transfer(
+                profile, self._support_exten,
+                match=((state.record, state.score) if state.record is not None else None),
+                trusted=False, unknown_question=True, state=state,
+            )
 
         # Разговор дошёл до конца (перевод на специалиста или на продажи) —
         # его состояние больше не понадобится, держать его в памяти дальше
@@ -636,8 +827,16 @@ class DialogEngine:
         означать отказ (заказчик подтвердил, что это разговорное «нет», а не
         ошибка распознавания). Одно слово в одной точке разговора осмысленно,
         в другой — шум, и различать их можно только по точке.
+
+        Исключение: вопрос о самом собеседнике («вы кто», «кто это»). Слова в
+        нём короче четырёх букв, и правило считало его обрывком: клиент получал
+        молчание, потом «переформулируйте», потом «слушаю вас», и бросал трубку
+        (обращение 270485427, волна 12). Осмысленности в такой реплике ровно
+        столько, сколько нужно: правильный ответ на неё человек.
         """
-        if point in (POINT_CONFIRM, POINT_INTENT):
+        if point == POINT_CONFIRM:
+            return False
+        if OPERATOR_META_RE.search(text):
             return False
         return not any(
             len(word) >= MIN_SEARCHABLE_WORD_LETTERS for word in _LETTERS_RE.findall(text)
@@ -656,7 +855,7 @@ class DialogEngine:
         В точке подтверждения не действует по той же причине, что и правило об
         обрывках: там та же реплика — не название темы, а ответ на вопрос бота.
         """
-        if point in (POINT_CONFIRM, POINT_INTENT):
+        if point == POINT_CONFIRM:
             return False
         words = _LETTERS_RE.findall(text.lower().replace("ё", "е"))
         return bool(words) and all(word in FILLER_WORDS for word in words)
@@ -664,6 +863,28 @@ class DialogEngine:
     @staticmethod
     def _reaches(result: List[Dict[str, str]], point: str) -> bool:
         return any(item.get("Key") == "ConversationPoint" and item.get("Value") == point for item in result)
+
+    def _loud_enough_to_answer(self, linked_id: str) -> bool:
+        """Была ли последняя реплика достаточно громкой, чтобы счесть её речью.
+
+        Порог минус 25 dBFS: по записям 07.11.2026 пустые распознавания делятся
+        примерно пополам, и половина громче этого порога, то есть это речь,
+        которую движок не разобрал. Шум линии и щелчки лежат ниже.
+        """
+        if self._peak_lookup is None:
+            return False
+        try:
+            return float(self._peak_lookup(linked_id)) >= EMPTY_ANSWER_PEAK_DBFS
+        except Exception:
+            return False
+
+    @staticmethod
+    def _action_of(result: List[Dict[str, str]]) -> str:
+        """Какое действие бот просит у станции: слушать дальше или переводить."""
+        for item in result or ():
+            if item.get("Key") == "Action":
+                return item.get("Value", "")
+        return ""
 
     @staticmethod
     def _spoken_text(result: List[Dict[str, str]]) -> str:
@@ -728,20 +949,12 @@ class DialogEngine:
             match = (resolution.record, resolution.score) if resolution and resolution.record else None
             self._log_similarity(query, match)
         self._log_vote(resolution)
+        state.last_source = getattr(resolution, "source", "") or ""
+        state.last_decision_score = self._decision_score(resolution)
 
         # Кому верить, решает база знаний (KnowledgeBase.resolve): соседям по
         # корпусу живых реплик, если они уверены, иначе порогу по формулировке.
         found = match if resolution is not None and resolution.trusted else None
-        if (found is None and resolution is not None and resolution.source == "corpus-unsure"
-                and not state.intent_asked):
-            # Корпус видит повторное обращение, но не настолько уверенно, чтобы
-            # переводить без вопроса. Раньше бот просил переформулировать, и
-            # клиент повторял то же самое (269651582, 7-я волна). Спрашиваем
-            # прямо: по заказу или новый — ответ решает за корпус.
-            state.intent_asked = True
-            state.pending_text = query
-            log.info("Корпус сомневается между повторным и новым — спрашиваем развилку")
-            return self._say(profile, "intent_question", ACTION_RECOGNIZE, POINT_INTENT)
         if (found is not None and resolution.source == "phrases"
                 and found[1] < DIRECT_TRANSFER_MIN_SIMILARITY):
             log.info(
@@ -750,6 +963,24 @@ class DialogEngine:
                 found[0].question, found[1], DIRECT_TRANSFER_MIN_SIMILARITY,
             )
             found = None
+        if (found is None and resolution is not None and resolution.source == "corpus-grey"
+                and state.reask_count < QUESTION_REASK_ATTEMPTS):
+            # Корпус назвал направление, но уверенность в серой зоне: там он
+            # ошибается чаще, чем попадает (68 % ошибок при уверенности
+            # 0,50-0,60 против 1,5 % выше 0,90). Раньше выбор был между двумя
+            # способами угадать: поверить слабому голосу корпуса или отдать
+            # реплику рукописным формулировкам, у которых точность 36 %.
+            #
+            # Решение заказчика 07.11.2026: бот получает право сказать «не
+            # понял». Один раз просим повторить, и человек обычно говорит иначе
+            # («стиралка» вместо «машинка барахлит»), чего корпусу и не
+            # хватало. Если и вторая реплика попала в серую зону, разговор идёт
+            # к человеку: дальше переспрашивать значит злить клиента.
+            state.reask_count += 1
+            log.info("Корпус в серой зоне (уверенность %.3f) — просим повторить, попытка %d из %d",
+                     resolution.score, state.reask_count, QUESTION_REASK_ATTEMPTS)
+            return self._say_fresh(state, profile, "misrecognition", ACTION_RECOGNIZE,
+                                   POINT_ASK_QUESTION, fallbacks=("listening",))
         if found is None:
             # Правило Борца (21.10.2026): нечётко поняли, что хочет клиент — не
             # угадываем и не переспрашиваем, а сразу переводим на сопровождение
@@ -780,6 +1011,17 @@ class DialogEngine:
         # записанные аудио есть только у служебных фраз группы линий.
         return self._speak(profile, record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
 
+    @staticmethod
+    def _decision_score(resolution: Optional[Any]) -> float:
+        """Уверенность стадии, принявшей решение, если у стадии есть мера."""
+        source = getattr(resolution, "source", "") or ""
+        if source in ("corpus", "corpus-grey"):
+            vote = getattr(resolution, "vote", None)
+            return float(getattr(vote, "confidence", 0.0) or 0.0)
+        if source == "phrases":
+            return float(getattr(resolution, "score", 0.0) or 0.0)
+        return 0.0
+
     def _log_similarity(self, text: str, match: Optional[Any]) -> None:
         # Порог близости — главный настроечный параметр прототипа, который
         # подбирается на живых звонках (см. финальное ревью). Раньше мера
@@ -801,6 +1043,30 @@ class DialogEngine:
         log.info(
             "SIMILARITY %.4f (threshold=%.4f, %s) | question=%r | matched=%r",
             score, threshold, verdict, text, record.question,
+        )
+
+    def _log_decision(self, linked_id: str, point: str, text: str,
+                      result: List[Dict[str, str]], state: "_SessionState") -> None:
+        """Одна строка на ход бота: по ней разбирают звонок, не поднимая код.
+
+        До 07.11.2026 в логе лежали мера близости и голос корпуса, но не было
+        главного: кто в итоге решил и что бот сделал. Разбор волны шёл так:
+        аналитик присылает номер обращения, разработчик ищет в логе реплики,
+        достраивает по памяти, какая стадия сработала, и половину выводов
+        делает по догадке. Эта строка отвечает на вопрос сразу.
+        """
+        answer = {item.get("Key"): item.get("Value") for item in (result or ())}
+        said = (answer.get("TextToSpeak") or "").strip()
+        log.info(
+            "РЕШЕНИЕ [%s] точка=%s ход=%s реплика=%r | источник=%s запись=%s близость=%s "
+            "| действие=%s номер=%s тема=%s | сказал=%r%s",
+            linked_id, point, state.said_count + 1, (text or "")[:60],
+            state.last_source or "нет",
+            state.record.id if state.record is not None else "нет",
+            ("%.3f" % state.score) if state.record is not None else "нет",
+            answer.get("Action") or "нет", answer.get("RedirectExten") or "",
+            answer.get("Scenario") or "", said[:60],
+            " ПРОМАХ=%r" % (state.wrong_guess[1][:40],) if state.wrong_guess else "",
         )
 
     @staticmethod
@@ -841,51 +1107,6 @@ class DialogEngine:
         if record.scenario == SCENARIO_SALES:
             return self._sales_exten
         return self._support_exten
-
-    def _handle_intent(
-        self, state: _SessionState, text: str, profile: LineProfile
-    ) -> List[Dict[str, str]]:
-        """Ответ на развилку «по уже оформленному заказу или новый».
-
-        «По заказу» — повторное обращение, его ведёт человек: перевод на
-        сопровождение с исходной репликой клиента. «Новый» — тему ищем по
-        исходной реплике, но уже без корпуса: он здесь и засомневался, а
-        формулировки базы знаний в живой речи клиента найдут стиральную машину.
-        Клиент может вместо «да/нет» назвать тему заново — тогда её вопрос.
-        Ничего не нашлось — спрашиваем, что интересует, обычным ходом.
-        """
-        words = set(content_words(text)) | set(_WORD_RE.findall(text.lower().replace("ё", "е")))
-        wants_new = bool(words & INTENT_NEW_WORDS)
-        wants_repeat = not wants_new and bool(words & INTENT_REPEAT_WORDS)
-        pending = state.pending_text or text
-        if wants_repeat:
-            log.info("Развилка: %r — повторное обращение, переводим на сопровождение", text)
-            state.question_text = pending
-            return self._transfer(profile, self._support_exten, state=state)
-
-        # Тема, названная в самом ответе («стиральная машина»), важнее исходной реплики.
-        for candidate in ([text] if not wants_new and not self._is_generic_only(text) else []) + [pending]:
-            resolution = self._knowledge.resolve_phrases(candidate) if candidate == pending \
-                else self._knowledge.resolve(candidate)
-            self._log_vote(resolution)
-            if resolution is None or not resolution.trusted or resolution.record is None:
-                continue
-            record = resolution.record
-            if record.clarifying_question:
-                log.info("Развилка: %r — новый заказ, тема по формулировкам %r", text, record.question)
-                state.record = record
-                state.score = resolution.score
-                state.question_text = candidate
-                state.confirm_unclear = 0
-                return self._speak(profile, record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
-            if resolution.source != "phrases" or resolution.score >= DIRECT_TRANSFER_MIN_SIMILARITY:
-                return self._transfer(profile, self._support_exten, match=(record, resolution.score),
-                                      trusted=True, state=state)
-
-        log.info("Развилка: %r — тема не найдена, спрашиваем, что интересует", text)
-        state.record = None
-        return self._say_fresh(state, profile, "wrong_guess", ACTION_RECOGNIZE, POINT_ASK_QUESTION,
-                               fallbacks=("misrecognition",))
 
     def _handle_confirmation(
         self, state: _SessionState, text: str, profile: LineProfile
@@ -944,45 +1165,54 @@ class DialogEngine:
                 log.info("Ответ %r на подтверждение содержит и согласие, и отказ — переспрашиваем", text)
 
         if is_no:
-            # «Нет, мне надо в стиральную машину вставить манжет» (269819182,
-            # 12.10.2026), «нет, ремонт газовой колонки» (269828493): после
-            # отказа клиент тут же называет тему. Спросить «что вас
-            # интересует?» и услышать то же самое ещё раз — лишний круг, за
-            # который его и ругают. Берём тему из того же ответа: другая
-            # запись с вопросом — сразу её вопрос, запись без вопроса —
-            # перевод. Та же запись или ничего внятного — обычный отказ.
+            # Явное «нет» на угаданную тему ведёт к человеку, а не на второй
+            # круг угадывания. Решение аналитика КЦ после 11-й волны,
+            # подтверждено заказчиком 07.11.2026.
+            #
+            # Что было до этого: бот говорил «Тогда подскажите, пожалуйста, что
+            # вас интересует?» и снова искал тему по следующей реплике. Разбор
+            # 29 звонков с «нет» (волны 1-12): замечания аналитика в 22, а
+            # беспроблемных переводов по теме после второго круга ноль. То есть
+            # второй круг не дал ни одного хорошего исхода, зато дал повтор
+            # отвергнутой темы в 15 случаях из 27 и звонки на 6-8 фраз бота.
+            #
+            # Исключение одно и оно остаётся: клиент вместе с отказом сам
+            # назвал тему, которую не надо уточнять («нет, соедините с
+            # оператором», «нет, я по оформленному заказу»). Такую реплику
+            # переводим по названной теме, потому что это уже ответ, а не
+            # догадка бота. Ветка «назвал тему с уточняющим вопросом, спросим
+            # её» убрана вместе со вторым кругом: по ней 11 звонков, 10 из них
+            # в замечаниях.
             rest = self._after_negation(text, negative)
             if rest and len(content_words(rest)) >= 1 and not self._is_generic_only(rest):
                 named = self._knowledge.resolve(rest)
                 self._log_vote(named)
                 if named is not None and named.trusted and named.record is not None \
-                        and not self._same_topic(named.record, record):
+                        and not self._same_topic(named.record, record) \
+                        and not named.record.clarifying_question \
+                        and (named.source != "phrases" or named.score >= DIRECT_TRANSFER_MIN_SIMILARITY):
                     if state.question_text and state.wrong_guess is None:
                         state.wrong_guess = (state.question_text, record.question)
-                    if named.record.clarifying_question:
-                        log.info("Отказ %r сразу называет другую тему — спрашиваем её", text)
-                        state.record = named.record
-                        state.score = named.score
-                        state.question_text = rest
-                        state.confirm_unclear = 0
-                        return self._speak(profile, named.record.clarifying_question, ACTION_RECOGNIZE, POINT_CONFIRM)
-                    if named.source != "phrases" or named.score >= DIRECT_TRANSFER_MIN_SIMILARITY:
-                        log.info("Отказ %r сразу просит тему без вопроса %r — переводим", text, named.record.question)
-                        return self._transfer(
-                            profile, self._support_exten,
-                            match=(named.record, named.score), trusted=True, state=state,
-                        )
+                    log.info("Отказ %r сразу просит тему без вопроса %r — переводим", text, named.record.question)
+                    return self._transfer(
+                        profile, self._support_exten,
+                        match=(named.record, named.score), trusted=True, state=state,
+                    )
             if state.question_text and state.wrong_guess is None:
                 state.wrong_guess = (state.question_text, record.question)
             state.record = None
-            # Промах (клиент сказал «нет» на угаданную тему) отдаём в ответ отдельным
-            # ключом, чтобы AGI положил его в канал: бросит трубку на переспросе.
-            # last_will пошлёт wrongGuess в Hangup, и форма ОКК увидит промах. Только
-            # WrongGuess, без UnknownQuestion: вопрос на разметку пишется при сдаче, а не
-            # на переспросе, иначе база знаний засорится вопросами, которые клиент ещё уточнит.
-            reask_extra = {"WrongGuess": state.wrong_guess[1]} if state.wrong_guess else None
-            return self._say(profile, "wrong_guess", ACTION_RECOGNIZE, POINT_ASK_QUESTION,
-                             extra=reask_extra)
+            if not NO_SECOND_ROUND_AFTER_NO:
+                # Прежнее поведение, оставлено только для замера и отката:
+                # переспрос «что вас интересует?» и поиск темы заново.
+                reask_extra = {"WrongGuess": state.wrong_guess[1]} if state.wrong_guess else None
+                return self._say(profile, "wrong_guess", ACTION_RECOGNIZE, POINT_ASK_QUESTION,
+                                 extra=reask_extra)
+            # Промах уезжает с переводом: _with_wrong_guess внутри _transfer
+            # кладёт в ответ и сам промах, и исходную реплику клиента, так что
+            # форма ОКК увидит, что бот предлагал не то, даже если разговор на
+            # этом и закончился.
+            log.info("Клиент ответил %r на тему %r — переводим на сопровождение", text, record.question)
+            return self._transfer(profile, self._support_exten, state=state)
 
         if is_yes:
             sibling = self._sibling_after_yes(text, positive, record)

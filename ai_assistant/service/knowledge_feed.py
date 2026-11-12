@@ -11,7 +11,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ai_assistant.service.dialog import (
     DEFAULT_CONFIRM_NOT_HEARD,
@@ -217,6 +217,9 @@ def _parse_record(raw: Dict[str, Any], answers: Dict[str, List[str]]) -> Knowled
         # мастеров. Необязателен: отдела частных мастеров у направления может
         # не быть вовсе, и тогда такой звонок уходит на сопровождение.
         redirect_exten_pm=str(raw.get("redirect_exten_pm") or "").strip(),
+        # Замки записи. Необязательны: посылка от ERP без этого поля (до
+        # 12.11.2026) применяется как раньше, просто без замков.
+        gates=_clean_list(raw.get("gates")),
     )
 
 
@@ -294,6 +297,139 @@ def save_feed(payload: Dict[str, Any], path: str) -> None:
             os.remove(tmp_path)
         except FileNotFoundError:
             pass  # обычный случай: файл уже переименован
+
+
+#: Сколько посылок держим в архиве. Десять это примерно полтора часа работы
+#: робота или около двух недель правок аналитика, если он правит базу редко.
+FEED_ARCHIVE_KEEP = 10
+
+
+def archive_feed(payload: Dict[str, Any], cache_path: str, content_hash: str) -> str:
+    """Сложить копию принятой посылки в архив рядом с кэшем.
+
+    На диске лежала ТОЛЬКО последняя копия, и это закрывало разбор прошлого:
+    реплей волны, прошедшей две недели назад, шёл на нынешней базе знаний, то
+    есть проверял не то, что тогда отвечало на звонки. Правка данных трижды
+    меняла поведение бота (короткие формы в sql/20, перенос швейных машин,
+    формулировки оператора), и каждый раз восстановить прежнюю базу было нечем.
+
+    Имя файла несёт отпечаток содержимого: по нему посылку из журнала разбора
+    находят однозначно, даже если robot принёс её трижды.
+    """
+    directory = os.path.join(os.path.dirname(os.path.abspath(cache_path)) or ".", "feed_archive")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        stamp = str(payload.get("generated_at") or "").replace(":", "-").replace(" ", "_")[:19]
+        name = "%s_%s.json" % (stamp or "без-даты", (content_hash or "без-хэша")[:12])
+        path = os.path.join(directory, name)
+        if not os.path.exists(path):
+            save_feed(payload, path)
+        # Старые копии подчищаем сами: папка рядом с рабочим кэшем, и расти ей
+        # незачем. Сортировка по имени совпадает с хронологией: дата впереди.
+        kept = sorted(f for f in os.listdir(directory) if f.endswith(".json"))
+        for extra in kept[:-FEED_ARCHIVE_KEEP]:
+            try:
+                os.remove(os.path.join(directory, extra))
+            except OSError:
+                pass
+        return path
+    except Exception:
+        log.exception("Посылку не удалось положить в архив (%s)", directory)
+        return ""
+
+
+def check_feed(feed: "ParsedFeed") -> List[str]:
+    """Что в принятой базе знаний выглядит сломанным. Список предупреждений.
+
+    Это не отказ: посылка применяется всё равно. Отвергать правку аналитика
+    из-за подозрения значит остановить его работу, а он правит базу по живым
+    жалобам. Но молчать тоже нельзя: мёртвый замок категории жил в работе две
+    недели (целился в тип оборудования 915, а запись заведена с типом 912), и
+    увидеть это было нечем.
+
+    Предупреждения видны в логе при приёме и в /health, то есть аналитик
+    узнаёт о своей опечатке в тот же день, а не на разборе волны.
+    """
+    warnings: List[str] = []
+    searchable = [r for r in feed.records if (r.clarifying_question or "").strip()]
+    if not searchable:
+        warnings.append("ни одной записи с уточняющим вопросом: боту не с чем работать")
+
+    # Записи без единой формулировки: поиск по смыслу их почти не находит,
+    # потому что в индексе у них только собственный вопрос.
+    empty = [r.id for r in searchable if not r.question_variants]
+    if empty:
+        warnings.append("записей без формулировок %d (id %s): поиск по смыслу найдёт их только "
+                        "дословно" % (len(empty), ", ".join(str(i) for i in empty[:12])))
+
+    # Одна и та же формулировка у двух записей: дословное совпадение на ней не
+    # работает вовсе, решает близость.
+    seen: Dict[str, int] = {}
+    collisions = []
+    for record in searchable:
+        for phrase in [record.question] + list(record.question_variants):
+            key = " ".join(str(phrase).lower().replace("ё", "е").split())
+            if not key:
+                continue
+            owner = seen.get(key)
+            if owner is not None and owner != record.id:
+                collisions.append((key, owner, record.id))
+            else:
+                seen[key] = record.id
+    if collisions:
+        warnings.append("одинаковых формулировок у разных записей %d (например %r у %s и %s)"
+                        % (len(collisions), collisions[0][0][:40], collisions[0][1], collisions[0][2]))
+
+    # Замки категорий целятся в тип оборудования: если записи с таким типом в
+    # посылке нет, замок молча не делает ничего.
+    from ai_assistant.service.knowledge import CATEGORY_GATES
+
+    # Гейт мёртв, только когда пусты ВСЕ его типы: у ветеринарного их три (общий,
+    # собака, кошка), и отсутствие видовой записи это не поломка гейта, а просто
+    # не заведённая запись. Прежняя проверка считала мёртвым каждый тип по
+    # отдельности и ругалась бы на живой гейт.
+    types = {r.equipment_type_id for r in searchable}
+    dead = sorted(eqs[0] for _pattern, eqs in CATEGORY_GATES if not (set(eqs) & types))
+    if dead:
+        warnings.append("замки категорий без записей в базе: типы оборудования %s"
+                        % ", ".join(str(t) for t in dead))
+    # Тип гейта, у которого записи нет, а у соседних по гейту есть: гейт жив, но
+    # этой темой не пользуется. Не ошибка, но знать полезно: ровно так запись по
+    # кошке и была недостижима.
+    partial = sorted({eq for _pattern, eqs in CATEGORY_GATES if set(eqs) & types
+                      for eq in eqs if eq not in types})
+    if partial:
+        warnings.append("типы в замках категорий без своих записей (замок жив соседями): %s"
+                        % ", ".join(str(t) for t in partial))
+
+    # Замки записей. Строка с коротким словом не действует вовсе, и аналитик
+    # должен узнать об этом сразу, а не гадать, почему замок молчит.
+    from ai_assistant.service.knowledge import GATE_MIN_LETTERS, gate_is_valid, gate_words
+
+    short = ["%s у %s" % (row, r.id) for r in searchable for row in (r.gates or []) if not gate_is_valid(row)]
+    if short:
+        warnings.append("замков с пустой строкой или словом короче %d букв %d, они не действуют (%s)"
+                        % (GATE_MIN_LETTERS, len(short), "; ".join(short[:8])))
+    # Одна и та же строка замка у записей разных направлений: звонок уйдёт туда,
+    # где ближе формулировки, то есть замок перестаёт быть однозначным.
+    owners: Dict[Tuple[str, ...], Dict[int, int]] = {}
+    for record in searchable:
+        for row in record.gates or []:
+            if gate_is_valid(row):
+                owners.setdefault(gate_words(row), {})[record.telephone_direction_id] = record.id
+    split = ["%s (записи %s)" % (" ".join(words), ", ".join(str(i) for i in sorted(by_dir.values())))
+             for words, by_dir in sorted(owners.items()) if len(by_dir) > 1]
+    if split:
+        warnings.append("замков, ведущих в разные направления, %d: %s" % (len(split), "; ".join(split[:8])))
+
+    # Запись без направления и без номера приёма перевести некуда.
+    nowhere = [r.id for r in searchable
+               if not r.telephone_direction_id and not (r.redirect_exten or "").strip()]
+    if nowhere:
+        warnings.append("записей без направления и без номера перевода %d (id %s)"
+                        % (len(nowhere), ", ".join(str(i) for i in nowhere[:12])))
+
+    return warnings
 
 
 def load_feed(path: str) -> Optional[Dict[str, Any]]:

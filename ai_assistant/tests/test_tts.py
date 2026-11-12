@@ -807,3 +807,109 @@ def test_missing_library_folder_means_no_voices(tmp_path):
     from ai_assistant.service.tts import VoiceLibrary
 
     assert VoiceLibrary(str(tmp_path / "nope")).voices == []
+
+
+def test_the_fallback_voice_replaces_only_a_library_name(tmp_path):
+    """Дикторский голос группы линий подменять НЕЛЬЗЯ, библиотечный обязательно.
+
+    Подмена была безусловной, и это был регресс: в списке голосов группы линий
+    пять значений из восьми это дикторы самого движка (s0-s4). Руководитель
+    ставит AI_VOICE=s4, библиотека файла не находит, и в движок уходил запасной
+    s3. Клиент слышал s3 вместо выбранного s4, а в логе про это не было ни
+    слова: предупреждение стоит под условием «просили библиотечный», в которое
+    s4 не попадает.
+
+    Библиотечное имя, наоборот, подменять надо: движок таких дикторов не знает
+    и свалился бы на своё умолчание, выдав ложное «проверьте AI_VOICE в группе
+    линий» (A6, п. 5).
+    """
+    from ai_assistant.service.tts import RecordedSynthesizer, VoiceLibrary
+
+    library = VoiceLibrary(_library(tmp_path, {"voice-a": ["Вы меня слышите?"]}))
+    fallback = FakeSynthesizer()
+    synthesizer = RecordedSynthesizer(library, fallback, fallback_voice="s3")
+
+    synthesizer.synthesize("Что случилось?", "voice-a")
+    synthesizer.synthesize("Что случилось?", "s4")
+    synthesizer.synthesize("Вы меня слышите?", "s4")
+
+    assert fallback.calls == [
+        # Библиотечный голос: в движок ушёл запасной диктор.
+        ("Что случилось?", "s3"),
+        # Дикторский голос: ушёл как есть, выбор группы линий сохранён.
+        ("Что случилось?", "s4"),
+        ("Вы меня слышите?", "s4"),
+    ]
+
+
+def test_the_fallback_voice_is_part_of_the_audio_signature(tmp_path):
+    """Смена запасного голоса обязана менять ключ кэша и имя файла на станции.
+
+    Без этого настройка не доезжает до трубки: ключ тот же, кэш синтеза и кэш
+    станции отдают прежний звук. На те же грабли в этом файле наступали дважды,
+    13.08.2026 при переходе v4_ru -> v5_ru и 31.08.2026 с версией обработки
+    звука, и оба раза правка «не доехала, и никто не узнал».
+    """
+    from ai_assistant.service.tts import RecordedSynthesizer, VoiceLibrary
+
+    library = VoiceLibrary(_library(tmp_path, {"voice-a": ["Вы меня слышите?"]}))
+    fallback = FakeSynthesizer()
+    fallback.model_id = "vosk-x"
+    with_s3 = RecordedSynthesizer(library, fallback, fallback_voice="s3").model_id
+    with_s4 = RecordedSynthesizer(library, fallback, fallback_voice="s4").model_id
+    by_name = RecordedSynthesizer(library, fallback).model_id
+
+    assert with_s3 != with_s4
+    assert by_name not in (with_s3, with_s4)
+    for model_id in (with_s3, with_s4, by_name):
+        assert model_id.startswith("recorded-") and model_id.endswith("+vosk-x")
+
+
+def test_the_fingerprint_follows_the_file_content_not_its_timestamp(tmp_path):
+    """Подмена записи при неизменном указателе обязана менять отпечаток.
+
+    И наоборот: копирование библиотеки, распаковка архива или перенос на другую
+    машину меняют время правки при неизменном звуке, и отпечаток меняться НЕ
+    должен. Первая версия правки считала по размеру и времени и ошибалась в обе
+    стороны: ложная смена стоила 40-60 с старта и перекачки всех файлов
+    станцией, а подмена файла того же размера внутри одной секунды оставалась
+    невидимой.
+    """
+    import os
+    import struct as _struct
+
+    from ai_assistant.service.tts import VoiceLibrary, library_key
+
+    root = _library(tmp_path, {"v": ["раз"]})
+    wav = os.path.join(root, "v", library_key("раз") + ".wav")
+    before = VoiceLibrary(root).fingerprint
+
+    # Время правки уехало, звук тот же: отпечаток обязан остаться.
+    os.utime(wav, (1_000_000_000, 1_000_000_000))
+    assert VoiceLibrary(root).fingerprint == before
+
+    # Звук другой, длина та же, время не тронуто: отпечаток обязан смениться.
+    stat = os.stat(wav)
+    write_wav_8k(wav, _struct.pack("<8h", *([9] * 8)))
+    os.utime(wav, (stat.st_atime, stat.st_mtime))
+    assert os.path.getsize(wav) == stat.st_size
+    assert VoiceLibrary(root).fingerprint != before
+
+
+def test_engine_default_voice_is_asked_of_the_engine(tmp_path):
+    """Прошитое имя vosk-голоса уронило бы silero на откате.
+
+    `apply_tts(speaker="s3")` падает, ручка /tts отдаёт 500, и станция уводит
+    каждый звонок на аварийный перевод.
+    """
+    from ai_assistant.service.tts import SileroSynthesizer, VoskSynthesizer, engine_default_voice
+
+    class _Vosk:
+        DEFAULT_VOICE = VoskSynthesizer.DEFAULT_VOICE
+
+    class _Silero:
+        VOICES = SileroSynthesizer.VOICES
+
+    assert engine_default_voice(_Vosk()) == "s3"
+    assert engine_default_voice(_Silero()) in SileroSynthesizer.VOICES
+    assert engine_default_voice(object()) == ""

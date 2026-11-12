@@ -3,6 +3,7 @@
 Поиск делается эмбеддингами, а не LLM: он детерминирован, быстр и ничего не выдумывает.
 """
 import json
+import logging
 import re
 import os
 from dataclasses import asdict, dataclass, field
@@ -11,6 +12,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from ai_assistant.service.corpus_knn import OPERATOR_DIRECTION, CorpusIndex, Vote
+
+log = logging.getLogger("aia")
 
 # Префиксы нужны моделям семейства E5/RoSBERTa: они обучались различать запрос и документ.
 QUERY_PREFIX = "search_query: "
@@ -76,32 +79,72 @@ CATEGORY_GATES = (
     # «вызвать ветеринара», даже «крыса у ветеринара» это всё ветеринарные услуги
     # (800), мимо корпуса, который уводил животных в сантехнику и электрику
     # (звонок 02.11.2026). Стоит до крыс, поэтому «крыса плюс ветеринар» идёт к врачу.
-    (re.compile(r"\bсобак|\bкошк|\bкотен|\bщен|\bпитом|\bживотн|\bпсин|\bпопуга|\bхомяк|\bветеринар|\bврач", re.I), 800),
+    # Типов тут ТРИ, а не один: 800 это «ветеринарные услуги» без вида животного,
+    # 804 собака, 805 кошка. Так контора и считает заявки: в выгрузке обращений
+    # тип «Собака» стоит у 3631 заявки, «Кошка» у 2773, а общий 800 всего у 90.
+    # Пока гейт нёс только 800, запись с видовым типом была ему НЕ ВИДНА, то есть
+    # недостижима в принципе: все реплики про животных решает этот гейт, а не
+    # поиск по смыслу. Замер 09.11.2026 это и показал: попытка развести виды одними
+    # данными дала 4 смены произносимого вопроса из 850, и все к худшему («у кошки
+    # глаз течёт» стало слышать «правильно понимаю, запись животного на МРТ?»),
+    # потому что видовые формулировки ушли с единственной видимой гейту записи.
+    (re.compile(r"\bсобак|\bкошк|\bкотен|\bщен|\bпитом|\bживотн|\bпсин|\bпопуга|\bхомяк|\bветеринар|\bврач", re.I),
+     (800, 804, 805)),
     # Граница слова \b обязательна: без неё «клоп» ловится в «стеклопакет», и окна
     # улетали в дезинсекцию со score 1.00 (замер по волнам 22.10.2026).
-    (re.compile(r"\bкрыс|\bмыш|\bгрызун|\bдератизац", re.I), 320),
-    (re.compile(r"\bтаракан|\bклоп|\bблох|\bклещ|\bмуравь|\bнасеком|\bдезинсекц", re.I), 915),
+    (re.compile(r"\bкрыс|\bмыш|\bгрызун|\bдератизац", re.I), (320,)),
+    # Тип 912, а не 915: запись про обработку от насекомых (id 24) заведена с
+    # типом 912, и гейт, нацеленный на 915, молча не делал ничего. Проверено по
+    # посылке 07.11.2026: записей с типом 915 в базе нет вовсе. Такой промах
+    # теперь видно в логе и в счётчике category_misses.
+    (re.compile(r"\bтаракан|\bклоп|\bблох|\bклещ|\bмуравь|\bнасеком|\bдезинсекц", re.I), (912,)),
     # Водонагреватель/бойлер: «мастер по водонагревательному аппарату» (волна 12,
     # 270976008) матчил запись водонагревателя на 0.70, но порог перевода 0.72 ронял
     # его к Борцу. Слово однозначно наше (eq 219, записи есть), ведём гейтом мимо
     # порога. глобальный порог не трогаем, его бережём под гитару/проектор.
-    (re.compile(r"\bводонагрев|\bбойлер", re.I), 219),
+    (re.compile(r"\bводонагрев|\bбойлер", re.I), (219,)),
     # Электрика (eq 90): «электротехнические работы» (волна 12, 270972561) фраза-матч
     # увёл в оргтехнику/принтер, хотя корпус уверенно звал электрику; «проверка
     # электросчётчика» (270975204) уходила в сантехнику. Ведём гейтом. Узко, без
     # электроплиты/электродуховки/электрочайника, это свои приборы.
-    (re.compile(r"\bэлектросчетчик|\bэлектротехническ|\bэлектропроводк|\bэлектромонтаж", re.I), 90),
+    (re.compile(r"\bэлектросчетчик|\bэлектротехническ|\bэлектропроводк|\bэлектромонтаж", re.I), (90,)),
     # Интернет/провайдер/подключение: клиент явно просит услугу интернета, а корпус мажет
     # в сопровождение (напр. 17, 0.52) и бот спрашивает развилку «по оформленному заказу?»
     # (волна 12, 270982595). Гейт ведёт на запись интернета (eq 656), мимо развилки. «в
     # интернете»/«по интернету» (нашёл онлайн) не ловим: нужен «провайдер» или «подключить интернет».
-    (re.compile(r"\bпровайдер|подключ\w*\s+(?:к\s+)?интернет|интернет\w*\s+провайдер|интернет\w*\s+на\s+дач|подключени\w*\s+интернет", re.I), 656),
+    (re.compile(r"\bпровайдер|подключ\w*\s+(?:к\s+)?интернет|интернет\w*\s+провайдер|интернет\w*\s+на\s+дач|подключени\w*\s+интернет", re.I), (656,)),
     # Духовка/духовой шкаф: «мастер духовку» (волна 12, 270961918) уходило в развилку, а та
     # предлагала микроволновку. Ведём гейтом на духовые шкафы (eq 356, направление 2).
     # Газовая и электрическая духовка. одна команда (dir 2), разница лишь в тексте уточняющего.
     # Газовый котёл это отдельная тема (eq 747), сюда не попадает: там «котёл» без «духов».
-    (re.compile(r"\bдухов", re.I), 356),
+    (re.compile(r"\bдухов", re.I), (356,)),
 )
+
+#: Замки записей (приходят из ERP посылкой, поле gates). Решение заказчика
+#: 12.11.2026: «назвал технику, значит профильный отдел», даже если клиент
+#: звонит по старому заказу. Поэтому замок главнее яруса намерения, корпуса и
+#: формулировок; выше него только дословное совпадение и прямая просьба
+#: позвать человека.
+#:
+#: Слово замка короче этого не действует: «тел» это и телевизор, и телефон, и
+#: «я вам телефон оставлял». Замок бьёт с близостью 1.0 мимо всех порогов, и
+#: неудачное короткое слово ломает бота молча. Отброшенные строки видны в
+#: предупреждениях приёмки (knowledge_feed.check_feed) и в /health.
+GATE_MIN_LETTERS = 5
+#: Уверенность корпуса за сопровождение, начиная с которой замок темы молчит
+#: (KnowledgeBase._gate_yields_to_corpus). 0 выключает проверку.
+GATE_CORPUS_GUARD = float(os.environ.get("AIA_GATE_CORPUS_GUARD", "0"))
+
+
+def gate_words(row: str) -> Tuple[str, ...]:
+    """Строка замка как набор начал слов: без регистра, «ё» и знаков."""
+    return tuple(exact_key(row).split())
+
+
+def gate_is_valid(row: str) -> bool:
+    words = gate_words(row)
+    return bool(words) and all(len(word) >= GATE_MIN_LETTERS for word in words)
+
 
 #: Одно слово, которым просят человека: встретилось в реплике — запись без
 #: вопроса (сопровождение) берётся сразу, что бы ни стояло рядом. «Оператора
@@ -109,8 +152,38 @@ CATEGORY_GATES = (
 #: Слова берутся из односложных формулировок записей без вопроса и не короче
 #: этого: «мастер», «человек» слишком многозначны.
 DIRECT_KEYWORD_MIN_LETTERS = 8
-#: Сколько первых букв ключевого слова сравнивать: «оператор», «оператора», «оператором» — одно слово.
-DIRECT_KEYWORD_STEM_LETTERS = 7
+#: Насколько слово реплики может быть длиннее или короче ключевого слова, чтобы
+#: считаться его словоформой: «оператор» и «оператором» это одно слово.
+#:
+#: До 07.11.2026 слова сравнивались первыми семью буквами, и это ловило лишнее:
+#: ключевое «специалист» совпадало со «специально», «специальный» и
+#: «специализируетесь», а «консультанта» с «консультацией», потому что у них
+#: общий семибуквенный префикс. Такая реплика уходила к человеку без
+#: уточняющего вопроса и без записи на разметку: «вы специализируетесь на
+#: ремонте холодильников?» переводилось в сопровождение. Цена была 10 мягких
+#: промахов на 827 новых заказов в замере на 4000 реплик.
+#:
+#: Теперь правило другое: слова совпадают, если их общее начало короче самого
+#: длинного из них не больше чем на DIRECT_KEYWORD_FORM_SLACK букв. То есть
+#: окончание может отличаться у обоих слов, но корень обязан совпасть целиком.
+#: Словоформы проходят («оператора» и «операторов» дают общее начало 8 при
+#: длине 10), однокоренные с другим смыслом нет («специалист» и «специально»
+#: расходятся на восьмой букве, общее начало 7 при длине 10).
+DIRECT_KEYWORD_FORM_SLACK = 2
+
+
+def common_prefix_length(first: str, second: str) -> int:
+    length = 0
+    for left, right in zip(first, second):
+        if left != right:
+            break
+        length += 1
+    return length
+
+
+def same_word_form(word: str, keyword: str, slack: int = DIRECT_KEYWORD_FORM_SLACK) -> bool:
+    """Слово реплики это словоформа ключевого слова (различие только в окончании)."""
+    return common_prefix_length(word, keyword) >= max(len(word), len(keyword)) - slack
 
 #: При такой и большей уверенности корпуса формулировка его не перебивает:
 #: «здравствуйте вопрос по заказу» — корпус 1.0 за сопровождение, а свежая
@@ -138,7 +211,17 @@ OPERATOR_REQUEST_RE = re.compile(
 #: «вы/это/или человек», чтобы не задеть робот-пылесос.
 OPERATOR_META_RE = re.compile(
     r"живой человек|вы\s+человек|человек\s+или\s+робот|робот\s+или\s+человек"
-    r"|\bвы\s+робот|\bэто\s+робот|\bавтоответчик\b",
+    r"|\bвы\s+робот\b|\bэто\s+робот\b|\bавтоответчик\b"
+    # «вы кто», «а вы кто», «кто это» (обращение 270485427, волна 12): клиент
+    # не понял, с кем говорит. До 07.11.2026 такая реплика была слишком
+    # короткой для поиска по смыслу и считалась обрывком: бот молча слушал
+    # дальше, клиент повторял вопрос и бросал трубку. Это не обрывок, а
+    # осмысленный вопрос, и правильный ответ на него человек.
+    # Только короткая реплика целиком: «кто это сделал с холодильником» это
+    # описание поломки, а не вопрос о собеседнике, и уводить её к человеку
+    # нельзя. Поэтому конец строки, с запасом на вежливое «извините».
+    r"|^\s*(?:а\s+|но\s+)?вы\s+кто\s*\?*\s*$|^\s*(?:а\s+)?кто\s+это\s*\?*\s*$"
+    r"|^\s*с\s+кем\s+я\s+говорю|^\s*(?:извините\s+)?а?\s*с\s+кем\s+имею\s+дело",
     re.I,
 )
 
@@ -158,6 +241,23 @@ NOT_OUR_SERVICE_RE = re.compile(
 #: документ кодируются с разными префиксами), так что планка ниже 0.80.
 #: Переменная окружения — для замера на ручной разметке (tools/measure_manual.py).
 PHRASE_OVERRIDE_SIMILARITY = float(os.environ.get("AIA_PHRASE_OVERRIDE", "0.74"))
+
+#: Уверенность корпуса, ниже которой его решение считается догадкой.
+#:
+#: Корпус живых реплик решает большинство звонков и в целом точен (93 % на
+#: 2694 решениях), но точность эта очень разная по уверенности: 68 % ошибок при
+#: 0,50-0,60 и 39 % при 0,60-0,70 против 7 % при 0,80-0,90 и 1,5 % выше 0,90.
+#: Нижняя полоса это и есть «угадал наугад».
+#:
+#: Простое поднятие порога доверия (CORPUS_THRESHOLD) делу не помогает, это
+#: проверено замером: при 0,70 неверных решений становится 387 вместо 303,
+#: потому что реплика падает дальше, на путь рукописных формулировок, а он
+#: ещё хуже (точность 36 %). Выбор был между двумя способами угадать.
+#:
+#: Поэтому полоса ведёт не к формулировкам, а к человеку: тему бот назвать не
+#: может, и честнее соединить с оператором, чем задать уверенный вопрос не по
+#: делу. Ноль выключает поведение (реплика идёт прежним путём).
+CORPUS_GREY_ZONE = float(os.environ.get("AIA_CORPUS_GREY_ZONE", "0.60"))
 
 #: Ближайший сосед по корпусу должен быть не дальше этого, иначе голос корпуса
 #: не в счёт (см. _corpus_trusts). 0 = выключено, так и оставлено. Порог соседа пробовали 22.10.2026: он рубит законное спасение мятой речи корпусом (у верных мятых реплик сосед тоже ~0.6, как у мусора), не разделяя их, и срезал 6 пунктов охвата в 5 фолдах. Промах формулировок (гитара к проектору) лечит порог близости в dialog, а не здесь. Переменная окружения — для замера.
@@ -232,6 +332,10 @@ class KnowledgeRecord:
     #: мастера в его собственный отдел. Пусто — отдела частных мастеров у
     #: направления нет, и такой звонок уходит на сопровождение.
     redirect_exten_pm: str = ""
+    #: Замки записи из ERP (табличная часть «Замки (ключевые слова)»). Строка
+    #: это одно или несколько начал слов через пробел; замок сработал, если в
+    #: реплике есть все слова строки. См. KnowledgeBase.record_gate_candidates.
+    gates: List[str] = field(default_factory=list)
 
 
 class SentenceTransformerEmbedder:
@@ -266,13 +370,24 @@ class Resolution:
 
 class KnowledgeBase:
     def __init__(self, records: List[KnowledgeRecord], embedder, threshold: float,
-                 corpus: Optional[CorpusIndex] = None):
+                 corpus: Optional[CorpusIndex] = None,
+                 intent=None, intent_repeat_threshold: float = 0.70):
         self._records = list(records)
         self._embedder = embedder
         self._threshold = threshold
         # Корпус живых реплик — второе мнение (corpus_knn.py). Пусто — решает
         # только база формулировок, как до 20.09.2026.
         self._corpus = corpus
+        # Ярус намерения (intent.py). Пусто — решают корпус и формулировки, как
+        # до 07.11.2026. Повторное обращение уходит к человеку до того, как за
+        # реплику возьмутся гейты категорий и корпус: оба уверенно предлагают
+        # прибор там, где клиент звонит по уже оформленному заказу.
+        self._intent = intent
+        self._intent_repeat_threshold = intent_repeat_threshold
+        #: Код типа оборудования → сколько раз гейт этой категории сработал, а
+        #: вести по нему было некуда. Видно в /health: ноль означает, что все
+        #: гейты целятся в существующие записи.
+        self.category_misses: dict = {}
         # Записи без заполненного уточняющего вопроса — это ещё не
         # размеченные человеком неопознанные реплики (см. add() ниже и
         # финальное ревью): раньше они сразу переиндексировались и начинали
@@ -308,6 +423,7 @@ class KnowledgeBase:
         self._exact = self._collect_exact(self._phrases, self._phrase_owners)
         self._direct_keywords = self._collect_direct_keywords(self._phrases, self._phrase_owners)
         self._category_records = self._collect_category_records()
+        self._record_gates = self._collect_record_gates()
 
     def _searchable(self) -> List[KnowledgeRecord]:
         # Пустой уточняющий вопрос бывает двух сортов. Реплика, которую add()
@@ -367,23 +483,24 @@ class KnowledgeBase:
             words = exact_key(phrase).split()
             if len(words) != 1 or len(words[0]) < DIRECT_KEYWORD_MIN_LETTERS:
                 continue
-            # Основа слова: «оператором», «операторов» — тот же оператор
-            # (14.10.2026, 1791965238: «оператором» дважды уходило в переспрос).
-            stem = words[0][:DIRECT_KEYWORD_STEM_LETTERS]
-            if stem in keywords and keywords[stem] is not owner:
-                keywords[stem] = None
+            # Слово хранится целиком, словоформы сопоставляет same_word_form
+            # («оператором», «операторов» это тот же оператор; 14.10.2026,
+            # 1791965238: «оператором» дважды уходило в переспрос).
+            key = words[0]
+            if key in keywords and keywords[key] is not owner:
+                keywords[key] = None
             else:
-                keywords[stem] = owner
+                keywords[key] = owner
         return keywords
 
     def direct_by_keyword(self, text: str) -> Optional[KnowledgeRecord]:
         """Запись без вопроса, чьё ключевое слово («оператора», «оператором») есть в реплике."""
         for word in exact_key(text).split():
-            if len(word) < DIRECT_KEYWORD_STEM_LETTERS:
+            if len(word) < DIRECT_KEYWORD_MIN_LETTERS - DIRECT_KEYWORD_FORM_SLACK:
                 continue
-            record = self._direct_keywords.get(word[:DIRECT_KEYWORD_STEM_LETTERS])
-            if record is not None:
-                return record
+            for keyword, record in self._direct_keywords.items():
+                if record is not None and same_word_form(word, keyword):
+                    return record
         return None
 
     def _encode_phrases(self, phrases: List[str]) -> Optional[np.ndarray]:
@@ -398,24 +515,6 @@ class KnowledgeBase:
     @property
     def threshold(self) -> float:
         return self._threshold
-
-    def resolve_phrases(self, text: str) -> Optional[Resolution]:
-        """Решение только по формулировкам, без корпуса — для развилки «новый заказ»
-        (dialog.POINT_INTENT): корпус на этой реплике уже засомневался, а клиент
-        сказал, что заказ новый. Дословное совпадение и ворота брендов действуют."""
-        if not text.strip() or self._vectors is None:
-            return None
-        record = self.exact(text)
-        if record is not None:
-            return Resolution(record, 1.0, True, "exact")
-        query = self._embedder.encode([QUERY_PREFIX + text])[0]
-        scores = self._vectors @ query
-        words = exact_key(text).split()
-        allowed = np.array([record_allowed(owner, words) for owner in self._phrase_owners])
-        scores = np.where(allowed, scores, -1.0)
-        best_index = int(np.argmax(scores))
-        score = float(scores[best_index])
-        return Resolution(self._phrase_owners[best_index], score, score >= self._threshold, "phrases")
 
     def _strong_phrase(self, scores: Optional[np.ndarray]) -> Optional[Tuple[KnowledgeRecord, float]]:
         """Формулировка, почти дословно совпавшая с репликой (PHRASE_OVERRIDE_SIMILARITY)."""
@@ -457,28 +556,154 @@ class KnowledgeBase:
         return self._corpus
 
     def _collect_category_records(self) -> dict:
-        """Запись на каждый код типа оборудования из CATEGORY_GATES (первая найденная)."""
-        wanted = {eq for _, eq in CATEGORY_GATES}
+        """Код типа оборудования из CATEGORY_GATES → ВСЕ записи этого типа.
+
+        Раньше здесь оставалась первая найденная запись, и это давало два
+        разных промаха. У типа 800 (ветеринария) записи лежат в двух
+        направлениях: 26 и 122 это выезд врача (направление 98), а 42 это
+        запись животного на приём и МРТ (направление 105). Гейт всегда отдавал
+        первую, поэтому все 29 реплик про «Ветцентр МРТ» уходили к выездному
+        врачу или в дезинсекцию, а запись 42 была недостижима в принципе.
+        У водонагревателя таких записей 4, у электрики 3, у духовки 3, и выбор
+        между ними зависел от порядка строк в посылке из ERP.
+        """
+        wanted = {eq for _, eqs in CATEGORY_GATES for eq in eqs}
         found: dict = {}
         for record in self._searchable_records:
             eq = record.equipment_type_id
-            if eq in wanted and eq not in found:
-                found[eq] = record
+            if eq in wanted:
+                found.setdefault(eq, []).append(record)
         return found
 
-    def category_request(self, text: str) -> Optional[KnowledgeRecord]:
-        """Однозначная категория (крысы/тараканы и т.п.) → её запись, мимо корпуса."""
-        low = text.lower().replace("ё", "е")
-        for pattern, eq_id in CATEGORY_GATES:
-            if pattern.search(low):
-                return self._category_records.get(eq_id)
-        return None
+    def category_candidates(self, text: str) -> Tuple[Tuple[int, ...], List[KnowledgeRecord]]:
+        """Сработавший гейт категории: его типы оборудования и записи этих типов.
 
-    def resolve(self, text: str) -> Optional[Resolution]:
+        Пустой список кандидатов это не «гейта нет», а «гейт сработал, а
+        записей с такими типами в базе нет»: ровно так молча умер гейт
+        тараканов, нацеленный на тип 915, когда запись про дезинсекцию
+        заведена с типом 912. Такой случай надо видеть в логе, поэтому типы
+        возвращаются отдельно от списка.
+
+        Типов у гейта может быть несколько: у ветеринарного их три (общий,
+        собака, кошка), потому что контора считает заявки по виду животного.
+        Кандидаты собираются по ВСЕМ типам гейта, а выбор между ними делает
+        _pick_by_phrase, то есть по близости формулировки. Порядок типов в
+        гейте на выбор не влияет: это не приоритет, а перечисление.
+        """
+        low = text.lower().replace("ё", "е")
+        for pattern, eq_ids in CATEGORY_GATES:
+            if pattern.search(low):
+                candidates = []
+                for eq_id in eq_ids:
+                    candidates.extend(self._category_records.get(eq_id, ()))
+                return tuple(eq_ids), candidates
+        return (), []
+
+    def _collect_record_gates(self) -> List[Tuple[Tuple[str, ...], KnowledgeRecord]]:
+        """Замки записей из посылки: (начала слов, запись). Строки с коротким словом не берутся."""
+        gates = []
+        for record in self._searchable_records:
+            for row in getattr(record, "gates", None) or ():
+                if gate_is_valid(row):
+                    gates.append((gate_words(row), record))
+        return gates
+
+    def record_gate_candidates(self, text: str) -> List[KnowledgeRecord]:
+        """Записи, чей замок сработал на реплике.
+
+        Замок сработал, если для каждого его слова в реплике есть слово с таким
+        началом. Если сработали строки разной длины, остаются только самые
+        длинные: «установ посудомо» (запись установки) главнее, чем «посудомо»
+        (запись ремонта). Точное бьёт общее, и числовые приоритеты не нужны:
+        с ними слово «установ» с высоким приоритетом утащило бы «установить
+        карниз» и «установить розетку». Ничью между записями решает близость
+        формулировок (_pick_by_phrase), как у замков категорий.
+
+        Исключение из правила длины одно: замок записи без уточняющего вопроса
+        побеждает любые замки тем (см. ниже).
+        """
+        if not self._record_gates:
+            return []
+        words = exact_key(text).split()
+        hits = [(gate, record) for gate, record in self._record_gates
+                if all(any(word.startswith(part) for word in words) for part in gate)]
+        # Замок записи БЕЗ уточняющего вопроса (она сразу переводит к человеку)
+        # главнее замков тем, какой бы длины те ни были. Решение заказчика
+        # 12.11.2026: «я ранее обращался», «мне звонили», «у меня пропущенный»
+        # значит сразу сопровождение, даже если следом названа техника («мне
+        # звонили по поводу холодильника»). Спрашивать такого клиента «вас
+        # интересует ремонт холодильника?» значит вести его в приём заказов.
+        direct = [(gate, record) for gate, record in hits if not record.clarifying_question]
+        if direct:
+            hits = direct
+        best = max((len(gate) for gate, _record in hits), default=0)
+        found: List[KnowledgeRecord] = []
+        for gate, record in hits:
+            if len(gate) == best and record not in found:
+                found.append(record)
+        return found
+
+    def _gate_yields_to_corpus(self, query: np.ndarray, text: str) -> bool:
+        """Замок темы уступает корпусу, когда тот уверенно видит повторное обращение.
+
+        Ярус намерения ловит не все повторные: по замеру 07.11.2026 полнота у
+        него 71.6 %. Остальное раньше добирал корпус, голосуя за сопровождение,
+        но замок темы стоит до корпуса и забирал такие реплики себе. Выключатель
+        AIA_GATE_CORPUS_GUARD: порог уверенности корпуса за сопровождение, при
+        котором замок молчит; 0 выключает проверку.
+        """
+        if not GATE_CORPUS_GUARD or self._corpus is None:
+            return False
+        vote = self._corpus.vote(query)
+        return (vote is not None and vote.direction_id == OPERATOR_DIRECTION
+                and vote.confidence >= GATE_CORPUS_GUARD
+                and len(content_words(text)) >= self._corpus.min_words)
+
+    def category_request(self, text: str) -> Optional[KnowledgeRecord]:
+        """Однозначная категория (крысы, тараканы и т.п.) → её запись, мимо корпуса.
+
+        Выбор без учёта близости: первая запись типа. Оставлено для вызовов,
+        у которых вектора реплики нет (инструменты замера, тесты). Боевой путь
+        это category_candidates плюс _pick_by_phrase в resolve().
+        """
+        _eq_ids, candidates = self.category_candidates(text)
+        return candidates[0] if candidates else None
+
+    def _pick_by_phrase(self, candidates: List[KnowledgeRecord],
+                        scores: Optional[np.ndarray],
+                        words: Optional[List[str]] = None) -> Optional[KnowledgeRecord]:
+        """Из кандидатов та запись, чья формулировка ближе к реплике.
+
+        Тот же приём, что в _record_for_direction: близости по формулировкам
+        уже посчитаны одним умножением, выбор ничего не стоит. Записи,
+        закрытые воротами бренда или повторного обращения, из выбора
+        исключаются (record_allowed), иначе гейт протащил бы запись, которую
+        поиск по смыслу брать не вправе.
+        """
+        if not candidates:
+            return None
+        allowed = [r for r in candidates if words is None or record_allowed(r, words)]
+        if not allowed:
+            return None
+        if scores is None or not len(scores):
+            return allowed[0]
+        best_by_record = {}
+        for index, owner in enumerate(self._phrase_owners):
+            best_by_record[owner.id] = max(best_by_record.get(owner.id, -1.0), float(scores[index]))
+        return max(allowed, key=lambda r: best_by_record.get(r.id, -1.0))
+
+    def resolve(self, text: str, query: Optional[np.ndarray] = None) -> Optional[Resolution]:
         """Решение по реплике: корпус, если он уверен, иначе формулировки.
 
         Запрос кодируется один раз — и для соседей по корпусу, и для
         формулировок (кодирование — самая дорогая часть, см. best_match).
+
+        query это готовый вектор реплики. Нужен инструментам замера
+        (tools/measure_live.py): они держат эмбеддинги тысяч реплик в кэше и
+        обязаны мерить ТОТ ЖЕ путь, которым идёт звонок. Раньше замер
+        повторял порядок стадий своим кодом и расходился с резолвером: правка
+        выбора записи в гейте категорий 07.11.2026 была не видна замеру вовсе,
+        потому что замер звал category_request напрямую.
         """
         if not text.strip() or (self._vectors is None and self._corpus is None):
             return None
@@ -488,11 +713,78 @@ class KnowledgeBase:
         record = self.direct_by_keyword(text) or self.operator_request(text)
         if record is not None:
             return Resolution(record, 1.0, True, "keyword")
-        record = self.category_request(text)
-        if record is not None:
-            return Resolution(record, 1.0, True, "category")
-        query = self._embedder.encode([QUERY_PREFIX + text])[0]
-        return self.resolve_vector(query, content_words=len(content_words(text)), text=text)
+        # Вектор считается не больше одного раза за реплику и только если он
+        # понадобился: ярусу намерения, корпусу или формулировкам. При
+        # выключенном ярусе порядок стадий и число обращений к эмбеддеру ровно
+        # такие, как были до 07.11.2026.
+        cached_query = [] if query is None else [query]
+
+        def query_vector():
+            if not cached_query:
+                cached_query.append(self._embedder.encode([QUERY_PREFIX + text])[0])
+            return cached_query[0]
+
+        # Порядок стадий после слов заказчика 12.11.2026:
+        #   1. замок записи без уточняющего вопроса («я ранее обращался», «мне
+        #      звонили», «у меня пропущенный»): сразу к человеку;
+        #   2. ярус намерения: повторное обращение идёт в сопровождение, ДАЖЕ
+        #      ЕСЛИ названа техника («уточнить заявку по ремонту холодильника»);
+        #   3. замки тем из ERP: назвал технику, значит профильный отдел;
+        #   4. замки категорий из кода.
+        # Днём 12.11 замки тем стояли перед ярусом («назвал технику, значит
+        # профильный отдел» без оговорок), и 613 повторных обращений из 2469
+        # уходили в отделы приёма заказов. Заказчик это поправил.
+        gated = self.record_gate_candidates(text)
+        if gated and not gated[0].clarifying_question:
+            scores = self._vectors @ query_vector() if self._vectors is not None else None
+            record = self._pick_by_phrase(gated, scores, exact_key(text).split())
+            if record is not None:
+                return Resolution(record, 1.0, True, "gate")
+            gated = []
+        if self._intent is not None:
+            repeat = self._intent.repeat_probability(query_vector())
+            if repeat >= self._intent_repeat_threshold:
+                record = self._operator_record()
+                if record is not None:
+                    # score = 1.0, как у exact, keyword и category: это решение
+                    # стадии, а не мера близости. Вероятность повторного
+                    # обращения в score класть нельзя, она уезжает в обращение
+                    # ERP под именем Similarity и сравнивается с порогом
+                    # близости в диалоге (dialog.py, выбор соседней записи), то
+                    # есть её сравнивали бы с величиной другой природы. Саму
+                    # вероятность пишем в лог.
+                    log.info("Ярус намерения: повторное обращение с вероятностью %.3f", repeat)
+                    return Resolution(record, 1.0, True, "intent")
+        if gated and self._gate_yields_to_corpus(query_vector(), text):
+            gated = []
+        if gated:
+            scores = self._vectors @ query_vector() if self._vectors is not None else None
+            record = self._pick_by_phrase(gated, scores, exact_key(text).split())
+            if record is not None:
+                return Resolution(record, 1.0, True, "gate")
+        eq_ids, candidates = self.category_candidates(text)
+        if eq_ids:
+            # Среди записей своего типа выбираем ту, чья формулировка ближе к
+            # реплике. Близости считаются одним умножением на уже готовом
+            # векторе, то есть выбор бесплатный. Межнаправленческий выбор
+            # запрещён намеренно: берём ближайшую среди записей ЭТОГО типа, а
+            # не запись направления, которое назвал корпус.
+            scores = self._vectors @ query_vector() if self._vectors is not None else None
+            record = self._pick_by_phrase(candidates, scores, exact_key(text).split())
+            if record is not None:
+                return Resolution(record, 1.0, True, "category")
+            # Гейт сработал, а вести по нему некуда: либо записей с таким типом
+            # в базе нет вовсе (так молча умер гейт тараканов, нацеленный на
+            # тип 915 при записи с типом 912), либо все кандидаты закрыты
+            # воротами. Это ошибка данных, и её надо видеть, а не глотать.
+            log.warning("Гейт категории сработал (типы оборудования %s), но вести по нему некуда: "
+                        "записей %d, после ворот 0. Реплика: %r",
+                        ", ".join(str(e) for e in eq_ids), len(candidates), text)
+            # Счётчик по ПЕРВОМУ типу гейта: он у гейта главный (у ветеринарного
+            # это общий 800), и так счётчик остаётся числовым ключом, каким его
+            # кладёт в лог сборки main.py.
+            self.category_misses[eq_ids[0]] = self.category_misses.get(eq_ids[0], 0) + 1
+        return self.resolve_vector(query_vector(), content_words=len(content_words(text)), text=text)
 
     def operator_request(self, text: str) -> Optional[KnowledgeRecord]:
         """На оператора без поиска по смыслу: просьба позвать человека (OPERATOR_REQUEST_RE),
@@ -503,7 +795,20 @@ class KnowledgeBase:
         if not (OPERATOR_REQUEST_RE.search(low) or OPERATOR_META_RE.search(low)
                 or NOT_OUR_SERVICE_RE.search(low)):
             return None
-        return self._direct_keywords.get("оператор"[:DIRECT_KEYWORD_STEM_LETTERS])
+        return self._operator_record()
+
+    def _operator_record(self) -> Optional[KnowledgeRecord]:
+        """Запись «соединить с оператором»: перевод к человеку без уточняющего вопроса.
+
+        Ищется по словоформе, а не точным словом: аналитик мог завести у записи
+        только «оператора» или только «оператором», и точный поиск по
+        «оператор» тогда не нашёл бы ничего. Молча: ни просьба позвать
+        человека, ни ярус намерения не смогли бы перевести звонок.
+        """
+        for keyword, record in self._direct_keywords.items():
+            if record is not None and same_word_form(keyword, "оператор"):
+                return record
+        return None
 
     def _corpus_trusts(self, vote: Vote, content_words_count: Optional[int]) -> bool:
         """Можно ли верить голосу корпуса на этой реплике.
@@ -545,6 +850,18 @@ class KnowledgeBase:
             if not all(allowed):
                 scores = np.where(np.array(allowed), scores, -1.0)
         if vote is not None and self._corpus_trusts(vote, content_words):
+            if (CORPUS_GREY_ZONE and vote.confidence < CORPUS_GREY_ZONE
+                    and vote.direction_id != OPERATOR_DIRECTION
+                    and self._strong_phrase(scores) is None):
+                # Серая зона: корпус назвал направление, но уверенности в нём
+                # столько, что ошибается он чаще, чем попадает. Тему не
+                # называем и формулировкам реплику не отдаём, там точность
+                # ещё ниже. Решение не принимаем вовсе: что делать дальше,
+                # решает диалог. Он один раз говорит «не понял, повторите» и
+                # только на второй такой реплике отдаёт разговор человеку.
+                # Исключение: реплика почти дословно повторяет рукописную
+                # формулировку, тогда её разбирает обычный путь ниже.
+                return Resolution(None, float(vote.confidence), False, "corpus-grey", vote)
             record, score = self._record_for_direction(vote.direction_id, scores, allowed)
             if record is not None:
                 strong = self._strong_phrase(scores)
@@ -566,13 +883,19 @@ class KnowledgeBase:
         elif (vote is not None and vote.direction_id == OPERATOR_DIRECTION
               and vote.confidence >= self._corpus.threshold
               and (content_words is None or content_words >= self._corpus.min_words)):
-            # Корпус видит повторное обращение, но не настолько уверенно,
-            # чтобы переводить без вопроса. Формулировкам такую реплику не
-            # отдаём: «жду мастера по стиралке» они ведут в стиральные машины и
-            # задают вопрос не по делу (замер на ручной тысяче 24.09.2026:
-            # +6.5% таких вопросов). Лучше переспросить — на повторе клиент
-            # скажет то же самое, и корпус решит увереннее.
-            return Resolution(None, 0.0, False, "corpus-unsure", vote)
+            # Корпус видит повторное обращение, но ниже операторского порога.
+            # До 12.11.2026 здесь задавалась развилка «по уже оформленному
+            # заказу или новый» (стадия corpus-unsure). Заказчик её отменил:
+            # что шло через развилку, уходит в сопровождение без вопроса.
+            # Формулировкам такую реплику по-прежнему не отдаём: «жду мастера
+            # по стиралке» они ведут в стиральные машины и задают вопрос не по
+            # делу (замер на ручной тысяче 24.09.2026: +6.5% таких вопросов).
+            # При боевых порогах (корпус 0.50, оператор 0.50) ветка недостижима;
+            # она нужна, чтобы развилка не вернулась, если пороги разведут.
+            record, score = self._record_for_direction(OPERATOR_DIRECTION, scores, allowed)
+            if record is not None:
+                return Resolution(record, score, True, "corpus", vote)
+            return Resolution(None, 0.0, False, "none", vote)
         if scores is None:
             return Resolution(None, 0.0, False, "none", vote)
         best_index = int(np.argmax(scores))
@@ -628,8 +951,10 @@ class KnowledgeBase:
 
 
 def load_knowledge_base(path: str, embedder, threshold: float,
-                        corpus: Optional[CorpusIndex] = None) -> KnowledgeBase:
+                        corpus: Optional[CorpusIndex] = None,
+                        intent=None, intent_repeat_threshold: float = 0.70) -> KnowledgeBase:
     with open(path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     records = [KnowledgeRecord(**item) for item in payload]
-    return KnowledgeBase(records, embedder, threshold, corpus=corpus)
+    return KnowledgeBase(records, embedder, threshold, corpus=corpus,
+                         intent=intent, intent_repeat_threshold=intent_repeat_threshold)

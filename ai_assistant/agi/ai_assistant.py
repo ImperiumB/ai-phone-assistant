@@ -182,6 +182,14 @@ class DialogAnswer:
     knowledge_record_id: str = ""
     matched_question: str = ""
     similarity: str = ""
+    #: Какая стадия сервиса решила реплику (gate, corpus, phrases, intent...) и
+    #: её уверенность. Появились 12.11.2026, старый сервис их не шлёт; едут в
+    #: ERP в строку разметки обращения.
+    decision_source: str = ""
+    decision_score: str = ""
+    #: Вопрос клиента целиком, когда сервис склеил его из двух реплик (первая
+    #: срезана по потолку длины). Пусто: вопрос это последняя реплика.
+    question_text: str = ""
     #: Сервис не нашёл подходящей записи: мера близости ниже порога либо база
     #: пуста. Единственное поле ответа не строкой — это признак, а не значение,
     #: и решение по нему принимается прямо здесь, в скрипте.
@@ -222,6 +230,9 @@ def parse_dialog_response(items: List[Dict[str, Any]]) -> DialogAnswer:
         knowledge_record_id=pairs.get("KnowledgeRecordId", ""),
         matched_question=pairs.get("MatchedQuestion", ""),
         similarity=pairs.get("Similarity", ""),
+        decision_source=pairs.get("DecisionSource", ""),
+        decision_score=pairs.get("DecisionScore", ""),
+        question_text=pairs.get("QuestionText", ""),
         unknown_question=pairs.get("UnknownQuestion", "").strip().lower() in ("true", "1", "yes"),
         unknown_question_text=pairs.get("UnknownQuestionText", ""),
         wrong_guess=pairs.get("WrongGuess", ""),
@@ -375,6 +386,55 @@ def listen_stats_line():
         until - since, chunks, expected, resumed - until)
 
 
+def audio_chunks_to_send(read_chunk, blocked=None, on_blocked=None, on_resumed=None):
+    # type: (Any, Any, Any, Any) -> Any
+    """Какие куски звука уходят в распознавание, пока бот говорит и после.
+
+    Жила внутри _main как замыкание с пометкой «живого канала не покрыть», и
+    на ней держатся два разобранных инцидента, то есть именно её и надо
+    покрывать (F12).
+
+    Три правила, и все три стоят по следам боя:
+
+    1. Дескриптор читаем ВСЕГДА, даже в глухоте. Перестать читать значит
+       забить буфер станции, и после фразы бота в распознавание хлынуло бы
+       всё накопившееся разом.
+    2. Последний кусок, прочитанный в глухоте, не выбрасываем, а придерживаем
+       и досылаем первым, когда слух включится. Слово, начатое за долю секунды
+       до конца глухоты, иначе доходит обрезанным и теряется (5-я волна
+       02.10.2026, 269218128: «да» через 0,3 с после конца вопроса, в логе
+       сервиса пусто).
+    3. Придерживаем ровно ОДИН кусок, самый последний. Вся глухота целиком это
+       фраза бота, и дошли бы до распознавания его собственные слова.
+
+    Ничего здесь не логируем намеренно: log_it берёт AGI-блокировку, а её на
+    всё время блокирующего Playback держит основной поток. Этот поток встал бы
+    на ней и перестал читать дескриптор, то есть получилась бы ровно та беда,
+    от которой защищает правило 1. Счётчики ведут on_blocked / on_resumed,
+    печатает их основной поток через listen_stats_line.
+
+    Отдаёт куски звука (bytes); обёртку в StreamRequest делает вызывающий,
+    чтобы эту логику можно было проверить без gRPC и живого канала.
+    """
+    blocked = listening_blocked if blocked is None else blocked
+    on_blocked = note_blocked_chunk if on_blocked is None else on_blocked
+    on_resumed = note_listen_resumed if on_resumed is None else on_resumed
+    held_back = None
+    while True:
+        data = read_chunk(CHUNK_SIZE)
+        if not data:
+            return
+        if blocked():
+            held_back = data
+            on_blocked()
+            continue
+        if held_back is not None:
+            on_resumed()
+            yield held_back
+            held_back = None
+        yield data
+
+
 def tts_params(text, voice):
     # type: (str, str) -> Dict[str, str]
     """Чем просить сервис синтезировать фразу.
@@ -471,6 +531,20 @@ def build_erp_request(event_type, values):
     return {"prms": prms}
 
 
+def add_decision(body, source, score=""):
+    # type: (Dict[str, Any], str, str) -> Dict[str, Any]
+    """Дописать в событие для ERP, какая стадия бота приняла решение.
+
+    Пустой источник не уходит вовсе: старый обработчик параметра не знает, а
+    новый без него строку разметки не трогает.
+    """
+    if source:
+        body["prms"].append({"Key": "decisionSource", "Value": str(source)})
+        if score:
+            body["prms"].append({"Key": "decisionScore", "Value": str(score)})
+    return body
+
+
 def build_call_start_request(linked_id, dialed_number, caller_phone):
     # type: (str, str, str) -> Dict[str, Any]
     """Звонок принят. dialedNumber обязателен: по нему ERP ищет телефон линии,
@@ -503,8 +577,8 @@ def build_equipment_request(document_id, recognized_text, equipment_type_name, d
 
 
 def build_transfer_request(document_id, redirect_exten, direction_name, recognized_text,
-                           wrong_guess=""):
-    # type: (Any, str, str, str, str) -> Dict[str, Any]
+                           wrong_guess="", telephone_direction_id=""):
+    # type: (Any, str, str, str, str, str) -> Dict[str, Any]
     pairs = [
         ("documentId", document_id),
         ("redirectExten", redirect_exten),
@@ -515,6 +589,17 @@ def build_transfer_request(document_id, redirect_exten, direction_name, recogniz
     # 15422 пометит строку разметки авто-проблемой для формы ОКК. Пусто не уходит.
     if wrong_guess:
         pairs.append(("wrongGuess", wrong_guess))
+    # Направление сценария, по которому бот и ведёт перевод. Сервис присылает
+    # его в ответе, а до 09.11.2026 мы его дальше не передавали, и ERP выводила
+    # направление из типа оборудования первой попавшейся строкой связки. Итог:
+    # четыре обращения переведены в профильный отдел, а в документе и в форме
+    # разбора написано «Сопровождение» (B3-04). Маршрут звонка был верный,
+    # портилась отчётность.
+    #
+    # Пусто не уходит: старый обработчик параметра не знает, а новый без него
+    # работает по-прежнему.
+    if telephone_direction_id:
+        pairs.append(("telephoneDirectionId", telephone_direction_id))
     return build_erp_request(EVENT_TRANSFER, pairs)
 
 
@@ -573,6 +658,53 @@ def effective_redirect_exten(exten):
     if FORCED_REDIRECT_EXTEN:
         return FORCED_REDIRECT_EXTEN
     return str(exten or "")
+
+
+#: Куда вешать обработчик завершения канала: контекст, расширение, приоритет.
+#:
+#: Расширение `h` живёт в контексте, и Астериск ищет его в том контексте, где
+#: канал оказался к моменту завершения. После перевода мы уходим Goto в общий
+#: pstn-out, где нашего `h` нет и быть не должно: он сработал бы на каждом
+#: исходящем звонке второго проекта. Поэтому событие завершения для переводов и
+#: обходов не уходило вовсе: у 137 переведённых и 13 обойдённых обращений
+#: длительность пуста, у 61 сброса заполнена, и причина отказа в ERP не
+#: попадала (B2-01, он же причина B3-02).
+#:
+#: Обработчик на канале (CHANNEL(hangup_handler_push), Asterisk 11 и новее)
+#: переезд контекста переживает и чужих звонков не касается. По этому адресу в
+#: диалплане лежит подпрограмма с AGI последней воли и Return: обработчик
+#: завершения вызывается как Gosub.
+LAST_WILL_TARGET = "pstn-ai,bot-lastwill,1"
+
+
+def agi_safe_value(value):
+    # type: (Any) -> str
+    """Обезвредить значение перед записью в переменную канала.
+
+    Протокол AGI разбирает команду по пробелам с учётом кавычек, и библиотека
+    оборачивает значение в двойные кавычки сама. Поэтому кавычка внутри
+    значения, за которой идёт пробел, закрывает аргумент раньше времени:
+    Астериск видит пять аргументов вместо четырёх и отвечает 520. Исключение
+    библиотеки мы глушим, и в канале остаётся ПРЕЖНЕЕ значение. Цена: при
+    сбросе на переспросе в ERP уезжает неверная пометка «бот предложил не то»,
+    и авто-флаг качества не ставится (B2-06).
+
+    Перевод строки хуже кавычки: он сдвинул бы ответы AGI на шаг, и дальше
+    скрипт читал бы чужие ответы. Поэтому любые пробельные символы, включая
+    переводы строк, сводим к одному пробелу.
+
+    Обратный слэш 520 не даёт, но искажает значение, поэтому убираем тоже. В
+    наших значениях (причина отказа, предложенная тема, текст клиента) ни
+    кавычек, ни слэшей по смыслу быть не должно: на 09.11.2026 в 178 записях
+    базы знаний и 1005 формулировках таких символов ноль.
+
+    Имя звонящего через эту функцию НЕ проходит: его ставит appexec("Set", ...),
+    и чистить его нельзя, иначе у оператора не откроется карточка обращения
+    (см. caller_id_name_command).
+    """
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    return text.replace('"', "'").replace("\\", " ").strip()
 
 
 def caller_id_name_command(caller_id_name):
@@ -789,7 +921,7 @@ def _main():  # pragma: no cover - требует живого канала Aste
     def set_var(name, value):
         try:
             with _agi_lock:
-                agi.set_variable(name, value)
+                agi.set_variable(name, agi_safe_value(value))
         except Exception as error:
             log_it("SET VAR {0} ERROR: {1}".format(name, error))
 
@@ -833,6 +965,9 @@ def _main():  # pragma: no cover - требует живого канала Aste
         "skip_direction": "",
         "equipment_sent": False,
         "last_text": "",
+        # Последнее решение сервиса по реплике клиента: стадия и уверенность.
+        "decision_source": "",
+        "decision_score": "",
         # Точка, реплика и признак молчания того шага, ответ на который сейчас
         # разбирается. Ответ сервиса уводит разговор в следующую точку, а
         # решение по неопознанному вопросу принимается по той, в которой
@@ -923,6 +1058,14 @@ def _main():  # pragma: no cover - требует живого канала Aste
         response = requests.post(http_base + "/dialog", json=payload, timeout=15)
         response.raise_for_status()
         answer = parse_dialog_response(response.json())
+        if answer.decision_source:
+            state["decision_source"] = answer.decision_source
+            state["decision_score"] = answer.decision_score
+        if answer.question_text:
+            # Сервис склеил вопрос из двух реплик: в обращение и в ПЦК должен
+            # уехать он, а не один хвост.
+            state["last_text"] = answer.question_text
+            set_var("LastRecognizedText", answer.question_text)
         if answer.conversation_point:
             state["point"] = answer.conversation_point
         return answer
@@ -980,13 +1123,13 @@ def _main():  # pragma: no cover - требует живого канала Aste
             return
         send_to_erp(
             aster2_address,
-            build_equipment_request(
+            add_decision(build_equipment_request(
                 state["document_id"],
                 state["last_text"],
                 answer.equipment_type,
                 direction_name_of(answer),
                 answer.equipment_type_id,
-            ),
+            ), state["decision_source"], state["decision_score"]),
             log=log_it,
         )
         # Отметку ставим независимо от успеха: повторять на каждой реплике
@@ -1009,23 +1152,24 @@ def _main():  # pragma: no cover - требует живого канала Aste
             # Реплику называет сервис, если бот угадал тему не так; иначе —
             # запомненный вопрос, а не сырая реплика этого шага: источник
             # текста для ERP в скрипте один на все события.
-            build_unknown_request(
+            add_decision(build_unknown_request(
                 state["document_id"],
                 answer.unknown_question_text.strip() or state["last_text"],
                 answer.wrong_guess,
-            ),
+            ), state["decision_source"], state["decision_score"]),
             log=log_it,
         )
 
-    def report_transfer(redirect_exten, direction_name, wrong_guess=""):
+    def report_transfer(redirect_exten, direction_name, wrong_guess="",
+                        telephone_direction_id=""):
         if not state["document_id"]:
             return
         send_to_erp(
             aster2_address,
-            build_transfer_request(
+            add_decision(build_transfer_request(
                 state["document_id"], redirect_exten, direction_name, state["last_text"],
-                wrong_guess,
-            ),
+                wrong_guess, telephone_direction_id,
+            ), state["decision_source"], state["decision_score"]),
             log=log_it,
         )
 
@@ -1075,7 +1219,8 @@ def _main():  # pragma: no cover - требует живого канала Aste
             # В обращение пишем настоящий номер темы, а переводим туда, куда
             # велит отладочный переключатель: иначе в истории обращения будет
             # враньё, и разбирать потом эти звонки станет нечем.
-            report_transfer(answer.redirect_exten, direction_name_of(answer), answer.wrong_guess)
+            report_transfer(answer.redirect_exten, direction_name_of(answer), answer.wrong_guess,
+                            answer.telephone_direction_id)
             redirect_exten = effective_redirect_exten(answer.redirect_exten)
             if REAL_REDIRECT:
                 log_it("REDIRECT -> {0}".format(redirect_exten))
@@ -1184,37 +1329,11 @@ def _main():  # pragma: no cover - требует живого канала Aste
 
     def audio_stream(audio_source):
         yield speech_pb2.StreamRequest(session_id=linked_id)
-        # Последний кусок, прочитанный в глухоте: уйдёт первым, когда слух
-        # включится (см. ниже).
-        held_back = None
-        while True:
-            data = audio_source.read(CHUNK_SIZE)
-            if not data:
-                return
-            # Дескриптор читаем всегда, даже когда не слушаем: перестать
-            # читать значит забить буфер станции, и после фразы бота в
-            # распознавание хлынуло бы всё накопившееся разом.
-            #
-            # Ничего здесь не логируем намеренно. log_it берёт AGI-блокировку,
-            # а её на всё время блокирующего Playback держит основной поток —
-            # этот поток встал бы на ней и перестал читать дескриптор, то есть
-            # получилась бы ровно та беда, от которой мы защищаемся строкой
-            # выше. О начале и конце глухоты пишет speak(), из своего потока.
-            if listening_blocked():
-                # Кусок помним, а не выбрасываем: слово, начатое за долю
-                # секунды до конца глухоты, иначе доходит до распознавания
-                # обрезанным и теряется (5-я волна 02.10.2026, 269218128:
-                # «да» через 0,3 с после конца вопроса, в логе сервиса пусто).
-                held_back = data
-                note_blocked_chunk()
-                continue
-            if held_back is not None:
-                note_listen_resumed()
-                # Досылаем последние полсекунды глухоты вместе с первым живым
-                # куском. Эха бота в них почти нет: вопросы теперь кончаются
-                # на знак вопроса, а не на «...или нет», и ECHO_GUARD_S стоит.
-                yield speech_pb2.StreamRequest(audio_chunk=held_back)
-                held_back = None
+        # Сама логика (что придержать, что досылать) живёт модульной функцией
+        # audio_chunks_to_send: внутри замыкания её было не покрыть тестами, а
+        # на ней держатся два разобранных инцидента с обрезанными словами.
+        # Здесь остаётся только обёртка в StreamRequest.
+        for data in audio_chunks_to_send(audio_source.read):
             yield speech_pb2.StreamRequest(audio_chunk=data)
 
     def run():
@@ -1266,7 +1385,33 @@ def _main():  # pragma: no cover - требует живого канала Aste
 
     try:
         log_it("=== AI ASSISTANT START {0} ===".format(linked_id))
+        # Обработчик завершения вешаем НА КАНАЛ, а не на контекст.
+        #
+        # Расширение `h` живёт в контексте, и Астериск ищет его в том
+        # контексте, где канал оказался к моменту завершения. После перевода мы
+        # делаем Goto в общий pstn-out, где нашего `h` нет и быть не должно: он
+        # сработал бы на каждом исходящем звонке второго проекта. Поэтому
+        # событие завершения для переводов и обходов не уходило вовсе: у 137
+        # переведённых и 13 обойдённых обращений длительность пуста, у 61
+        # сброса заполнена, и причина отказа в ERP не попадала (B2-01, он же
+        # причина B3-02).
+        #
+        # Обработчик на канале (CHANNEL(hangup_handler_push), Asterisk 11 и
+        # новее) переезд контекста переживает и чужих звонков не касается.
+        #
+        # Цель прошита здесь, а не задаётся из диалплана, по одной причине: на
+        # станции идут живые звонки второго проекта, и `dialplan reload` при
+        # добавлении приоритета в наш `_X.` сдвинул бы приоритеты у звонка,
+        # который в этот момент выполняется. Новое расширение сдвигает ноль
+        # приоритетов, а строка Set в середине потока сдвигает всё, что ниже.
+        #
+        # Переменная канала оставлена как переопределение: ею можно увести
+        # обработчик в другой контекст, не трогая скрипт.
+        last_will_target = get_var("BotLastWillTarget", LAST_WILL_TARGET)
         with _agi_lock:
+            if last_will_target:
+                agi.set_variable("CHANNEL(hangup_handler_push)", last_will_target)
+                log_it("LAST WILL HANDLER: {0}".format(last_will_target))
             agi.set_variable("ScriptFinished", False)
             # Время старта нужно скрипту последней воли: он считает по нему
             # длительность разговора для ERP. Кладём именно `time.time()` —

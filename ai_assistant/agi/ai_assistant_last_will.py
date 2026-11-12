@@ -143,8 +143,35 @@ def parse_erp_response(items):
     return lines
 
 
-def send_last_will(service_address, body, post=None, log=None):
-    # type: (str, Dict[str, Any], Any, Any) -> bool
+def erp_result(items):
+    # type: (Any) -> str
+    """Что ERP ответила по существу: OK, FAIL или пусто, если не разобрать."""
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and str(item.get("Key", "")) == "Result":
+                return str(item.get("Value", "")).strip().upper()
+    return ""
+
+
+#: Сколько раз повторить сообщение об обрыве, если ERP ответила отказом, и
+#: сколько ждать между попытками.
+#:
+#: Зачем повторы. Код обращения попадает в канал только ПОСЛЕ ответа ERP на
+#: создание, а это до пяти секунд. Сброс в этом окне убивает основной скрипт
+#: мгновенно, последняя воля уходит с одним идентификатором канала, а ERP ещё
+#: не зафиксировала создание обращения и документ по каналу не находит. Отвечает
+#: отказом, повторов не было, и обращение оставалось в подтипе, который никто не
+#: ведёт: с 17.08.2026 таких накопилось 33 (B2-03).
+#:
+#: Повторяем только на ОТКАЗЕ: успешный ответ не трогаем, чтобы не сообщить об
+#: одном обрыве дважды. Пауза небольшая, канала уже нет, но Астериск ждёт
+#: завершения обработчика, и затягивать его нельзя.
+LAST_WILL_RETRIES = 3
+LAST_WILL_RETRY_DELAY_S = 0.7
+
+
+def send_last_will(service_address, body, post=None, log=None, delay=None):
+    # type: (str, Dict[str, Any], Any, Any, Any) -> bool
     """Отправить сообщение об обрыве. Никогда не бросает.
 
     Канала уже нет, ругаться некому и незачем: любой отказ — строка в лог
@@ -152,21 +179,40 @@ def send_last_will(service_address, body, post=None, log=None):
     """
     if post is None:
         post = requests.post
+    # Пауза между попытками параметром, чтобы тесты не спали: в бою берётся
+    # константа.
+    if delay is None:
+        delay = LAST_WILL_RETRY_DELAY_S
     url = erp_url(service_address)
-    try:
-        response = post(url, json=body, timeout=ERP_TIMEOUT_S)
-        if response.status_code != 200:
+    for attempt in range(1, LAST_WILL_RETRIES + 1):
+        try:
+            response = post(url, json=body, timeout=ERP_TIMEOUT_S)
+            if response.status_code != 200:
+                if log:
+                    log("ERP: статус ответа {0} на {1}".format(response.status_code, url))
+            else:
+                items = response.json()
+                if log:
+                    for line in parse_erp_response(items):
+                        log("ERP: " + line)
+                # Отказ значит, что ERP сообщение НЕ обработала: обычно она ещё
+                # не зафиксировала создание обращения и не нашла документ по
+                # каналу. Тогда повторяем. Успех и неразобранный ответ считаем
+                # обработанными, чтобы не сообщить об обрыве дважды.
+                if erp_result(items) != "FAIL":
+                    return True
+        except Exception as error:
             if log:
-                log("ERP: статус ответа {0} на {1}".format(response.status_code, url))
-            return False
-        if log:
-            for line in parse_erp_response(response.json()):
-                log("ERP: " + line)
-        return True
-    except Exception as error:
-        if log:
-            log("ERP ERROR ({0}): {1}".format(url, error))
-        return False
+                log("ERP ERROR ({0}): {1}".format(url, error))
+        if attempt < LAST_WILL_RETRIES:
+            if log:
+                log("LAST WILL: попытка {0} из {1} не прошла, повтор через {2:.1f} с".format(
+                    attempt, LAST_WILL_RETRIES, delay))
+            if delay:
+                time.sleep(delay)
+    if log:
+        log("LAST WILL: ERP так и не приняла сообщение за {0} попыток".format(LAST_WILL_RETRIES))
+    return False
 
 
 # --- Дальше идёт часть, работающая только внутри Asterisk ---------------------

@@ -512,10 +512,11 @@ def test_operator_needs_a_higher_confidence_than_a_subject():
     operator = base.resolve("вызвать мастера на дом")
     subject = base.resolve("стиралка не крутит")
 
-    # Неуверенный оператор — не к формулировкам, а переспросить: записи нет,
-    # решению не верим, но голос в резолюции остаётся для лога.
+    # Неуверенный оператор — не к формулировкам и не к развилке (её отменили
+    # 12.11.2026): сразу запись сопровождения, голос остаётся для лога.
     assert 0.5 <= operator.vote.confidence < 0.8
-    assert operator.source == "corpus-unsure" and operator.record is None and not operator.trusted
+    assert operator.source == "corpus" and operator.trusted
+    assert operator.record is not None and operator.record.telephone_direction_id == 17
     assert subject.source == "corpus" and subject.record.id == 1
 
 
@@ -662,9 +663,11 @@ def test_category_gate_pins_rodents_and_pests_over_corpus():
     rodents = KnowledgeRecord(id=139, question="нужна дератизация от грызунов",
                               clarifying_question="Правильно понимаю, что вас интересует обработка от грызунов?",
                               equipment_type_id=320, telephone_direction_id=51, scenario="грызуны")
+    # Тип 912, как в боевой посылке: гейт насекомых до 07.11.2026 целился в 915,
+    # записей с таким типом нет вовсе, и гейт молча не делал ничего (B1-01).
     pests = KnowledgeRecord(id=24, question="нужна обработка от тараканов",
                             clarifying_question="Правильно понимаю, что вас интересует обработка от насекомых?",
-                            equipment_type_id=915, telephone_direction_id=51, scenario="насекомые")
+                            equipment_type_id=912, telephone_direction_id=51, scenario="насекомые")
     vet = KnowledgeRecord(id=26, question="нужен ветеринар на дом",
                           clarifying_question="Правильно понимаю, что вам нужны ветеринарные услуги?",
                           equipment_type_id=800, telephone_direction_id=51, scenario="ветеринар")
@@ -685,3 +688,279 @@ def test_category_gate_pins_rodents_and_pests_over_corpus():
         assert r.record.id == 26 and r.source == "category", text
     # Без ключевых слов замок не вмешивается.
     assert base.category_request("ремонт стиральной машины") is None
+
+
+def test_category_gate_picks_the_record_closest_to_the_reply():
+    """У типа оборудования бывает несколько записей в разных направлениях.
+
+    07.11.2026: у типа 800 (ветеринария) записи 26 и 122 это выезд врача, а 42
+    это запись животного на приём и МРТ. Гейт брал первую, поэтому все 29
+    реплик про «Ветцентр МРТ» уходили к выездному врачу, а запись про МРТ была
+    недостижима в принципе. Теперь среди записей своего типа выбирается та,
+    чья формулировка ближе к реплике.
+    """
+    vet_home = KnowledgeRecord(id=26, question="нужен ветеринар на дом",
+                               clarifying_question="Правильно понимаю, что вам нужны ветеринарные услуги?",
+                               equipment_type_id=800, telephone_direction_id=98, scenario="ветеринар")
+    vet_mri = KnowledgeRecord(id=42, question="нужно сделать мрт животному",
+                              clarifying_question="Правильно понимаю, что вас интересует запись животного на мрт?",
+                              equipment_type_id=800, telephone_direction_id=105, scenario="ветцентр")
+    embedder = FakeEmbedder({
+        "нужен ветеринар на дом": [1.0, 0.0, 0.0],
+        "нужно сделать мрт животному": [0.0, 1.0, 0.0],
+        "запишите собаку на мрт": [0.0, 1.0, 0.0],
+        "вызовите ветеринара на дом": [1.0, 0.0, 0.0],
+    })
+    base = KnowledgeBase([vet_home, vet_mri], embedder, threshold=0.75)
+    mri = base.resolve("запишите собаку на мрт")
+    assert mri.source == "category" and mri.record.id == 42
+    home = base.resolve("вызовите ветеринара на дом")
+    assert home.source == "category" and home.record.id == 26
+
+
+def test_category_gate_without_records_is_counted_and_logged():
+    """Гейт, нацеленный в несуществующий тип, больше не молчит.
+
+    Так умер гейт насекомых: он целился в тип 915, а запись заведена с типом
+    912. Реплика идёт дальше обычным путём, но промах виден в счётчике.
+    """
+    pests = KnowledgeRecord(id=24, question="нужна обработка от тараканов",
+                            clarifying_question="Правильно понимаю, что вас интересует обработка от насекомых?",
+                            equipment_type_id=999, telephone_direction_id=51, scenario="насекомые")
+    base = KnowledgeBase([pests], FakeEmbedder({}), threshold=0.75)
+    resolution = base.resolve("тараканы на кухне")
+    assert resolution is None or resolution.source != "category"
+    assert base.category_misses.get(912) == 1
+
+
+def test_direct_keyword_does_not_match_a_different_word_with_the_same_root():
+    """«Специализируетесь» это не просьба позвать специалиста.
+
+    До 07.11.2026 слова сравнивались первыми семью буквами, и «специально»,
+    «специальный», «специализируетесь» попадали в ключ «специалист»: клиент
+    уезжал к человеку без уточняющего вопроса и без записи на разметку.
+    """
+    operator = KnowledgeRecord(id=61, question="с оператором соедините",
+                               question_variants=["оператора", "специалист", "консультанта"],
+                               scenario="Соединить с оператором")
+    base = KnowledgeBase([make_record(1, "стиральная машина не отжимает"), operator],
+                         FakeEmbedder({}), threshold=0.75)
+    # словоформы ключа по-прежнему ловятся
+    assert base.direct_by_keyword("оператором") is operator
+    assert base.direct_by_keyword("специалиста") is operator
+    assert base.direct_by_keyword("консультант") is operator
+    # однокоренные с другим смыслом больше нет
+    for text in ["вы специализируетесь на холодильниках", "специально для вас",
+                 "нужна консультация", "специальный тариф", "менеджмент компании"]:
+        assert base.direct_by_keyword(text) is None, text
+
+
+def test_category_gate_reaches_records_of_every_type_it_carries():
+    """Гейт ветеринара несёт три типа, и видовая запись ему видна.
+
+    Все реплики про животных решает этот гейт, а не поиск по смыслу. Пока он
+    нёс только общий тип 800, запись с типом «Собака» (804) или «Кошка» (805)
+    была недостижима в принципе: гейт собирал кандидатов по одному типу, и
+    видовой записи среди них не было. Замер 09.11.2026 показал цену: попытка
+    развести виды одними данными дала 4 смены произносимого вопроса из 850, и
+    все к худшему, потому что видовые формулировки ушли с единственной видимой
+    гейту записи, а побеждать стала запись про МРТ.
+
+    Контора считает заявки по виду: в выгрузке обращений тип «Собака» стоит у
+    3631 заявки, «Кошка» у 2773, а общий 800 всего у 90.
+    """
+    vet_home = KnowledgeRecord(id=26, question="нужен ветеринар на дом",
+                               clarifying_question="Правильно понимаю, что вам нужны ветеринарные услуги?",
+                               question_variants=["вызвать ветеринара на дом"],
+                               equipment_type_id=800, telephone_direction_id=98, scenario="ветеринар")
+    dog = KnowledgeRecord(id=177, question="нужен ветеринар собаке",
+                          clarifying_question="Правильно понимаю, что вам нужны ветеринарные услуги?",
+                          question_variants=["собаке нужна прививка"],
+                          equipment_type_id=804, telephone_direction_id=98, scenario="ветеринар")
+    cat = KnowledgeRecord(id=179, question="нужен ветеринар кошке",
+                          clarifying_question="Правильно понимаю, что вам нужны ветеринарные услуги?",
+                          question_variants=["нужна вакцинация кошки"],
+                          equipment_type_id=805, telephone_direction_id=98, scenario="ветеринар")
+    # Реплики намеренно НЕ дословны: иначе решает стадия exact, а не гейт.
+    embedder = FakeEmbedder({
+        "нужен ветеринар на дом": [1.0, 0.0, 0.0],
+        "вызвать ветеринара на дом": [1.0, 0.0, 0.0],
+        "нужен врач животному на дом": [1.0, 0.0, 0.0],
+        "нужен ветеринар собаке": [0.0, 1.0, 0.0],
+        "собаке нужна прививка": [0.0, 1.0, 0.0],
+        "хочу привить собаку": [0.0, 1.0, 0.0],
+        "нужен ветеринар кошке": [0.0, 0.0, 1.0],
+        "нужна вакцинация кошки": [0.0, 0.0, 1.0],
+        "хочу привить кошку": [0.0, 0.0, 1.0],
+    })
+    base = KnowledgeBase([vet_home, dog, cat], embedder, threshold=0.75)
+
+    eq_ids, candidates = base.category_candidates("хочу привить собаку")
+    assert eq_ids == (800, 804, 805)
+    assert sorted(r.id for r in candidates) == [26, 177, 179]
+
+    # Каждая реплика достаётся записи своего вида, то есть в ERP уедет точный тип.
+    by_dog = base.resolve("хочу привить собаку")
+    assert by_dog.source == "category" and by_dog.record.equipment_type_id == 804
+    by_cat = base.resolve("хочу привить кошку")
+    assert by_cat.source == "category" and by_cat.record.equipment_type_id == 805
+    # Вид не назван — остаётся общий тип.
+    neutral = base.resolve("нужен врач животному на дом")
+    assert neutral.source == "category" and neutral.record.equipment_type_id == 800
+
+
+def test_a_gate_is_dead_only_when_all_its_types_are_missing():
+    """Нет видовой записи это не поломка гейта, а просто незаведённая запись.
+
+    Проверка посылки ругалась на каждый тип по отдельности и назвала бы живой
+    ветеринарный гейт мёртвым, стоило не завести запись по кошке.
+    """
+    from ai_assistant.service.dialog import Phrases
+    from ai_assistant.service.knowledge_feed import ParsedFeed, check_feed
+
+    vet = KnowledgeRecord(id=26, question="нужен ветеринар на дом",
+                          clarifying_question="Правильно понимаю, что вам нужны ветеринарные услуги?",
+                          question_variants=["вызвать ветеринара на дом"],
+                          equipment_type_id=800, telephone_direction_id=98, scenario="ветеринар")
+    feed = ParsedFeed(generated_at="2026-11-09T00:00:00", records=[vet],
+                      phrases=Phrases(greeting="Здравствуйте", misrecognition="Повторите",
+                                      transfer="Перевожу", silence="Вы тут?"),
+                      voice="s3", line_group_id=145)
+    warnings = check_feed(feed)
+    dead = [w for w in warnings if w.startswith("замки категорий без записей")]
+    assert dead, "гейты без записей вообще должны попадать в предупреждения"
+    assert "800" not in dead[0], "ветеринарный гейт жив записью 26, мёртвым его звать нельзя"
+    partial = [w for w in warnings if w.startswith("типы в замках категорий без своих записей")]
+    assert partial and "804" in partial[0] and "805" in partial[0]
+
+
+# --------------------------------------------------------------------------- замки записей из ERP (12.11.2026)
+
+class _AlwaysRepeat:
+    """Ярус намерения, который в любой реплике видит повторное обращение."""
+
+    def repeat_probability(self, vector):
+        return 0.99
+
+
+def _gate_records():
+    washer = KnowledgeRecord(id=1, question="стиральная машина не отжимает",
+                             clarifying_question="Ремонт стиральной машины?",
+                             telephone_direction_id=53, gates=["стиральн"])
+    dishwasher = KnowledgeRecord(id=3, question="посудомоечная машина не моет посуду",
+                                 clarifying_question="Ремонт посудомоечной машины?",
+                                 telephone_direction_id=54, gates=["посудомо"])
+    install = KnowledgeRecord(id=11, question="нужна установка бытовой техники",
+                              clarifying_question="Установка бытовой техники?",
+                              telephone_direction_id=60,
+                              gates=["установ посудомо", "установ стиральн", "Подключ Стиральн"])
+    operator = KnowledgeRecord(id=63, question="соедините с оператором", clarifying_question="",
+                               question_variants=["оператора", "оператор"],
+                               scenario="Соединить с оператором", telephone_direction_id=17)
+    return washer, dishwasher, install, operator
+
+
+def test_record_gate_decides_after_the_intent_tier():
+    """Назвал технику, значит профильный отдел, НО повторное обращение идёт в
+    сопровождение, даже если техника названа (уточнение заказчика 12.11.2026)."""
+    washer, dishwasher, install, operator = _gate_records()
+    fresh = KnowledgeBase([washer, dishwasher, install, operator], FakeEmbedder({}), threshold=0.75)
+    gated = fresh.resolve("нужен мастер по стиральной машине")
+    assert gated.source == "gate" and gated.record.id == 1 and gated.trusted and gated.score == 1.0
+
+    base = KnowledgeBase([washer, dishwasher, install, operator], FakeEmbedder({}), threshold=0.75,
+                         intent=_AlwaysRepeat())
+    repeat = base.resolve("уточнить заявку по ремонту стиральной машины")
+    assert repeat.source == "intent" and repeat.record.id == 63
+
+    # Прямая просьба позвать человека главнее замка.
+    human = base.resolve("соедините с оператором по стиральной машине")
+    assert human.source == "keyword" and human.record.id == 63
+
+
+def test_longer_gate_row_beats_a_shorter_one():
+    """«Установить посудомоечную машину»: сработали «посудомо» (ремонт) и
+    «установ посудомо» (установка). Побеждает строка, где слов больше."""
+    washer, dishwasher, install, operator = _gate_records()
+    base = KnowledgeBase([washer, dishwasher, install, operator], FakeEmbedder({}), threshold=0.75)
+
+    assert [r.id for r in base.record_gate_candidates("посудомойка не сливает воду")] == [3]
+    assert [r.id for r in base.record_gate_candidates("нужно установить посудомоечную машину")] == [11]
+    # Регистр и порядок слов в строке замка не важны, «ё» приводится к «е».
+    assert [r.id for r in base.record_gate_candidates("стиральную машинку подключить надо")] == [11]
+    assert base.resolve("нужно установить посудомоечную машину").record.id == 11
+    # Слово замка это НАЧАЛО слова реплики, а не кусок в середине.
+    assert base.record_gate_candidates("мне нужен мастер") == []
+    assert base.record_gate_candidates("перестиральная") == []
+
+
+def test_tie_between_gates_is_settled_by_the_closest_phrase():
+    """Два замка одной длины у разных записей: выбирает близость формулировок."""
+    embedder = FakeEmbedder({"сломался блендер керхер": [1.0, 0.0, 0.0],
+                             "ремонт техники керхер": [0.9, 0.1, 0.0],
+                             "блендер не включается": [0.2, 0.9, 0.0]})
+    small = KnowledgeRecord(id=10, question="блендер не включается", clarifying_question="Мелкая техника?",
+                            telephone_direction_id=70, gates=["блендер"])
+    brand = KnowledgeRecord(id=21, question="ремонт техники керхер", clarifying_question="Техника керхер?",
+                            telephone_direction_id=71, gates=["керхер"])
+    base = KnowledgeBase([small, brand], embedder, threshold=0.75)
+
+    assert {r.id for r in base.record_gate_candidates("сломался блендер керхер")} == {10, 21}
+    assert base.resolve("сломался блендер керхер").record.id == 21
+
+
+def test_gate_with_a_short_word_does_nothing_and_is_reported():
+    """«тел» это и телевизор, и телефон: слово короче пяти букв замком не становится,
+    а приёмка посылки говорит об этом вслух."""
+    from ai_assistant.service.dialog import Phrases
+    from ai_assistant.service.knowledge_feed import ParsedFeed, check_feed
+
+    tv = KnowledgeRecord(id=12, question="телевизор не включается", clarifying_question="Ремонт телевизора?",
+                         question_variants=["ремонт телевизора"], telephone_direction_id=55,
+                         gates=["тел", "установ тв", "телевизор"])
+    channels = KnowledgeRecord(id=13, question="нужно настроить каналы", clarifying_question="Настройка каналов?",
+                               question_variants=["настроить каналы"], telephone_direction_id=56,
+                               gates=["телевизор"])
+    base = KnowledgeBase([tv, channels], FakeEmbedder({}), threshold=0.75)
+
+    assert base.record_gate_candidates("я вам телефон оставлял") == []
+    assert {r.id for r in base.record_gate_candidates("телевизор сломался")} == {12, 13}
+
+    feed = ParsedFeed(generated_at="2026-11-12T00:00:00", records=[tv, channels],
+                      phrases=Phrases(greeting="Здравствуйте", misrecognition="Повторите",
+                                      transfer="Перевожу", silence="Вы тут?"),
+                      voice="s3", line_group_id=145)
+    warnings = check_feed(feed)
+    short = [w for w in warnings if w.startswith("замков с пустой строкой или словом короче")]
+    assert short and "тел у 12" in short[0] and "установ тв у 12" in short[0]
+    split = [w for w in warnings if w.startswith("замков, ведущих в разные направления")]
+    assert split and "телевизор" in split[0] and "12" in split[0] and "13" in split[0]
+
+
+def test_feed_carries_gates_and_tolerates_their_absence():
+    from ai_assistant.service.knowledge_feed import _parse_record
+
+    answers = {"positive": ["да"], "negative": ["нет"]}
+    with_gates = _parse_record({"id": 1, "question": "стиральная машина не отжимает",
+                                "gates": [" стиральн ", "", "установ стиральн"]}, answers)
+    assert with_gates.gates == ["стиральн", "установ стиральн"]
+    # Посылка от ERP до 12.11.2026 поля не несёт: запись принимается, замков просто нет.
+    without = _parse_record({"id": 2, "question": "холодильник не морозит"}, answers)
+    assert without.gates == []
+
+
+def test_gate_of_a_record_without_question_beats_topic_gates():
+    """«Мне звонили по поводу установки посудомойки»: сработали замок сопровождения
+    («звонили») и двухсловный замок установки. Запись без уточняющего вопроса
+    главнее: клиента ведём к человеку, а не спрашиваем про установку."""
+    washer, dishwasher, install, operator = _gate_records()
+    operator.gates = ["звонили", "пропущенн", "обращал"]
+    base = KnowledgeBase([washer, dishwasher, install, operator], FakeEmbedder({}), threshold=0.75)
+
+    for text in ["мне звонили по поводу установки посудомоечной машины",
+                 "у меня пропущенный от вас", "я ранее обращался к вам", "мне звонили"]:
+        resolution = base.resolve(text)
+        assert resolution.source == "gate" and resolution.record.id == 63, text
+    # Без слов сопровождения замки тем работают как раньше.
+    assert base.resolve("нужно установить посудомоечную машину").record.id == 11
+

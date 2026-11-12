@@ -12,7 +12,6 @@ from ai_assistant.service.dialog import (
     ACTION_REDIRECT,
     POINT_ASK_QUESTION,
     POINT_CONFIRM,
-    POINT_INTENT,
     POINT_FINISHED,
     POINT_START,
     SCENARIO_DIRECTION,
@@ -20,6 +19,7 @@ from ai_assistant.service.dialog import (
     LineProfile,
     Phrases,
     dict_to_prms,
+    is_echo_of_own_phrase,
     prms_to_dict,
 )
 from ai_assistant.service import dialog as dialog_module
@@ -101,6 +101,19 @@ def answer(engine_obj, **kwargs):
     payload = {"linkedId": "call-1", "recognizedText": "", "silenceDetected": "False"}
     payload.update(kwargs)
     return prms_to_dict(engine_obj.handle(payload))
+
+
+def assert_refusal(result):
+    """Отказ клиента ведёт к человеку: перевод на сопровождение, разговор закрыт.
+
+    Решение аналитика КЦ после 11-й волны, подтверждено заказчиком 07.11.2026.
+    До этого бот говорил «Тогда подскажите, что вас интересует?» и шёл на
+    второй круг угадывания: по 29 звонкам с «нет» замечания в 22, а
+    беспроблемных переводов по теме после второго круга ноль.
+    """
+    assert result["Action"] == ACTION_REDIRECT, result
+    assert result["ConversationPoint"] == POINT_FINISHED, result
+    return result
 
 
 def answer_after_reask(engine_obj, **kwargs):
@@ -238,7 +251,7 @@ def test_long_mixed_answer_is_asked_again_not_treated_as_no():
     short_engine = engine(FakeKnowledge(record))
     answer(short_engine, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
     short = answer(short_engine, conversationPoint=POINT_CONFIRM, recognizedText="да нет")
-    assert short["TextToSpeak"] == PHRASES.wrong_guess
+    assert_refusal(short)
 
     # Длинный ответ, начатый с «да», — согласие, даже если дальше есть «не».
     yes_engine = engine(FakeKnowledge(record))
@@ -263,26 +276,25 @@ def test_direct_transfer_record_needs_a_strong_phrase_match():
 
 
 def test_negative_confirmation_returns_to_question():
-    """На «нет» разговор возвращается к вопросу клиента.
+    """На «нет» разговор уходит к человеку, а промах уезжает на разметку.
 
-    Формулировка при этом своя: бот не угадал тему, а не «не расслышал» —
-    см. test_explicit_no_asks_what_the_client_needs. Замечание с показа
-    руководству 14.08.2026: «надо его на второй круг возвращать, какой-то
-    фразой вроде „Что вас интересует?“».
+    Замечание с показа руководству 14.08.2026 просило второй круг («надо его
+    возвращать фразой вроде „Что вас интересует?“»), и он был сделан. Разбор
+    29 звонков с «нет» за волны 1-12 показал обратное: замечания аналитика в
+    22 из них, беспроблемных переводов по теме после второго круга ноль.
+    Решение аналитика КЦ после 11-й волны отменяет второй круг.
     """
     engine_obj = engine(FakeKnowledge(RECORD))
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
-    assert result["TextToSpeak"] == PHRASES.wrong_guess
-    assert result["Action"] == ACTION_RECOGNIZE
-    assert result["ConversationPoint"] == POINT_ASK_QUESTION
-    # Промах уехал в ответ отдельным ключом: AGI положит его в канал (LastWrongGuess),
-    # и если клиент бросит трубку на переспросе, last_will пошлёт wrongGuess в Hangup,
-    # а 15422 пометит строку разметки авто-проблемой (форма ОКК, 06.11.2026).
+    assert_refusal(result)
+    # Промах уезжает вместе с переводом: 15422 пометит строку разметки, и
+    # аналитик увидит, что бот предлагал не то.
     assert result["WrongGuess"] == RECORD.question
-    # На переспросе вопрос на разметку ещё НЕ пишем: это только при сдаче, иначе база
-    # знаний засорится вопросами, которые клиент тут же уточнит.
-    assert "UnknownQuestion" not in result
+    # Вопрос клиента теперь пишется на разметку сразу: уточнять его уже некому,
+    # разговор ушёл к человеку.
+    assert result["UnknownQuestion"] == "True"
+    assert result["UnknownQuestionText"] == "стиралка не крутит"
 
 
 def untrust(engine_obj):
@@ -338,10 +350,9 @@ def test_confirmation_answer_naming_another_topic_switches_the_question():
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
     engine_obj._knowledge._record = other
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет холодильник не морозит")
-    # «Нет» и сразу другая тема — её вопрос без круга «что вас интересует?»
-    # (12.10.2026, см. test_no_plus_a_topic_jumps_to_that_topic).
-    assert result["TextToSpeak"] == other.clarifying_question
-    assert result["ConversationPoint"] == POINT_CONFIRM
+    # «Нет» плюс другая тема с 07.11.2026 ведёт к человеку, а не к новому
+    # вопросу: см. test_no_plus_a_topic_needing_confirmation_goes_to_a_human.
+    assert_refusal(result)
 
     # А без «нет» — просто другая тема в ответе: сразу её вопрос.
     engine_obj2 = engine(FakeKnowledge(RECORD))
@@ -848,15 +859,18 @@ def test_direction_extension_wins_over_scenario():
     assert result["RedirectExten"] == "7112"
 
 
-def test_explicit_no_asks_what_the_client_needs():
-    """На «нет» бот не угадал тему — надо спросить, что нужно, а не просить переформулировать."""
+def test_explicit_no_transfers_to_a_human():
+    """На «нет» бот не угадал тему и отдаёт разговор человеку.
+
+    До 07.11.2026 бот спрашивал «Тогда подскажите, что вас интересует?» и шёл
+    на второй круг. Решение аналитика КЦ после 11-й волны: второго круга нет.
+    """
     engine_obj = engine(FakeKnowledge(RECORD))
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
 
-    assert result["TextToSpeak"] == PHRASES.wrong_guess
-    assert result["Action"] == ACTION_RECOGNIZE
-    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+    assert_refusal(result)
+    assert result["WrongGuess"] == RECORD.question
 
 
 def test_unrecognized_answer_still_asks_to_rephrase():
@@ -873,8 +887,15 @@ def test_unrecognized_answer_still_asks_to_rephrase():
     assert result["ConversationPoint"] == POINT_ASK_QUESTION
 
 
-def test_second_round_after_no_leads_to_a_new_direction():
-    """Второй круг рабочий: после «нет» клиент называет другую тему и попадает куда надо."""
+def test_no_ends_the_guessing_instead_of_a_second_round():
+    """После «нет» второго круга нет: разговор уходит к человеку.
+
+    Раньше бот спрашивал «что вас интересует?», и клиент мог назвать другую
+    тему. По разбору 29 звонков с «нет» (волны 1-12) это не дало ни одного
+    беспроблемного перевода по теме, зато дало повтор отвергнутой темы в 15
+    случаях из 27 и разговоры на шесть-восемь фраз бота. Решение аналитика КЦ
+    после 11-й волны: отказ значит человек.
+    """
     holodilnik = KnowledgeRecord(
         id=3,
         question="не морозит холодильник",
@@ -905,12 +926,12 @@ def test_second_round_after_no_leads_to_a_new_direction():
     )
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка сломалась")
     after_no = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
-    assert after_no["TextToSpeak"] == PHRASES.wrong_guess
 
-    second = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник")
-    assert second["TextToSpeak"] == holodilnik.clarifying_question
-    confirmed = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
-    assert confirmed["RedirectExten"] == "7104"
+    assert_refusal(after_no)
+    # Переводим именно на сопровождение, а не по второй теме, которую бот
+    # «нашёл» бы на следующей реплике: тема холодильника здесь не при чём.
+    assert after_no["RedirectExten"] == "489"
+    assert holodilnik.clarifying_question not in after_no["TextToSpeak"]
 
 
 def test_real_knowledge_base_accepts_common_mishearings():
@@ -1202,20 +1223,21 @@ def test_confirmed_topic_is_not_an_unrecognized_question():
     assert "UnknownQuestion" not in result
 
 
-def test_wrong_guess_is_not_reported_as_an_unrecognized_question_yet():
-    """Клиент ответил «нет»: бот не угадал тему, но вопрос ещё в работе.
+def test_wrong_guess_is_reported_for_marking_right_away():
+    """Клиент ответил «нет»: вопрос уходит на разметку сразу.
 
-    Разговор здесь не заканчивается — бот спрашивает, что нужно клиенту, и
-    следующая же реплика либо найдётся в базе, либо честно уйдёт туда как
-    промах по порогу. Отправлять исходный вопрос уже сейчас значит записать
-    в справочник две строки об одном звонке.
+    Пока бот шёл на второй круг, запись вопроса откладывалась: клиент мог
+    уточнить тему следующей репликой, и в справочник попали бы две строки об
+    одном звонке. Со отменой второго круга уточнять некому, поэтому реплика и
+    промах уезжают вместе с переводом.
     """
     engine_obj = engine(FakeKnowledge(DIRECTION_RECORD, score=0.83))
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="холодильник не морозит")
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
 
-    assert result["Action"] == ACTION_RECOGNIZE
-    assert "UnknownQuestion" not in result
+    assert_refusal(result)
+    assert result["UnknownQuestion"] == "True"
+    assert result["UnknownQuestionText"] == "холодильник не морозит"
 
 
 # --- Переспрос в точке подтверждения (живой звонок 18.08.2026) -------------
@@ -1410,8 +1432,7 @@ def test_short_negative_answer_still_works_at_confirmation():
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка не крутит")
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="не")
 
-    assert result["TextToSpeak"] == PHRASES.wrong_guess
-    assert result["ConversationPoint"] == POINT_ASK_QUESTION
+    assert_refusal(result)
 
 
 def test_short_positive_answer_still_works_at_confirmation():
@@ -1553,7 +1574,7 @@ def test_every_service_phrase_comes_from_the_group_of_the_dialed_number():
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
            recognizedText="стиралка не крутит", **dialed)
     wrong = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет", **dialed)
-    assert wrong["TextToSpeak"] == MASTER_PHRASES.wrong_guess
+    assert wrong["TextToSpeak"] == MASTER_PHRASES.transfer  # после отказа переводим
 
     lost = engine_with_groups(master_profile(), knowledge=FakeKnowledge(None))
     transfer = answer(lost, conversationPoint=POINT_ASK_QUESTION,
@@ -1881,9 +1902,7 @@ def test_explicit_no_beats_a_stray_word_of_agreement():
 
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет мне нужно ремонт мясорубки")
 
-    assert result["Action"] == ACTION_RECOGNIZE
-    assert result["ConversationPoint"] == POINT_ASK_QUESTION
-    assert result["TextToSpeak"] == PHRASES.wrong_guess
+    assert_refusal(result)
 
 
 def test_rejected_guess_is_reported_for_marking_with_the_original_question():
@@ -1893,29 +1912,44 @@ def test_rejected_guess_is_reported_for_marking_with_the_original_question():
     knowledge = FakeKnowledge(RECORD, score=0.9, threshold=0.75)
     engine_obj = engine(knowledge)
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="здравствуйте это ремонт холодильников")
-    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
-    # Второй круг: тема снова «найдена», клиент соглашается — перевод по теме.
-    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт стиральной машины")
 
-    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
+    # Отказ ведёт к человеку сразу, и промах уезжает этим же переводом: и сама
+    # реплика клиента, и тема, которую бот предложил не к месту.
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
 
-    assert result["Action"] == ACTION_REDIRECT
+    assert_refusal(result)
     assert result["UnknownQuestion"] == "True"
     assert result["UnknownQuestionText"] == "здравствуйте это ремонт холодильников"
     assert result["WrongGuess"] == RECORD.question
 
 
 def test_rejected_guess_travels_with_a_silence_transfer_too():
+    """Промах едет с любым переводом, даже если разговор кончился молчанием.
+
+    Явный отказ теперь закрывает разговор сам, поэтому промах тут возникает
+    иначе: клиент не отказывался, а назвал другую тему («у меня холодильник»),
+    бот записал свою первую догадку как промах и спросил про холодильник. Потом
+    клиент замолчал, и перевод по молчанию обязан донести исходную реплику до
+    разметки: иначе промах бота в форме ОКК не виден.
+    """
+    other = replace(
+        RECORD, id=2, question="холодильник не морозит",
+        clarifying_question="Правильно понимаю, что вас интересует ремонт холодильника?",
+        equipment_type="Холодильники",
+    )
     knowledge = FakeKnowledge(RECORD, score=0.9, threshold=0.75)
     engine_obj = engine(knowledge)
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="здравствуйте это ремонт холодильников")
-    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
-    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+    knowledge._record = other
+    switched = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="у меня вообще то холодильник")
+    assert switched["TextToSpeak"] == other.clarifying_question
+    answer(engine_obj, conversationPoint=POINT_CONFIRM, silenceDetected="True")
 
-    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, silenceDetected="True")
 
     assert result["Action"] == ACTION_REDIRECT
     assert result["UnknownQuestionText"] == "здравствуйте это ремонт холодильников"
+    assert result["WrongGuess"] == RECORD.question
 
 
 def test_transfer_without_a_rejected_guess_carries_no_question_text():
@@ -2002,10 +2036,18 @@ def test_clipped_answer_is_read_by_its_tail():
     assert ask("орка мебели да нет")["Action"] == ACTION_RECOGNIZE or True  # многословный — обычный разбор
 
 
-def test_no_plus_a_topic_jumps_to_that_topic():
-    """«Нет, мне надо в стиральную машину вставить манжет» (269819182, 12.10.2026):
-    тема названа в том же ответе — её вопрос сразу, без круга «что вас интересует?».
-    Голое «нет» и «нет» с той же темой — обычный отказ."""
+def test_no_plus_a_topic_needing_confirmation_goes_to_a_human():
+    """«Нет, мне надо холодильник починить»: тема названа, но её ещё уточнять.
+
+    До 07.11.2026 бот задавал вопрос по новой теме. Это ветка на 11 звонков, и
+    10 из них в замечаниях аналитика: клиент уже сказал «нет», и второй вопрос
+    он воспринимает как непонимание. Теперь такой ответ ведёт к человеку, а
+    тема, которую бот угадал не так, уезжает на разметку.
+
+    Исключение остаётся одно: тема, которую уточнять не надо («соедините с
+    оператором»), переводится по ней самой. Это проверяет
+    test_no_plus_a_direct_topic_transfers_by_it.
+    """
     other = replace(
         RECORD, id=2, question="холодильник не морозит",
         clarifying_question="Правильно понимаю, что вас интересует ремонт холодильника?",
@@ -2015,64 +2057,36 @@ def test_no_plus_a_topic_jumps_to_that_topic():
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ставить стиральную машину")
     engine_obj._knowledge._record = other
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет мне надо холодильник починить")
-    assert result["TextToSpeak"] == other.clarifying_question
-    assert result["ConversationPoint"] == POINT_CONFIRM
-    confirmed = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
-    assert confirmed["Action"] == ACTION_REDIRECT and confirmed["EquipmentType"] == "Холодильники"
+    assert_refusal(result)
+    assert other.clarifying_question not in result["TextToSpeak"]
+    assert result["WrongGuess"] == RECORD.question
 
+
+def test_no_plus_a_direct_topic_transfers_by_it():
+    """«Нет, соедините с оператором»: тема без уточняющего вопроса это ответ.
+
+    Такую реплику переводим по названной теме, а не вообще на сопровождение:
+    клиент сам сказал, чего хочет, и догадка бота тут ни при чём.
+    """
+    direct = replace(
+        RECORD, id=3, question="соедините с оператором", clarifying_question="",
+        scenario="redirect_support", redirect_exten="7082", equipment_type="",
+    )
+    engine_obj = engine(FakeKnowledge(RECORD))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ставить стиральную машину")
+    engine_obj._knowledge._record = direct
+    result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет соедините с оператором")
+    assert result["Action"] == ACTION_REDIRECT
+    assert result["Scenario"] == "redirect_support"
+
+    # Голое «нет» и «нет» с той же темой это обычный отказ: тоже к человеку.
     plain = engine(FakeKnowledge(RECORD))
     answer(plain, conversationPoint=POINT_ASK_QUESTION, recognizedText="ставить стиральную машину")
-    assert answer(plain, conversationPoint=POINT_CONFIRM, recognizedText="нет")["TextToSpeak"] == PHRASES.wrong_guess
+    assert_refusal(answer(plain, conversationPoint=POINT_CONFIRM, recognizedText="нет"))
     same = engine(FakeKnowledge(RECORD))
     answer(same, conversationPoint=POINT_ASK_QUESTION, recognizedText="ставить стиральную машину")
-    assert answer(same, conversationPoint=POINT_CONFIRM, recognizedText="нет стиралка не крутит")["TextToSpeak"] == PHRASES.wrong_guess
+    assert_refusal(answer(same, conversationPoint=POINT_CONFIRM, recognizedText="нет стиралка не крутит"))
 
-
-
-class UnsureKnowledge(FakeKnowledge):
-    """Корпус сомневается между повторным и новым: resolve() — corpus-unsure,
-    формулировки (resolve_phrases) при этом тему находят."""
-
-    def resolve(self, text):
-        return Resolution(None, 0.0, False, "corpus-unsure")
-
-    def resolve_phrases(self, text):
-        return FakeKnowledge.resolve(self, text)
-
-
-def test_corpus_doubt_asks_repeat_or_new_and_routes_by_the_answer():
-    """«Хотели бы мастера пригласить, стиральная машина что-то» (269651582):
-    вместо «переформулируйте» — развилка «по заказу или новый». «Новый» —
-    тема по формулировкам, «по заказу» — на сопровождение, тема в ответе —
-    её вопрос. Развилка задаётся один раз за звонок."""
-    def start():
-        engine_obj = engine(UnsureKnowledge(RECORD))
-        result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
-                        recognizedText="хотели бы мастера пригласить стиральная машина что то")
-        assert result["TextToSpeak"] == PHRASES.intent_question
-        assert result["ConversationPoint"] == POINT_INTENT
-        return engine_obj
-
-    new = answer(start(), conversationPoint=POINT_INTENT, recognizedText="новый")
-    assert new["TextToSpeak"] == RECORD.clarifying_question and new["ConversationPoint"] == POINT_CONFIRM
-
-    repeat = answer(start(), conversationPoint=POINT_INTENT, recognizedText="по уже оформленному заказу")
-    assert repeat["Action"] == ACTION_REDIRECT
-
-    # «Новый заказ» содержит оба слова — решает «новый».
-    both = answer(start(), conversationPoint=POINT_INTENT, recognizedText="новый заказ")
-    assert both["ConversationPoint"] == POINT_CONFIRM
-
-    # Короткое «уже» — ответ, а не обрывок: в этой точке правило обрывков не действует.
-    short = answer(start(), conversationPoint=POINT_INTENT, recognizedText="уже")
-    assert short["Action"] == ACTION_REDIRECT
-
-    # Второй раз за звонок развилка не задаётся: сомнение корпуса идёт обычным путём.
-    engine_obj = start()
-    answer(engine_obj, conversationPoint=POINT_INTENT, recognizedText="новый")
-    answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="нет")
-    again = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="мастера пригласить холодильник")
-    assert again["TextToSpeak"] != PHRASES.intent_question
 
 
 def test_sibling_record_with_the_same_question_counts_as_the_same_topic():
@@ -2097,24 +2111,27 @@ def test_bare_ne_inside_a_description_is_not_a_refusal():
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="сломался холодильник передатчик")
     untrust(engine_obj)
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="вождения он получается как бы не работает")
-    assert result["TextToSpeak"] != PHRASES.wrong_guess  # не отказ: переспрос «да или нет»
+    assert result["Action"] != ACTION_REDIRECT  # не отказ: переспрос «да или нет»
     assert result["ConversationPoint"] == POINT_CONFIRM
 
     leading = engine(FakeKnowledge(record, score=0.9, threshold=0.66))
     answer(leading, conversationPoint=POINT_ASK_QUESTION, recognizedText="сломался холодильник передатчик")
     untrust(leading)
-    assert answer(leading, conversationPoint=POINT_CONFIRM, recognizedText="не")["TextToSpeak"] == PHRASES.wrong_guess
+    assert_refusal(answer(leading, conversationPoint=POINT_CONFIRM, recognizedText="не"))
     plain = engine(FakeKnowledge(record, score=0.9, threshold=0.66))
     answer(plain, conversationPoint=POINT_ASK_QUESTION, recognizedText="сломался холодильник передатчик")
     untrust(plain)
-    assert answer(plain, conversationPoint=POINT_CONFIRM, recognizedText="он не работает нет")["TextToSpeak"] == PHRASES.wrong_guess
+    assert_refusal(answer(plain, conversationPoint=POINT_CONFIRM, recognizedText="он не работает нет"))
 
 
-def test_continuation_after_a_forced_cut_repeats_the_question_instead_of_switching():
+def test_continuation_after_a_forced_cut_repeats_the_question_instead_of_switching(monkeypatch):
     """Вопрос задан по реплике, срезанной по потолку длины: клиент ещё говорил.
+    (Правило проверяется при выключенной склейке: с 12.11.2026 первый срез бот
+    не разбирает вовсе, а это правило остаётся для второго среза подряд.)
     Длинный хвост его рассказа без «да»/«нет» — не ответ и не другая тема:
     вопрос повторяется один раз (14.10.2026, 1791967747: хвост «…и знаете как
     света музыка и включает» увёл бот в электрику)."""
+    monkeypatch.setattr(dialog_module, "FORCED_MERGE_ENABLED", False)
     forced = {"call-1": True}
     other = replace(RECORD, id=2, question="нужен электрик", clarifying_question="Правильно понимаю, электрик?",
                     equipment_type="Электрика")
@@ -2151,7 +2168,7 @@ def test_mixed_long_answer_is_decided_by_its_last_word_when_the_first_says_nothi
     answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт холодильника")
     untrust(engine_obj)
     result = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="он у меня вообще то да работает нет")
-    assert result["TextToSpeak"] == PHRASES.wrong_guess
+    assert_refusal(result)
 
 
 # --- 9-я волна (19.10.2026): зачин, повтор фразы, хвост после переспроса, «да + соседняя тема»
@@ -2279,3 +2296,313 @@ def test_yes_with_the_same_topic_or_a_weak_sibling_keeps_the_record():
     plain = answer(engine_obj, conversationPoint=POINT_CONFIRM, recognizedText="да")
     assert plain["Action"] == ACTION_REDIRECT and plain["KnowledgeRecordId"] == "10"
     assert knowledge.queries == ["установить свет в ванной"]
+
+
+def test_bot_gives_up_after_the_phrase_limit():
+    """Предел кругов: пять фраз, дальше разговор отдаётся человеку.
+
+    Предела не было вовсе, кроме таймаута станции 120 с, и реплей 455 звонков
+    волн 11 и 12 дал 52 звонка с четырьмя и более ходами бота. Клиент, которого
+    переспросили пять раз, темы уже не назовёт.
+    """
+    # Запись есть, но близость ниже порога: бот каждый раз просит
+    # переформулировать и слушает дальше, то есть сам разговор не кончается.
+    eng = engine(FakeKnowledge(RECORD, score=0.5))
+    answer(eng, conversationPoint=POINT_START)
+    actions = []
+    for _ in range(dialog_module.MAX_BOT_PHRASES + 2):
+        reply = answer(eng, conversationPoint=POINT_ASK_QUESTION, recognizedText="непонятная реплика")
+        actions.append(reply["Action"])
+        if reply["Action"] == ACTION_REDIRECT:
+            break
+    assert actions[-1] == "Redirect", actions
+    assert len(actions) <= dialog_module.MAX_BOT_PHRASES, actions
+
+
+def test_no_closes_the_conversation_so_a_topic_cannot_repeat():
+    """Отвергнутая тема второй раз не предлагается, потому что разговора уже нет.
+
+    Отдельный запрет на повтор был написан 07.11.2026 и оказался недостижим:
+    перевод после «нет» удаляет состояние звонка, и набор отвергнутых записей
+    не доживал до следующей реплики. Консилиум это поймал, мёртвый код убран.
+    Защита осталась в самом поведении: на живом наборе из 738 звонков повтор
+    отвергнутой темы упал с 14 звонков до нуля (tools/replay_dialogs.py).
+    """
+    eng = engine(FakeKnowledge(RECORD, score=0.9))
+    asked = answer(eng, conversationPoint=POINT_ASK_QUESTION, recognizedText="стиралка шумит")
+    assert asked["Action"] == ACTION_RECOGNIZE
+    assert "стиральной машины" in asked["TextToSpeak"].lower()
+
+    refused = answer(eng, conversationPoint=POINT_CONFIRM, recognizedText="нет")
+    assert_refusal(refused)
+    # Состояние звонка снято вместе с переводом: повторять тему просто некому.
+    assert eng._sessions == {}
+
+def test_short_meta_question_reaches_a_human_through_the_whole_path():
+    """«Вы кто», «кто это»: вопрос о собеседнике ведёт к человеку.
+
+    Проверяется именно через handle(), а не через OPERATOR_META_RE: шаблон был
+    добавлен в правило оператора, но реплика до него не доживала. Слова короче
+    четырёх букв, и гейт обрывка (_is_scrap_for_search) считал такую реплику
+    шумом: клиент получал молчание, потом «переформулируйте», потом «слушаю
+    вас», и бросал трубку (обращение 270485427, волна 12). Тест на регулярке
+    этого не видел, потому что регулярка как раз срабатывала.
+    """
+    operator = replace(
+        RECORD, id=61, question="соедините с оператором",
+        question_variants=["оператор", "оператора"], clarifying_question="",
+        positive_reply="", scenario="redirect_support", redirect_exten="7082",
+    )
+
+    class MetaKnowledge(FakeKnowledge):
+        """Как боевая база: мета-вопрос решается записью оператора."""
+
+        def resolve(self, text):
+            from ai_assistant.service.knowledge import OPERATOR_META_RE
+
+            if OPERATOR_META_RE.search(text):
+                return Resolution(operator, 1.0, True, "keyword")
+            return super().resolve(text)
+
+    for question in ["вы кто", "а вы кто", "кто это", "а кто это", "с кем я говорю"]:
+        engine_obj = engine(MetaKnowledge(RECORD, score=0.9))
+        answer(engine_obj, conversationPoint=POINT_START)
+        result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText=question)
+        assert result["Action"] == ACTION_REDIRECT, (question, result)
+
+    # Обычная короткая реплика по-прежнему считается обрывком, а длинная ищет тему.
+    engine_obj = engine(MetaKnowledge(RECORD, score=0.9))
+    answer(engine_obj, conversationPoint=POINT_START)
+    scrap = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ага")
+    assert scrap["Action"] == ACTION_RECOGNIZE
+    topic = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ремонт холодильника")
+    assert topic["TextToSpeak"] == RECORD.clarifying_question
+
+
+def test_loud_empty_recognition_gets_a_phrase_not_silence():
+    """Движок не разобрал ни слова, но человек говорил: отвечаем вслух.
+
+    Пустое распознавание бывает двух сортов. Щелчок громкой связи и шорох это
+    тишина, на такое бот молчит и слушает дальше (так и было). А реплика
+    нормальной громкости без распознанных слов значит, что человек говорил и
+    ждёт ответа: молчание он читает как поломку (обращение 270982285, волна
+    12: пустое распознавание, тишина, клиент положил трубку).
+    """
+    loud = engine(FakeKnowledge(RECORD, score=0.9))
+    loud._peak_lookup = lambda call: -18.0
+    answer(loud, conversationPoint=POINT_START)
+    result = answer(loud, conversationPoint=POINT_ASK_QUESTION, recognizedText="")
+    assert result["Action"] == ACTION_RECOGNIZE
+    assert result["TextToSpeak"] == PHRASES.listening
+
+    quiet = engine(FakeKnowledge(RECORD, score=0.9))
+    quiet._peak_lookup = lambda call: -52.0
+    answer(quiet, conversationPoint=POINT_START)
+    silent = answer(quiet, conversationPoint=POINT_ASK_QUESTION, recognizedText="")
+    assert silent["Action"] == ACTION_RECOGNIZE
+    assert (silent.get("TextToSpeak") or "") == ""
+
+    # Без источника громкости поведение прежнее: молчим.
+    unknown = engine(FakeKnowledge(RECORD, score=0.9))
+    answer(unknown, conversationPoint=POINT_START)
+    old = answer(unknown, conversationPoint=POINT_ASK_QUESTION, recognizedText="")
+    assert (old.get("TextToSpeak") or "") == ""
+
+
+class GreyZoneKnowledge(FakeKnowledge):
+    """Корпус назвал направление, но уверенность в серой зоне.
+
+    Так выглядит решение KnowledgeBase.resolve_vector, когда голос корпуса
+    ниже CORPUS_GREY_ZONE: записи нет, доверия нет, источник «corpus-grey».
+    """
+
+    def resolve(self, text):
+        return Resolution(None, 0.58, False, "corpus-grey")
+
+
+def test_grey_zone_asks_to_repeat_once_then_hands_over():
+    """В серой зоне бот говорит «не понял» один раз, потом отдаёт человеку.
+
+    Раньше выбор был между двумя способами угадать: поверить слабому голосу
+    корпуса (68 % ошибок при уверенности 0,50-0,60) или отдать реплику
+    рукописным формулировкам, у которых точность 36 %. Простое поднятие порога
+    доверия к корпусу делало хуже: неверных решений становилось 387 вместо 303,
+    потому что реплика падала на формулировки.
+
+    Решение заказчика 07.11.2026: дать боту право сказать «не понял».
+    """
+    engine_obj = engine(GreyZoneKnowledge(RECORD, score=0.9))
+    answer(engine_obj, conversationPoint=POINT_START)
+
+    first = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="машинка барахлит")
+    assert first["Action"] == ACTION_RECOGNIZE
+    assert first["TextToSpeak"] == PHRASES.misrecognition
+    assert first["ConversationPoint"] == POINT_ASK_QUESTION
+
+    second = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="ну это самое барахлит")
+    assert second["Action"] == ACTION_REDIRECT
+    assert second["UnknownQuestion"] == "True"
+
+
+def test_grey_zone_reask_is_off_when_the_threshold_is_zero(monkeypatch):
+    """Ноль в настройке возвращает прежнее поведение: сразу к человеку."""
+    monkeypatch.setattr(dialog_module, "QUESTION_REASK_ATTEMPTS", 0)
+    engine_obj = engine(GreyZoneKnowledge(RECORD, score=0.9))
+    answer(engine_obj, conversationPoint=POINT_START)
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="машинка барахлит")
+    assert result["Action"] == ACTION_REDIRECT
+
+
+def test_a_general_phrase_still_goes_straight_to_a_human():
+    """Переспрос вернулся ТОЛЬКО для серой зоны корпуса.
+
+    Общая фраза без названной техники («нужен мастер», «ремонт техники») темы
+    не содержит, и переспрашивать по ней нечего: клиент повторит то же самое.
+    Правило от 21.10.2026 для таких реплик остаётся в силе.
+
+    Промах по порогу формулировок тоже уходит к человеку сразу: 09.11.2026 я
+    расширил переспрос и на него, заказчик правку отменил («07.11 аналитик КЦ решил,
+    что переспросов больше не будет»). Замер той правки лежит в журнале
+    тикета, повторять его не нужно.
+    """
+    engine_obj = engine(FakeKnowledge(RECORD, score=0.5))
+    answer(engine_obj, conversationPoint=POINT_START)
+    result = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                    recognizedText="нужен мастер по технике")
+    assert result["Action"] == ACTION_REDIRECT
+
+    near = engine(FakeKnowledge(RECORD, score=0.72))
+    answer(near, conversationPoint=POINT_START)
+    missed = answer(near, conversationPoint=POINT_ASK_QUESTION,
+                    recognizedText="в микроволновке")
+    assert missed["Action"] == ACTION_REDIRECT
+    assert missed["UnknownQuestion"] == "True"
+
+
+def test_echo_of_the_bots_own_greeting_is_not_a_question(monkeypatch):
+    """Кусок фразы бота, вернувшийся эхом, темой не считается.
+
+    Станция глохнет на время своей фразы и ещё немного после, но акустическое
+    эхо с телефона клиента приходит с задержкой и попадает в первые куски уже
+    после снятия глухоты. Один звонок из 548 длился 3,5 секунды: единственной
+    «репликой» в нём было «могу помочь» из приветствия, темы в ней нет, и
+    разговор ушёл на сопровождение (F3 речевого аудита).
+
+    Приветствие здесь настоящее, из боевой посылки: «Здравствуйте, чем могу
+    помочь?».
+    """
+    monkeypatch.setattr(dialog_module, "_now", lambda: 100.0)
+    assert is_echo_of_own_phrase("могу помочь", "здравствуйте чем могу помочь",
+                                 POINT_START, 99.0) is True
+    assert is_echo_of_own_phrase("повторите пожалуйста", "не поняла повторите пожалуйста",
+                                 POINT_ASK_QUESTION, 99.5) is True
+
+
+def test_the_same_words_much_later_are_a_human(monkeypatch):
+    """Главная защита от ложного срабатывания это окно времени.
+
+    «Не слышу» это кусок нашего «простите, не слышу вас», а «вы меня слышите» —
+    наша фраза целиком. Клиент говорит и то и другое, когда ему кажется, что
+    связь пропала. Эхо приходит сразу за фразой, человек — когда захочет.
+    """
+    monkeypatch.setattr(dialog_module, "_now", lambda: 100.0)
+    assert is_echo_of_own_phrase("вы меня слышите", "вы меня слышите",
+                                 POINT_ASK_QUESTION, 99.0) is True
+    # Та же реплика через полминуты — это человек.
+    assert is_echo_of_own_phrase("вы меня слышите", "вы меня слышите",
+                                 POINT_ASK_QUESTION, 70.0) is False
+    # Бот ещё ничего не говорил: эха быть не может.
+    assert is_echo_of_own_phrase("вы меня слышите", "вы меня слышите",
+                                 POINT_ASK_QUESTION, 0.0) is False
+
+
+def test_echo_filter_does_not_eat_a_real_answer(monkeypatch):
+    """Ложное срабатывание дороже пропуска, поэтому правило узкое."""
+    monkeypatch.setattr(dialog_module, "_now", lambda: 100.0)
+    greeting = "здравствуйте чем могу помочь"
+    # Одно слово эхом не считаем никогда.
+    assert is_echo_of_own_phrase("помочь", greeting, POINT_START, 99.0) is False
+    # Те же слова в другом порядке значат, что человек говорит своими словами.
+    assert is_echo_of_own_phrase("могу чем", greeting, POINT_START, 99.0) is False
+    # Своя речь.
+    assert is_echo_of_own_phrase("нужен ремонт холодильника", greeting, POINT_START, 99.0) is False
+    # Пусто.
+    assert is_echo_of_own_phrase("", greeting, POINT_START, 99.0) is False
+
+
+def test_echo_filter_is_off_where_a_fragment_means_agreement(monkeypatch):
+    """В подтверждении кусок фразы бота это ответ, а не эхо.
+
+    «Ремонт холодильника» в ответ на «правильно понимаю, что вас интересует
+    ремонт холодильника?» значит согласие, и его разбирает отдельная ветка.
+    Отбрось его фильтр эха, и бот перестал бы понимать «да» своими словами.
+    """
+    monkeypatch.setattr(dialog_module, "_now", lambda: 100.0)
+    question = "правильно понимаю что вас интересует ремонт холодильника"
+    assert is_echo_of_own_phrase("ремонт холодильника", question, POINT_CONFIRM, 99.0) is False
+
+
+def test_echo_filter_can_be_switched_off(monkeypatch):
+    """Ноль в настройке возвращает прежнее поведение без выкладки кода."""
+    monkeypatch.setattr(dialog_module, "_now", lambda: 100.0)
+    monkeypatch.setattr(dialog_module, "ECHO_MIN_WORDS", 0)
+    assert is_echo_of_own_phrase("могу помочь", "здравствуйте чем могу помочь",
+                                 POINT_START, 99.0) is False
+
+
+def test_forced_cut_waits_for_the_rest_and_decides_on_the_whole_story():
+    """Обращение 271748387 (волна 13): клиент говорил дольше потолка длины реплики.
+    Бот не перебивает и не гадает по обрезку: молча слушает дальше и решает по
+    склейке. В ответе уезжает весь вопрос, чтобы в обращение попал не хвост."""
+    forced = {"call-1": True}
+    engine_obj = DialogEngine(FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500",
+                              forced_lookup=lambda linked_id: forced.get(linked_id, False))
+    head = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                  recognizedText="здрасьте у меня дома подвал примерно восемьдесят квадратных метров по стенам течет и в этих")
+    assert head["Action"] == ACTION_RECOGNIZE and head["TextToSpeak"] == ""
+    assert head["ConversationPoint"] == POINT_ASK_QUESTION
+
+    forced["call-1"] = False
+    whole = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+                   recognizedText="в холодных швах особенно весной мне посоветовали")
+    assert whole["TextToSpeak"] == RECORD.clarifying_question
+    assert whole["QuestionText"].startswith("здрасьте у меня дома подвал")
+    assert whole["QuestionText"].endswith("мне посоветовали")
+
+
+def test_forced_cut_followed_by_silence_is_decided_on_the_head():
+    """Рассказ кончился ровно на потолке: продолжения нет, пришла тишина. Бот
+    разбирает начало, а не спрашивает «вы меня слышите?»."""
+    forced = {"call-1": True}
+    engine_obj = DialogEngine(FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500",
+                              forced_lookup=lambda linked_id: forced.get(linked_id, False))
+    answer(engine_obj, conversationPoint=POINT_ASK_QUESTION,
+           recognizedText="у меня холодильник сломался совсем не морозит и продукты все потекли и вот")
+    quiet = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, silenceDetected="True")
+    assert quiet["TextToSpeak"] == RECORD.clarifying_question
+
+
+def test_second_forced_cut_in_a_row_is_not_held_back():
+    """Склейка одна: второй срез подряд разбирается сразу, иначе болтун держал бы
+    линию без ответа."""
+    engine_obj = DialogEngine(FakeKnowledge(RECORD), PHRASES, support_exten="489", sales_exten="500",
+                              forced_lookup=lambda linked_id: True)
+    first = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="у меня холодильник сломался и вот значит")
+    assert first["TextToSpeak"] == ""
+    second = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="он совсем перестал морозить и течет")
+    assert second["TextToSpeak"] == RECORD.clarifying_question
+
+
+def test_waiting_words_are_a_filler_not_a_topic():
+    """Обращение 271801482 (волна 13): «подожди подожди» сказано кому-то рядом.
+    Это не тема: бот отвечает «слушаю вас» и ждёт, а не ищет по смыслу."""
+    engine_obj = engine(FakeKnowledge(RECORD))
+    for text in ("подожди подожди", "секунду", "сейчас сейчас минутку", "подождите пожалуйста"):
+        result = answer(engine(FakeKnowledge(RECORD)), conversationPoint=POINT_ASK_QUESTION, recognizedText=text)
+        assert result["Action"] == ACTION_RECOGNIZE, text
+        assert result["TextToSpeak"] != RECORD.clarifying_question, text
+        assert result["ConversationPoint"] == POINT_ASK_QUESTION, text
+    # Слово ожидания внутри реплики по делу теме не мешает.
+    real = answer(engine_obj, conversationPoint=POINT_ASK_QUESTION, recognizedText="подождите у меня холодильник не морозит")
+    assert real["TextToSpeak"] == RECORD.clarifying_question
+

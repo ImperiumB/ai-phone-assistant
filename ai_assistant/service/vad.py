@@ -1,5 +1,6 @@
 """Нарезка потока на реплики. Заменяет EOU-классификатор Яндекса."""
 import math
+import os
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, List, Protocol
@@ -36,6 +37,40 @@ MAX_UTTERANCE_SECONDS = 10
 PRE_ROLL_MS = 300
 TAIL_KEEP_MS = 200
 
+#: Самый громкий кадр реплики должен быть громче этого порога, иначе реплика
+#: распознаванию не отдаётся вовсе.
+#:
+#: Зачем: детектор речи иногда открывает реплику на шуме линии, щелчке
+#: громкой связи или дыхании, распознавание возвращает пустую строку, а бот
+#: тратит на это ход. На записях 07.11.2026 (316 реплик) таких пустых 19.
+#:
+#: Порог минус 40 dBFS, а не минус 35, как предлагал план: замер по тем же
+#: записям показал живое «а да» на минус 36,0 dBFS и «да» на минус 34,5, то
+#: есть порог минус 35 потерял бы настоящий ответ клиента. При минус 40
+#: отсеивается 3 пустых реплики из 19 и не теряется ни одной из 297 с текстом.
+#: Цена порога несимметрична: потерянное «да» это сорванный перевод, а лишний
+#: ход на шуме это полсекунды.
+MIN_UTTERANCE_PEAK_DBFS = float(os.environ.get("AIA_MIN_PEAK_DBFS", "-40"))
+
+
+def peak_dbfs(pcm: bytes) -> float:
+    """Громкость самого громкого отсчёта в dBFS; тишина это минус 99.
+
+    Считается через numpy: реплика длиной 10 секунд это 80 тысяч отсчётов, и
+    питоновский цикл по ним стоил бы десятки миллисекунд в горячем пути.
+    """
+    if not pcm:
+        return -99.0
+    import numpy as np
+
+    samples = np.frombuffer(pcm[:len(pcm) // 2 * 2], dtype=np.int16)
+    if not samples.size:
+        return -99.0
+    peak = int(np.abs(samples.astype(np.int32)).max())
+    if peak <= 0:
+        return -99.0
+    return 20.0 * math.log10(peak / 32768.0)
+
 
 class VoiceDetector(Protocol):
     """Протокол детектора речи.
@@ -69,6 +104,10 @@ class SegmentEvent:
     kind: str  # "utterance" | "silence"
     pcm: bytes = b""
     silence_ms: int = 0
+    #: Громкость самого громкого отсчёта реплики. Нужна диалогу: пустое
+    #: распознавание при реальной громкости это «клиент говорил, а движок не
+    #: разобрал», и отвечать на это надо фразой, а не молчанием.
+    peak_dbfs: float = -99.0
     # True — реплика выдана принудительно по потолку MAX_UTTERANCE_SECONDS,
     # без единой миллисекунды паузы после неё. False (обычный случай) —
     # реплика закончилась естественной паузой. Разница важна вызывающей
@@ -167,8 +206,10 @@ class UtteranceSegmenter:
     def reset(self) -> None:
         self._tail = b""
         self._speech = b""
+        #: Сколько реплик отброшено как слишком тихие. Видно в логе звонка:
+        #: если счётчик растёт, порог подобран неверно.
+        self.dropped_quiet = 0
         self._silence_frames = 0
-        self._silence_reported = False
         # Последние кадры тишины перед речью — уходят в реплику её началом.
         self._pre_roll: Deque[bytes] = deque(maxlen=self._pre_roll_frames)
         self._detector.reset()
@@ -205,6 +246,21 @@ class UtteranceSegmenter:
         self._tail = buffer[offset:]
         return events
 
+    def _emit(self, pcm: bytes, forced: bool) -> List[SegmentEvent]:
+        """Отдать реплику распознаванию, если в ней есть что распознавать.
+
+        Детектор речи иногда открывает реплику на шуме линии, щелчке громкой
+        связи или дыхании. Распознавание возвращает по ней пустую строку, а бот
+        тратит на это ход разговора. Такую реплику дешевле не отдавать вовсе:
+        клиент при этом ничего не теряет, потому что сказать ему было нечего.
+        Порог и обоснование у MIN_UTTERANCE_PEAK_DBFS.
+        """
+        peak = peak_dbfs(pcm)
+        if peak < MIN_UTTERANCE_PEAK_DBFS:
+            self.dropped_quiet += 1
+            return []
+        return [SegmentEvent(kind="utterance", pcm=pcm, forced=forced, peak_dbfs=peak)]
+
     def _consume_frame(self, frame: bytes) -> List[SegmentEvent]:
         is_speech = self._detector.is_speech(frame)
         if is_speech:
@@ -215,7 +271,6 @@ class UtteranceSegmenter:
                 self._pre_roll.clear()
             self._speech += frame
             self._silence_frames = 0
-            self._silence_reported = False
             if len(self._speech) // FRAME_BYTES >= self._max_speech_frames:
                 # Потолок длины реплики: не дожидаемся паузы, отдаём то, что
                 # накопили, принудительно. Без этого длинная речь без пауз
@@ -224,10 +279,10 @@ class UtteranceSegmenter:
                 # без лимита даёт десятки секунд счёта — то есть движки
                 # оказываются в неравных условиях именно на реалистичном
                 # входе, который и должен их сравнивать.
-                utterance = SegmentEvent(kind="utterance", pcm=self._speech, forced=True)
+                pcm = self._speech
                 self._speech = b""
                 self._silence_frames = 0
-                return [utterance]
+                return self._emit(pcm, forced=True)
             return []
 
         self._silence_frames += 1
@@ -241,10 +296,9 @@ class UtteranceSegmenter:
                 # удлиняет распознавание.
                 drop = max(0, self._silence_frames - self._tail_keep_frames) * FRAME_BYTES
                 pcm = self._speech[:len(self._speech) - drop] if drop else self._speech
-                utterance = SegmentEvent(kind="utterance", pcm=pcm)
                 self._speech = b""
                 self._silence_frames = 0
-                return [utterance]
+                return self._emit(pcm, forced=False)
             if len(self._speech) // FRAME_BYTES >= self._max_speech_frames:
                 utterance = SegmentEvent(kind="utterance", pcm=self._speech, forced=True)
                 self._speech = b""
@@ -254,11 +308,21 @@ class UtteranceSegmenter:
 
         self._pre_roll.append(frame)
 
-        if not self._silence_reported and self._silence_frames >= self._silence_timeout_frames:
-            self._silence_reported = True
-            return [
-                SegmentEvent(
-                    kind="silence", silence_ms=self._silence_frames * self._frame_ms
-                )
-            ]
+        if self._silence_frames >= self._silence_timeout_frames:
+            # Счётчик обнуляется, поэтому следующее событие придёт через ещё
+            # один таймаут. Диалогу нужно именно ВТОРОЕ событие: по первому он
+            # спрашивает «Вы меня слышите?», по второму переводит молчащего
+            # клиента на сопровождение (dialog.py, silence_count >= 2).
+            #
+            # До 07.11.2026 выдачей управлял флаг _silence_reported, который
+            # сбрасывался только речевым кадром. Поток gRPC живёт весь звонок,
+            # сегментатор на звонок один, поэтому второго события не было
+            # никогда: клиент, который молчит и после «Вы меня слышите?», висел
+            # до таймаута AGI 120 с и получал отбой вместо перевода. Звонок
+            # 1793005116 (26.10.2026): «Вы меня слышите?» в 11:58:54, дальше
+            # 105 с тишины, ни события, ни перевода. За шесть недель ни одного
+            # перевода по второй тишине на пяти таких звонках.
+            silence_ms = self._silence_frames * self._frame_ms
+            self._silence_frames = 0
+            return [SegmentEvent(kind="silence", silence_ms=silence_ms)]
         return []

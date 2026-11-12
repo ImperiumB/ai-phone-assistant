@@ -309,7 +309,7 @@ def build_plan(knowledge: list[dict], reference: dict) -> Plan:
         )
 
         # Каноничная формулировка едет в поиск наравне с вариантами, но
-        # хранится в самой записи — в AI_KB_PHRASES её дублировать не нужно.
+        # хранится в самой записи — в AI_KB_TO_PHRASES её дублировать не нужно.
         for variant in record.get("question_variants", []):
             phrase = variant.strip()
             if not phrase:
@@ -386,7 +386,7 @@ def render_sql(plan: Plan, reference: dict, generated_on: date | None = None) ->
     add(f"-- Сценариев:    {len(plan.scenarios)} (по одному на телефонное направление)")
     add(f"-- Записей:      {len(plan.records)}")
     add(
-        f"-- Формулировок: {phrase_total} — {len(plan.phrases)} в AI_KB_PHRASES"
+        f"-- Формулировок: {phrase_total} — {len(plan.phrases)} в AI_KB_TO_PHRASES"
         f" плюс {len(plan.records)} каноничных в самих записях"
     )
     add("--")
@@ -441,7 +441,7 @@ def render_sql(plan: Plan, reference: dict, generated_on: date | None = None) ->
     add("BEGIN")
     add("  SELECT (SELECT COUNT(*) FROM ULTIMA.AI_SCENARIOS)")
     add("       + (SELECT COUNT(*) FROM ULTIMA.AI_KNOWLEDGE_BASE)")
-    add("       + (SELECT COUNT(*) FROM ULTIMA.AI_KB_PHRASES)")
+    add("       + (SELECT COUNT(*) FROM ULTIMA.AI_KB_TO_PHRASES)")
     add("    INTO v_rows FROM DUAL;")
     add("  IF v_rows > 0 THEN")
     add("    RAISE_APPLICATION_ERROR(-20001,")
@@ -489,8 +489,9 @@ def render_sql(plan: Plan, reference: dict, generated_on: date | None = None) ->
             question = plan.records[current_record - 1].question
             add(f"-- запись {current_record}: {question}")
         add(
-            "INSERT INTO ULTIMA.AI_KB_PHRASES (ID, KNOWLEDGE_BASE_ID, PHRASE, IS_FROM_BOT)"
-            f" VALUES ({phrase.id}, {phrase.knowledge_base_id}, {sql_string(phrase.phrase)}, 0);"
+            # В табличной части нет колонки ID: ключ строки это запись и текст.
+            "INSERT INTO ULTIMA.AI_KB_TO_PHRASES (KNOWLEDGE_BASE_ID, PHRASE, IS_FROM_BOT)"
+            f" VALUES ({phrase.knowledge_base_id}, {sql_string(phrase.phrase)}, 0);"
         )
 
     add("")
@@ -506,7 +507,7 @@ def render_sql(plan: Plan, reference: dict, generated_on: date | None = None) ->
     add("-- " + "-" * 70)
     add("SELECT (SELECT COUNT(*) FROM ULTIMA.AI_SCENARIOS)      AS SCENARIOS,")
     add("       (SELECT COUNT(*) FROM ULTIMA.AI_KNOWLEDGE_BASE) AS RECORDS,")
-    add("       (SELECT COUNT(*) FROM ULTIMA.AI_KB_PHRASES)     AS PHRASES")
+    add("       (SELECT COUNT(*) FROM ULTIMA.AI_KB_TO_PHRASES)     AS PHRASES")
     add("  FROM DUAL;")
     add("")
 
@@ -546,7 +547,7 @@ def main(argv: list[str] | None = None) -> int:
         f"Сценариев:    {len(plan.scenarios)}",
         f"Записей:      {len(plan.records)}",
         f"Формулировок: {len(plan.phrases) + len(plan.records)}"
-        f" ({len(plan.phrases)} в AI_KB_PHRASES + {len(plan.records)} каноничных)",
+        f" ({len(plan.phrases)} в AI_KB_TO_PHRASES + {len(plan.records)} каноничных)",
     ]
     assigned = assigned_types(plan)
     report.append(f"Тип оборудования проставлен: {len(assigned)}")

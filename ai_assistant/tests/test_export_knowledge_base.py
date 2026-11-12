@@ -383,7 +383,7 @@ def test_sql_inserts_go_scenarios_then_records_then_phrases():
     assert (
         sql.index("INTO ULTIMA.AI_SCENARIOS")
         < sql.index("INTO ULTIMA.AI_KNOWLEDGE_BASE")
-        < sql.index("INTO ULTIMA.AI_KB_PHRASES")
+        < sql.index("INTO ULTIMA.AI_KB_TO_PHRASES")
     )
 
 

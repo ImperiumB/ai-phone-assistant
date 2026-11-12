@@ -15,7 +15,12 @@ import speech_pb2_grpc  # noqa: E402
 
 from ai_assistant.service.dialog import DialogEngine, Phrases
 from ai_assistant.service.knowledge import KnowledgeRecord, Resolution
-from ai_assistant.service.main import GRPC_SHUTDOWN_GRACE_SECONDS, SpeechServicer, build_http_app
+from ai_assistant.service.main import (
+    GRPC_SHUTDOWN_GRACE_SECONDS,
+    SpeechServicer,
+    build_http_app,
+    prune_old_files,
+)
 from ai_assistant.service.vad import SegmentEvent
 
 FRAME_SAMPLES = 256
@@ -106,8 +111,15 @@ class _Request:
         self.audio_chunk = audio_chunk
 
 
-def pcm(samples):
-    return struct.pack("<{0}h".format(samples), *([100] * samples))
+def pcm(samples, value=3000):
+    """Кадр «речи» для тестов.
+
+    Амплитуда 3000 это около минус 21 dBFS, как живая речь в телефонной линии.
+    Прежние 100 давали минус 50 dBFS, то есть тише порога фильтра фантомов
+    (vad.MIN_UTTERANCE_PEAK_DBFS): сегментатор такую реплику справедливо
+    выбрасывал как шум, и два теста таймлайна падали на пустом результате.
+    """
+    return struct.pack("<{0}h".format(samples), *([value] * samples))
 
 
 def test_utterance_event_becomes_final_response():
@@ -1746,3 +1758,221 @@ def test_second_opinion_is_not_asked_for_a_short_single_word():
     responses = list(servicer.Recognize(FakeRequestIterator("call-13", [pcm(400)]), context=None))
     assert [r.text for r in responses if r.type == speech_pb2.StreamResponse.FINAL] == ["але"]
     assert FallbackEngine.calls == 0
+
+
+def _debug_file(directory, name, size_bytes, age_days, now):
+    path = directory / name
+    path.write_bytes(bytes(size_bytes))
+    stamp = now - age_days * 86400
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_prune_old_files_removes_files_older_than_the_keep_period(tmp_path):
+    """Записи разговоров клиентов не должны лежать без срока хранения."""
+    now = time.time()
+    old = _debug_file(tmp_path, "old_ПОТОК.wav", 1000, 20, now)
+    fresh = _debug_file(tmp_path, "fresh_ПОТОК.wav", 1000, 1, now)
+    removed = prune_old_files(str(tmp_path), max_mb=0, keep_days=14, now=now)
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()
+
+
+def test_prune_old_files_trims_the_oldest_files_over_the_size_limit(tmp_path):
+    """Сверх предела объёма уходят самые старые записи, свежие остаются."""
+    now = time.time()
+    mb = 1024 * 1024
+    oldest = _debug_file(tmp_path, "a_ПОТОК.wav", mb, 3, now)
+    middle = _debug_file(tmp_path, "b_ПОТОК.wav", mb, 2, now)
+    newest = _debug_file(tmp_path, "c_ПОТОК.wav", mb, 1, now)
+    removed = prune_old_files(str(tmp_path), max_mb=2, keep_days=0, now=now)
+    assert removed == 1
+    assert not oldest.exists()
+    assert middle.exists() and newest.exists()
+
+
+def test_prune_old_files_keeps_everything_when_rules_are_off(tmp_path):
+    now = time.time()
+    kept = _debug_file(tmp_path, "a_ПОТОК.wav", 1000, 900, now)
+    assert prune_old_files(str(tmp_path), max_mb=0, keep_days=0, now=now) == 0
+    assert kept.exists()
+
+
+def test_prune_old_files_survives_a_missing_directory():
+    """Чистка не имеет права уронить живой звонок, даже если папки нет."""
+    assert prune_old_files("", max_mb=10, keep_days=1) == 0
+    assert prune_old_files("нет-такой-папки-ultracode", max_mb=10, keep_days=1) == 0
+
+
+class _StubSynthesizer:
+    """Синтезатор-пустышка: отдаёт тишину и считает вызовы."""
+
+    model_id = "заглушка"
+
+    def __init__(self):
+        self.calls = []
+
+    def synthesize(self, text, voice):
+        self.calls.append((text, voice))
+        return b"\x00" * 1600
+
+
+def test_tts_cache_is_pruned_before_the_prewarm_puts_the_live_phrases_back(tmp_path):
+    """Кэш синтеза чистится ДО прогрева, иначе живая фраза уедет в звонок.
+
+    Попадание в кэш время файла не обновляет, поэтому живая фраза,
+    синтезированная месяц назад, для правила срока выглядит так же, как мусор
+    от прежнего отпечатка библиотеки голосов. Порядок «сначала чистка, потом
+    прогрев» делает это безопасным: нужное создаётся заново с новым временем,
+    мусор не возвращается. Обратный порядок удалял бы живую фразу, и холодный
+    синтез пришёлся бы на разговор (A6, п. 6-8).
+    """
+    from ai_assistant.service.main import prewarm_tts_cache
+    from ai_assistant.service.tts import TtsCache
+
+    now = time.time()
+    synth = _StubSynthesizer()
+    cache = TtsCache(synth, str(tmp_path))
+    live = cache.get("минуту, перевожу ваш звонок", "eugene")
+    os.utime(live, (now - 40 * 86400, now - 40 * 86400))
+    junk = _debug_file(tmp_path, "aia_мусор-прежнего-отпечатка.wav", 1000, 40, now)
+
+    removed = prune_old_files(str(tmp_path), max_mb=0, keep_days=30, now=now, what="Кэш синтеза")
+    assert removed == 2
+    assert not os.path.exists(live) and not junk.exists()
+
+    synth.calls = []
+    done, _elapsed = prewarm_tts_cache(cache, "eugene", ["минуту, перевожу ваш звонок"])
+    assert done == 1
+    # Синтез позвали один раз, имя файла то же самое, мусор не вернулся.
+    assert synth.calls == [("минуту, перевожу ваш звонок", "eugene")]
+    assert os.path.exists(live)
+    assert not junk.exists()
+
+
+def test_forced_flag_of_a_live_call_survives_the_overflow():
+    """Признак срезанной реплики не теряется на переполнении словаря.
+
+    Прежний clear() при переполнении стирал флаги ВСЕХ звонков, включая идущие
+    прямо сейчас: на две тысячи первом звонке живой разговор терял признак и
+    получал повтор вопроса вместо продолжения срезанной реплики (находка
+    B1-08 ультракода).
+    """
+    from ai_assistant.service.main import FORCED_FINALS, FORCED_FINALS_MAX, remember_forced, was_forced
+
+    FORCED_FINALS.clear()
+    remember_forced("живой-звонок", True)
+    for index in range(FORCED_FINALS_MAX + 50):
+        remember_forced("старый-%d" % index, False)
+    # Живой звонок вытеснен как самый старый, это нормально: он один и тот же
+    # признак держит не дольше звонка. Проверяем главное: словарь не обнулился
+    # целиком, и свежие звонки свои признаки сохранили.
+    assert len(FORCED_FINALS) == FORCED_FINALS_MAX
+    remember_forced("свежий", True)
+    assert was_forced("свежий") is True
+    assert was_forced("старый-%d" % (FORCED_FINALS_MAX + 49)) is False
+    FORCED_FINALS.clear()
+
+
+def test_last_peak_is_remembered_per_call():
+    from ai_assistant.service.main import LAST_PEAKS, last_peak, remember_peak
+
+    LAST_PEAKS.clear()
+    assert last_peak("нет-такого") == -99.0
+    remember_peak("звонок", -18.5)
+    assert last_peak("звонок") == -18.5
+    LAST_PEAKS.clear()
+
+
+
+def test_build_fingerprint_names_every_threshold_that_decides_a_call(caplog):
+    """Отпечаток сборки должен позволять привязать волну разбора к КОДУ.
+
+    Разбор волн 8-10 восстановить уже нельзя: в логе не было ни коммита, ни
+    настроек. Эта строка закрывает дыру, но сама дважды оказывалась неполной:
+    в ней не было порога серой зоны (главная правка волны 13), числа
+    переспросов, основной модели распознавания (писалась только вторая),
+    пометки незакоммиченных правок и хэша яруса намерения.
+    """
+    import logging
+
+    from ai_assistant.service import main as main_module
+    from ai_assistant.service.config import load_config
+
+    with caplog.at_level(logging.INFO):
+        main_module.log_build_fingerprint(load_config())
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("СБОРКА"))
+    for field in ("коммит=", "модули=", "распознавание=", "второе_мнение=",
+                  "порог_детектора=", "формулировки=", "корпус=", "оператор=",
+                  "перевод=", "серая_зона=", "переспросов_в_серой=", "ярус=",
+                  "порог_повторного=", "предел_фраз=", "второй_круг=",
+                  "голос=", "корпус_индекс="):
+        assert field in line, field
+    # Шесть модулей: dialog, knowledge, main, vad, tts, intent. Ярус намерения
+    # решает больше трети реплик, и его версия в отпечаток не входила вовсе.
+    hashes = line.split("модули=")[1].split(" ")[0].split("/")
+    assert len(hashes) == 6, hashes
+
+
+def test_build_fingerprint_marks_uncommitted_changes(caplog):
+    """Номер коммита без пометки правок описывает НЕ тот код, что в работе.
+
+    Сервис почти всегда запускается с незакоммиченными правками, и по одному
+    коммиту версию не восстановить. Пометка говорит разборщику смотреть хэши
+    модулей.
+    """
+    import logging
+    import subprocess
+
+    from ai_assistant.service import main as main_module
+    from ai_assistant.service.config import load_config
+
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(main_module.__file__))))
+    try:
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo, stderr=subprocess.DEVNULL, timeout=5).decode("utf-8", "replace").strip()
+    except Exception:
+        pytest.skip("git недоступен")
+    with caplog.at_level(logging.INFO):
+        main_module.log_build_fingerprint(load_config())
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("СБОРКА"))
+    if dirty:
+        assert "+правки(" in line
+    else:
+        assert "+правки" not in line
+
+
+def test_the_cache_cleanup_is_tied_to_the_prewarm_in_the_source():
+    """Чистка кэша синтеза не имеет права работать без прогрева.
+
+    Чистку зовут безусловно, а прогрев выключается настройкой
+    `AIA_PREWARM_TTS=0`. В такой паре чистка снесла бы живой набор, а
+    восстанавливать его стало бы НЕКОМУ: каждая фраза досинтезировалась бы
+    внутри разговора по полсекунды, приветствие в том числе. Обоснование
+    порядка «чистим до прогрева, он всё создаст заново» при выключенном
+    прогреве просто неверно.
+
+    `main()` целиком требует моделей, портов и базы знаний, поэтому связку
+    сторожим по исходнику: это дешевле, чем поднимать сервис, и ловит ровно ту
+    правку, которая связь разорвёт.
+    """
+    import ast
+    import pathlib
+
+    source_path = pathlib.Path(__file__).resolve().parents[1] / "service" / "main.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    guarded = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        condition = ast.dump(node.test)
+        if "prewarm_tts" not in condition:
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call) and getattr(inner.func, "id", "") == "prune_old_files":
+                guarded.append(ast.dump(inner))
+    assert guarded, ("чистка кэша синтеза должна стоять под проверкой cfg.prewarm_tts: "
+                     "без прогрева восстанавливать удалённое некому")
+    assert any("Кэш синтеза" in dumped for dumped in guarded)

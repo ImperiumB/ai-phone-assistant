@@ -98,10 +98,28 @@ def test_long_silence_without_speech_reports_silence_event():
     assert silences[0].silence_ms >= 500
 
 
-def test_silence_event_is_reported_only_once():
+def test_silence_event_repeats_every_timeout():
+    """Молчание повторяется каждый таймаут, а не сообщается один раз за звонок.
+
+    Диалог переводит клиента на сопровождение по ВТОРОМУ событию
+    (silence_count >= 2). До 07.11.2026 второго события не было никогда:
+    поток gRPC живёт весь звонок, сегментатор на звонок один, а флаг выдачи
+    сбрасывался только речевым кадром. Клиент, который молчит и после
+    «Вы меня слышите?», висел до таймаута AGI 120 с и получал отбой.
+    """
+    seg = segmenter(silence_timeout_ms=500)
+    first = seg.feed(silent_frame() * 16)
+    second = seg.feed(silent_frame() * 16)
+    assert len([e for e in first if e.kind == "silence"]) == 1
+    assert len([e for e in second if e.kind == "silence"]) == 1
+    # Каждое событие отмеряет свой отрезок тишины, а не всю её с начала звонка.
+    assert [e for e in second if e.kind == "silence"][0].silence_ms >= 500
+
+
+def test_silence_event_not_repeated_before_the_next_timeout():
     seg = segmenter(silence_timeout_ms=500)
     seg.feed(silent_frame() * 16)
-    events = seg.feed(silent_frame() * 16)
+    events = seg.feed(silent_frame() * 15)
     assert [e for e in events if e.kind == "silence"] == []
 
 
@@ -369,3 +387,62 @@ def test_reset_detector_only_outside_an_utterance():
     assert seg.in_utterance
     seg.reset_detector()
     assert det.resets == base + 1
+
+
+def loud_frame(value=3000):
+    """Кадр живой громкости: около минус 21 dBFS."""
+    import struct
+
+    return struct.pack("<{0}h".format(FRAME_SAMPLES), *([value] * FRAME_SAMPLES))
+
+
+def quiet_frame(value=100):
+    """Кадр шума: около минус 50 dBFS, тише порога фильтра фантомов."""
+    import struct
+
+    return struct.pack("<{0}h".format(FRAME_SAMPLES), *([value] * FRAME_SAMPLES))
+
+
+def test_peak_dbfs_matches_the_amplitude():
+    from ai_assistant.service.vad import peak_dbfs
+
+    assert peak_dbfs(b"") == -99.0
+    assert peak_dbfs(quiet_frame(0)) == -99.0
+    assert -21.0 < peak_dbfs(loud_frame(3000)) < -20.0
+    assert -51.0 < peak_dbfs(quiet_frame(100)) < -50.0
+
+
+def test_quiet_utterance_is_not_passed_to_recognition():
+    """Детектор открыл реплику на шуме: распознавать нечего, ход не тратим.
+
+    На записях 07.11.2026 из 316 реплик 19 дали пустое распознавание. Порог
+    минус 40 dBFS отсекает три из них и не теряет ни одной из 297 реплик с
+    текстом (самая тихая живая «а да» это минус 36,0 dBFS).
+    """
+    seg = segmenter(pause_ms=100)
+    # Детектор считает речью любой ненулевой кадр, громкость ему безразлична.
+    seg.feed(quiet_frame() * 5)
+    events = seg.feed(silent_frame() * 5)
+    assert [e for e in events if e.kind == "utterance"] == []
+    assert seg.dropped_quiet == 1
+
+
+def test_loud_utterance_is_passed_with_its_peak():
+    seg = segmenter(pause_ms=100)
+    seg.feed(loud_frame() * 5)
+    events = seg.feed(silent_frame() * 5)
+    utterances = [e for e in events if e.kind == "utterance"]
+    assert len(utterances) == 1
+    assert -21.0 < utterances[0].peak_dbfs < -20.0
+    assert seg.dropped_quiet == 0
+
+
+def test_quiet_utterance_is_dropped_on_the_length_ceiling_too():
+    """Фильтр работает на обеих точках выдачи: по паузе и по потолку длины."""
+    from ai_assistant.service.vad import MAX_UTTERANCE_SECONDS
+
+    seg = segmenter(pause_ms=100)
+    frames = int(MAX_UTTERANCE_SECONDS * 1000 / 32) + 2
+    events = seg.feed(quiet_frame() * frames)
+    assert [e for e in events if e.kind == "utterance"] == []
+    assert seg.dropped_quiet >= 1

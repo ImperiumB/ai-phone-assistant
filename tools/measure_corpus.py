@@ -165,7 +165,7 @@ def load_examples():
 
 
 def load_records_from_db_export(kb_path, phrases_path, sc, drop, rehome):
-    """База знаний прямо из выгрузки ULTIMA.AI_KNOWLEDGE_BASE / AI_KB_PHRASES
+    """База знаний прямо из выгрузки ULTIMA.AI_KNOWLEDGE_BASE / AI_KB_TO_PHRASES
     (sqlplus, поля через табуляцию) — с теми же условиями отбора, что в 15424.
     drop — записи выкинуть, rehome — {запись: сценарий} пересадить на другой
     сценарий без уточняющего вопроса (моделируем правку до её внесения в ERП)."""
